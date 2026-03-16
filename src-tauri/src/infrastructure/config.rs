@@ -1,0 +1,989 @@
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::domain::acp::{
+    AcpAgentConfig, AcpMcpServerConfig, AcpMcpServerHttpConfig, AcpMcpServerSseConfig,
+    AcpMcpServerStdioConfig, AcpNameValuePair,
+};
+use crate::domain::settings::{
+    AppearanceSettings, GeneralSettings, LlmProviderProtocolKind, LlmSettings, OcrSettings,
+    RagSettings,
+};
+
+const CONFIG_FILE_NAME: &str = "config.toml";
+const WORKSPACE_HISTORY_FILE_NAME: &str = "workspace-history.toml";
+pub const RECENT_WORKSPACE_LIMIT: usize = 3;
+#[cfg(target_os = "macos")]
+const LEGACY_DEFAULT_OCR_SHORTCUT: &str = "Cmd+Ctrl+Shift+Space";
+#[cfg(not(target_os = "macos"))]
+const LEGACY_DEFAULT_OCR_SHORTCUT: &str = "Ctrl+Alt+Shift+Space";
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AppConfig {
+    #[serde(default)]
+    pub shortcuts: ShortcutConfig,
+    #[serde(default)]
+    pub workspace: WorkspaceConfig,
+    #[serde(default)]
+    pub general: GeneralSettings,
+    #[serde(default)]
+    pub appearance: AppearanceSettings,
+    #[serde(default)]
+    pub llm: LlmSettings,
+    #[serde(default)]
+    pub ocr: OcrSettings,
+    #[serde(default)]
+    pub rag: RagSettings,
+    #[serde(default)]
+    pub acp: AcpConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShortcutConfig {
+    /// Format: "modifiers+key", e.g., "Cmd+Shift+Space" or "Ctrl+Shift+Space"
+    pub toggle_launcher: String,
+    /// Format: "modifiers+key", e.g., "Cmd+Shift+O"
+    pub ocr_capture: String,
+}
+
+impl Default for ShortcutConfig {
+    fn default() -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            Self {
+                toggle_launcher: "Cmd+Shift+Space".to_string(),
+                ocr_capture: "Cmd+Shift+O".to_string(),
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Self {
+                toggle_launcher: "Ctrl+Shift+Space".to_string(),
+                ocr_capture: "Ctrl+Shift+O".to_string(),
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkspaceConfig {
+    pub root_path: String,
+}
+
+impl Default for WorkspaceConfig {
+    fn default() -> Self {
+        let root_path = default_workspace_root()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .to_string_lossy()
+            .into_owned();
+
+        Self { root_path }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct WorkspaceHistory {
+    pub recent_roots: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct AcpConfig {
+    #[serde(default)]
+    pub agents: Vec<AcpAgentConfig>,
+    #[serde(default)]
+    pub default_agent_id: Option<String>,
+    #[serde(default)]
+    pub mcp_servers: Vec<AcpMcpServerConfig>,
+    #[serde(default)]
+    pub saved_sessions: Vec<SavedAcpSession>,
+    #[serde(default)]
+    pub active_session_id: Option<String>,
+    #[serde(default, skip_serializing, alias = "program")]
+    legacy_program: String,
+    #[serde(default, skip_serializing, alias = "args")]
+    legacy_args: Vec<String>,
+    #[serde(default, skip_serializing, alias = "shell_command")]
+    legacy_shell_command: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedAcpSession {
+    pub session_id: String,
+    pub workspace_root: String,
+    pub title: String,
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub agent_name: String,
+    pub agent_program: String,
+    #[serde(default)]
+    pub agent_args: Vec<String>,
+    #[serde(default)]
+    pub agent_shell_command: Option<String>,
+    #[serde(default)]
+    pub mcp_servers: Vec<AcpMcpServerConfig>,
+    #[serde(default)]
+    pub last_updated_at_ms: u64,
+}
+
+impl AcpConfig {
+    fn normalize(&mut self) {
+        if self.agents.is_empty() {
+            let legacy_shell_command = self
+                .legacy_shell_command
+                .as_ref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+            let legacy_program = self.legacy_program.trim().to_string();
+
+            if legacy_shell_command.is_some()
+                || !legacy_program.is_empty()
+                || !self.legacy_args.is_empty()
+            {
+                let name = derive_agent_name(legacy_shell_command.as_deref(), &legacy_program);
+                self.agents.push(AcpAgentConfig {
+                    id: make_agent_id(&name, 0, &HashSet::new()),
+                    name,
+                    program: legacy_program,
+                    args: self.legacy_args.clone(),
+                    shell_command: legacy_shell_command,
+                    mcp_servers: Vec::new(),
+                });
+            }
+        }
+
+        let mut used_ids = HashSet::new();
+        for (index, agent) in self.agents.iter_mut().enumerate() {
+            agent.name =
+                normalize_agent_name(&agent.name, &agent.program, agent.shell_command.as_deref());
+            agent.program = agent.program.trim().to_string();
+            agent.args = agent
+                .args
+                .iter()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .collect();
+            agent.shell_command = agent
+                .shell_command
+                .as_ref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+            agent.mcp_servers.clear();
+            agent.id = make_agent_id(&agent.id, index, &used_ids);
+            used_ids.insert(agent.id.clone());
+        }
+
+        self.mcp_servers = sanitize_mcp_servers(&self.mcp_servers);
+
+        if !self
+            .default_agent_id
+            .as_ref()
+            .map(|id| self.agents.iter().any(|agent| &agent.id == id))
+            .unwrap_or(false)
+        {
+            self.default_agent_id = self.agents.first().map(|agent| agent.id.clone());
+        }
+
+        for snapshot in &mut self.saved_sessions {
+            if snapshot.agent_name.trim().is_empty() {
+                snapshot.agent_name = derive_agent_name(
+                    snapshot.agent_shell_command.as_deref(),
+                    &snapshot.agent_program,
+                );
+            }
+        }
+    }
+}
+
+impl AppConfig {
+    pub(crate) fn normalize(&mut self) {
+        self.llm.normalize();
+        self.ocr.normalize(&self.llm);
+        self.rag.normalize(&self.llm);
+        self.acp.normalize();
+    }
+}
+
+pub struct ConfigStore {
+    config_path: PathBuf,
+    workspace_history_path: PathBuf,
+    cached_config: Mutex<Option<AppConfig>>,
+    cached_workspace_history: Mutex<Option<WorkspaceHistory>>,
+}
+
+impl ConfigStore {
+    pub fn new() -> Result<Self> {
+        let config_dir = Self::config_dir()?;
+        std::fs::create_dir_all(&config_dir)?;
+        let config_path = config_dir.join(CONFIG_FILE_NAME);
+        let workspace_history_path = config_dir.join(WORKSPACE_HISTORY_FILE_NAME);
+
+        Ok(Self {
+            config_path,
+            workspace_history_path,
+            cached_config: Mutex::new(None),
+            cached_workspace_history: Mutex::new(None),
+        })
+    }
+
+    pub async fn load(&self) -> Result<AppConfig> {
+        {
+            let cached = self.cached_config.lock().unwrap();
+            if let Some(ref config) = *cached {
+                return Ok(config.clone());
+            }
+        }
+
+        if !self.config_path.exists() {
+            let default_config = AppConfig::default();
+            self.save(&default_config).await?;
+            let mut cached = self.cached_config.lock().unwrap();
+            *cached = Some(default_config.clone());
+            return Ok(default_config);
+        }
+
+        let content = tokio::fs::read_to_string(&self.config_path)
+            .await
+            .with_context(|| format!("failed to read config file: {:?}", self.config_path))?;
+
+        let mut config = parse_config_content(&content)?;
+        if migrate_legacy_shortcuts(&mut config) {
+            self.save(&config).await?;
+        }
+
+        let mut cached = self.cached_config.lock().unwrap();
+        *cached = Some(config.clone());
+        Ok(config)
+    }
+
+    pub async fn save(&self, config: &AppConfig) -> Result<()> {
+        let content = serialize_config_content(config)?;
+        safe_write(&self.config_path, &content).await?;
+
+        // Update cache
+        let mut cached = self.cached_config.lock().unwrap();
+        *cached = Some(config.clone());
+
+        Ok(())
+    }
+
+    pub async fn load_workspace_history(&self) -> Result<WorkspaceHistory> {
+        {
+            let cached = self.cached_workspace_history.lock().unwrap();
+            if let Some(ref history) = *cached {
+                return Ok(history.clone());
+            }
+        }
+
+        if !self.workspace_history_path.exists() {
+            let default_history = WorkspaceHistory::default();
+            self.save_workspace_history(&default_history).await?;
+            let mut cached = self.cached_workspace_history.lock().unwrap();
+            *cached = Some(default_history.clone());
+            return Ok(default_history);
+        }
+
+        let content = tokio::fs::read_to_string(&self.workspace_history_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to read workspace history file: {:?}",
+                    self.workspace_history_path
+                )
+            })?;
+        let history = parse_workspace_history_content(&content)?;
+
+        let mut cached = self.cached_workspace_history.lock().unwrap();
+        *cached = Some(history.clone());
+        Ok(history)
+    }
+
+    pub async fn save_workspace_history(&self, history: &WorkspaceHistory) -> Result<()> {
+        let content = serialize_workspace_history_content(history)?;
+        safe_write(&self.workspace_history_path, &content).await?;
+
+        let mut cached = self.cached_workspace_history.lock().unwrap();
+        *cached = Some(history.clone());
+        Ok(())
+    }
+
+    pub fn config_dir() -> Result<PathBuf> {
+        let config_dir = dirs::config_dir().context("failed to determine config directory")?;
+        Ok(config_dir.join("wabity"))
+    }
+}
+
+fn normalize_agent_name(name: &str, program: &str, shell_command: Option<&str>) -> String {
+    let trimmed = name.trim();
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+
+    derive_agent_name(shell_command, program)
+}
+
+impl LlmSettings {
+    fn normalize(&mut self) {
+        let mut used_ids = HashSet::new();
+        for (index, provider) in self.providers.iter_mut().enumerate() {
+            provider.name =
+                normalize_llm_provider_name(&provider.name, &provider.model, &provider.base_url);
+            provider.base_url = provider.base_url.trim().trim_end_matches('/').to_string();
+            provider.api_key = provider.api_key.trim().to_string();
+            provider.model = provider.model.trim().to_string();
+            if provider.protocol == LlmProviderProtocolKind::Embedding {
+                provider.supports_multimodal = false;
+            }
+            provider.id = make_llm_provider_id(&provider.id, &provider.name, index, &used_ids);
+            used_ids.insert(provider.id.clone());
+        }
+
+        if !self
+            .default_provider_id
+            .as_ref()
+            .map(|id| self.providers.iter().any(|provider| &provider.id == id))
+            .unwrap_or(false)
+        {
+            self.default_provider_id = self.providers.first().map(|provider| provider.id.clone());
+        }
+    }
+}
+
+impl OcrSettings {
+    fn normalize(&mut self, llm_settings: &LlmSettings) {
+        if !self
+            .llm_provider_id
+            .as_ref()
+            .map(|id| {
+                llm_settings
+                    .providers
+                    .iter()
+                    .any(|provider| &provider.id == id)
+            })
+            .unwrap_or(false)
+        {
+            self.llm_provider_id = llm_settings.default_provider_id.clone();
+        }
+    }
+}
+
+impl RagSettings {
+    fn normalize(&mut self, llm_settings: &LlmSettings) {
+        let mut seen_directories = HashSet::new();
+        self.source_directories = self
+            .source_directories
+            .iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .filter(|value| seen_directories.insert(value.clone()))
+            .collect();
+
+        let mut seen_globs = HashSet::new();
+        self.ignore_globs = self
+            .ignore_globs
+            .iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .filter(|value| seen_globs.insert(value.clone()))
+            .collect();
+
+        if !self
+            .embedding_provider_id
+            .as_ref()
+            .map(|id| {
+                llm_settings.providers.iter().any(|provider| {
+                    &provider.id == id && provider.protocol == LlmProviderProtocolKind::Embedding
+                })
+            })
+            .unwrap_or(false)
+        {
+            self.embedding_provider_id = llm_settings
+                .providers
+                .iter()
+                .find(|provider| provider.protocol == LlmProviderProtocolKind::Embedding)
+                .map(|provider| provider.id.clone());
+        }
+    }
+}
+
+fn sanitize_mcp_servers(servers: &[AcpMcpServerConfig]) -> Vec<AcpMcpServerConfig> {
+    servers.iter().map(sanitize_mcp_server).collect()
+}
+
+fn normalize_llm_provider_name(name: &str, model: &str, base_url: &str) -> String {
+    let trimmed = name.trim();
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+
+    let trimmed_model = model.trim();
+    if !trimmed_model.is_empty() {
+        return trimmed_model.to_string();
+    }
+
+    let trimmed_base_url = base_url.trim();
+    if !trimmed_base_url.is_empty() {
+        return trimmed_base_url.to_string();
+    }
+
+    "LLM Provider".to_string()
+}
+
+fn sanitize_mcp_server(server: &AcpMcpServerConfig) -> AcpMcpServerConfig {
+    match server {
+        AcpMcpServerConfig::Stdio(config) => AcpMcpServerConfig::Stdio(AcpMcpServerStdioConfig {
+            name: normalize_mcp_server_name(&config.name, Some(&config.command), None),
+            command: config.command.trim().to_string(),
+            args: config
+                .args
+                .iter()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .collect(),
+            env: sanitize_name_value_pairs(&config.env),
+        }),
+        AcpMcpServerConfig::Http(config) => AcpMcpServerConfig::Http(AcpMcpServerHttpConfig {
+            name: normalize_mcp_server_name(&config.name, None, Some(&config.url)),
+            url: config.url.trim().to_string(),
+            headers: sanitize_name_value_pairs(&config.headers),
+        }),
+        AcpMcpServerConfig::Sse(config) => AcpMcpServerConfig::Sse(AcpMcpServerSseConfig {
+            name: normalize_mcp_server_name(&config.name, None, Some(&config.url)),
+            url: config.url.trim().to_string(),
+            headers: sanitize_name_value_pairs(&config.headers),
+        }),
+    }
+}
+
+fn sanitize_name_value_pairs(pairs: &[AcpNameValuePair]) -> Vec<AcpNameValuePair> {
+    pairs
+        .iter()
+        .map(|pair| AcpNameValuePair {
+            name: pair.name.trim().to_string(),
+            value: pair.value.trim().to_string(),
+        })
+        .filter(|pair| !pair.name.is_empty())
+        .collect()
+}
+
+fn normalize_mcp_server_name(name: &str, command: Option<&str>, url: Option<&str>) -> String {
+    let trimmed = name.trim();
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+
+    if let Some(command) = command.map(str::trim).filter(|value| !value.is_empty()) {
+        let first_token = command.split_whitespace().next().unwrap_or_default();
+        let normalized = first_token
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(first_token);
+        if !normalized.is_empty() {
+            return normalized.to_string();
+        }
+    }
+
+    if let Some(url) = url.map(str::trim).filter(|value| !value.is_empty()) {
+        return url.to_string();
+    }
+
+    "MCP Server".to_string()
+}
+
+fn derive_agent_name(shell_command: Option<&str>, program: &str) -> String {
+    let command = shell_command
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(program.trim());
+    let first_token = command.split_whitespace().next().unwrap_or_default();
+    let normalized = first_token
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(first_token);
+    let lowercase = normalized.to_ascii_lowercase();
+
+    if lowercase.contains("opencode") {
+        return "OpenCode".to_string();
+    }
+    if lowercase.contains("claude-agent") {
+        return "Claude Agent".to_string();
+    }
+    if lowercase.contains("codex") {
+        return "Codex".to_string();
+    }
+    if normalized.is_empty() {
+        return "ACP Agent".to_string();
+    }
+
+    normalized.to_string()
+}
+
+fn make_agent_id(seed: &str, index: usize, used_ids: &HashSet<String>) -> String {
+    let mut base = seed
+        .trim()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    base = base.trim_matches('-').to_string();
+    if base.is_empty() {
+        base = format!("agent-{}", index + 1);
+    }
+
+    let mut candidate = base.clone();
+    let mut suffix = 2_u32;
+    while used_ids.contains(&candidate) {
+        candidate = format!("{base}-{suffix}");
+        suffix = suffix.saturating_add(1);
+    }
+    candidate
+}
+
+fn make_llm_provider_id(
+    current_id: &str,
+    name: &str,
+    index: usize,
+    used_ids: &HashSet<String>,
+) -> String {
+    let seed = if current_id.trim().is_empty() {
+        name
+    } else {
+        current_id
+    };
+
+    let mut base = seed
+        .trim()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    base = base.trim_matches('-').to_string();
+    if base.is_empty() {
+        base = format!("llm-provider-{}", index + 1);
+    }
+
+    let mut candidate = base.clone();
+    let mut suffix = 2_u32;
+    while used_ids.contains(&candidate) {
+        candidate = format!("{base}-{suffix}");
+        suffix = suffix.saturating_add(1);
+    }
+    candidate
+}
+
+fn parse_config_content(content: &str) -> Result<AppConfig> {
+    let mut config: AppConfig =
+        toml::from_str(content).with_context(|| "failed to parse config file")?;
+    config.normalize();
+    Ok(config)
+}
+
+fn serialize_config_content(config: &AppConfig) -> Result<String> {
+    toml::to_string_pretty(config).with_context(|| "failed to serialize config")
+}
+
+fn parse_workspace_history_content(content: &str) -> Result<WorkspaceHistory> {
+    toml::from_str(content).with_context(|| "failed to parse workspace history file")
+}
+
+fn serialize_workspace_history_content(history: &WorkspaceHistory) -> Result<String> {
+    toml::to_string_pretty(history).with_context(|| "failed to serialize workspace history")
+}
+
+fn migrate_legacy_shortcuts(config: &mut AppConfig) -> bool {
+    if config.shortcuts.ocr_capture != LEGACY_DEFAULT_OCR_SHORTCUT {
+        return false;
+    }
+
+    config.shortcuts.ocr_capture = ShortcutConfig::default().ocr_capture;
+    true
+}
+
+pub async fn safe_write(path: &Path, content: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("write target must have parent directory")?;
+    tokio::fs::create_dir_all(parent)
+        .await
+        .with_context(|| format!("failed to create config directory: {}", parent.display()))?;
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temp_path = parent.join(format!(
+        ".{}.{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("config"),
+        std::process::id(),
+        unique
+    ));
+
+    tokio::fs::write(&temp_path, content)
+        .await
+        .with_context(|| format!("failed to write temp file: {}", temp_path.display()))?;
+
+    match tokio::fs::rename(&temp_path, path).await {
+        Ok(()) => Ok(()),
+        Err(rename_error) => {
+            #[cfg(target_os = "windows")]
+            {
+                if path.exists() {
+                    tokio::fs::remove_file(path).await.with_context(|| {
+                        format!("failed to replace existing file: {}", path.display())
+                    })?;
+                    tokio::fs::rename(&temp_path, path).await.with_context(|| {
+                        format!("failed to move temp file into place: {}", path.display())
+                    })?;
+                    return Ok(());
+                }
+            }
+
+            let _ = tokio::fs::remove_file(&temp_path).await;
+            Err(rename_error)
+                .with_context(|| format!("failed to move temp file into place: {}", path.display()))
+        }
+    }
+}
+
+pub fn normalize_workspace_root(path: impl AsRef<Path>) -> Result<PathBuf> {
+    let path = path.as_ref();
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("failed to determine current directory")?
+            .join(path)
+    };
+
+    let normalized = candidate
+        .canonicalize()
+        .with_context(|| format!("failed to resolve workspace path: {}", candidate.display()))?;
+
+    if !normalized.is_dir() {
+        anyhow::bail!(
+            "workspace path is not a directory: {}",
+            normalized.display()
+        );
+    }
+
+    Ok(normalized)
+}
+
+pub fn default_workspace_root() -> Option<PathBuf> {
+    home_workspace_root().or_else(|| std::env::current_dir().ok())
+}
+
+pub fn home_workspace_root() -> Option<PathBuf> {
+    dirs::home_dir().and_then(|path| normalize_workspace_root(&path).ok())
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub fn display_home_as_tilde() -> bool {
+    true
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn display_home_as_tilde() -> bool {
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn test_shortcut_config_default() {
+        let config = ShortcutConfig::default();
+        #[cfg(target_os = "macos")]
+        assert_eq!(config.toggle_launcher, "Cmd+Shift+Space");
+        #[cfg(target_os = "macos")]
+        assert_eq!(config.ocr_capture, "Cmd+Shift+O");
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(config.toggle_launcher, "Ctrl+Shift+Space");
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(config.ocr_capture, "Ctrl+Shift+O");
+    }
+
+    #[test]
+    fn normalize_workspace_root_rejects_missing_directory() {
+        let missing = std::env::temp_dir().join("wabity-config-missing");
+        let result = normalize_workspace_root(&missing);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn safe_write_replaces_existing_file_atomically() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("wabity-config-safe-write-{unique}"));
+        let file_path = root.join("config.toml");
+
+        safe_write(&file_path, "alpha").await.expect("first write");
+        safe_write(&file_path, "beta").await.expect("second write");
+
+        let content = tokio::fs::read_to_string(&file_path)
+            .await
+            .expect("read config");
+        assert_eq!(content, "beta");
+
+        let _ = tokio::fs::remove_file(&file_path).await;
+        let _ = tokio::fs::remove_dir_all(&root).await;
+    }
+
+    #[test]
+    fn workspace_history_round_trips_as_toml() {
+        let history = WorkspaceHistory {
+            recent_roots: vec!["/tmp/demo".to_string()],
+        };
+        let content = serialize_workspace_history_content(&history)
+            .expect("history serialization should succeed");
+        let parsed =
+            parse_workspace_history_content(&content).expect("history parsing should succeed");
+
+        assert_eq!(parsed.recent_roots, history.recent_roots);
+    }
+
+    #[test]
+    fn app_config_round_trips_as_toml() {
+        let mut config = AppConfig::default();
+        config.llm.providers = vec![crate::domain::settings::LlmProviderConfig {
+            id: "openai".to_string(),
+            name: "OpenAI".to_string(),
+            protocol: LlmProviderProtocolKind::Chat,
+            base_url: "https://api.openai.com/v1".to_string(),
+            api_key: "sk-test".to_string(),
+            model: "gpt-4.1-mini".to_string(),
+            supports_multimodal: true,
+        }];
+        config.llm.default_provider_id = Some("openai".to_string());
+        config.ocr.provider = crate::domain::settings::OcrProviderKind::LlmOcr;
+        config.ocr.llm_provider_id = Some("openai".to_string());
+        config.rag.source_directories = vec!["/tmp/workspace".to_string()];
+        config.rag.ignore_globs = vec!["**/*.png".to_string()];
+        config.acp.agents.push(AcpAgentConfig {
+            id: "codex".to_string(),
+            name: "Codex".to_string(),
+            program: "codex-acp".to_string(),
+            args: Vec::new(),
+            shell_command: Some("codex-acp".to_string()),
+            mcp_servers: Vec::new(),
+        });
+        config.acp.mcp_servers = vec![
+            AcpMcpServerConfig::Stdio(AcpMcpServerStdioConfig {
+                name: "filesystem".to_string(),
+                command: "npx".to_string(),
+                args: vec![
+                    "-y".to_string(),
+                    "@modelcontextprotocol/server-filesystem".to_string(),
+                ],
+                env: vec![AcpNameValuePair {
+                    name: "ROOT".to_string(),
+                    value: "/tmp".to_string(),
+                }],
+            }),
+            AcpMcpServerConfig::Http(AcpMcpServerHttpConfig {
+                name: "remote".to_string(),
+                url: "https://example.com/mcp".to_string(),
+                headers: vec![AcpNameValuePair {
+                    name: "Authorization".to_string(),
+                    value: "Bearer token".to_string(),
+                }],
+            }),
+        ];
+        let content = serialize_config_content(&config).expect("toml serialization should succeed");
+        let parsed = parse_config_content(&content).expect("toml parsing should succeed");
+
+        assert_eq!(
+            parsed.shortcuts.toggle_launcher,
+            config.shortcuts.toggle_launcher
+        );
+        assert_eq!(parsed.general.language, config.general.language);
+        assert_eq!(parsed.appearance.theme, config.appearance.theme);
+        assert_eq!(parsed.llm, config.llm);
+        assert_eq!(parsed.ocr.provider, config.ocr.provider);
+        assert_eq!(parsed.ocr.llm_provider_id, config.ocr.llm_provider_id);
+        assert_eq!(parsed.rag, config.rag);
+        assert_eq!(parsed.acp.mcp_servers, config.acp.mcp_servers);
+    }
+
+    #[test]
+    fn parse_config_content_fills_missing_shortcut_fields_from_defaults() {
+        let content = r#"
+[shortcuts]
+toggle_launcher = "Cmd+Shift+Space"
+
+[workspace]
+root_path = "/Users/wweir"
+
+[general]
+autoStart = false
+showInDock = true
+language = "zh-CN"
+
+[appearance]
+theme = "auto"
+fontSize = "medium"
+
+[acp]
+program = ""
+args = []
+saved_sessions = []
+"#;
+
+        let parsed = parse_config_content(content).expect("legacy config should parse");
+
+        #[cfg(target_os = "macos")]
+        assert_eq!(parsed.shortcuts.ocr_capture, "Cmd+Shift+O");
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(parsed.shortcuts.ocr_capture, "Ctrl+Shift+O");
+        assert_eq!(parsed.ocr, OcrSettings::default());
+        assert_eq!(parsed.llm, LlmSettings::default());
+        assert!(parsed.acp.agents.is_empty());
+    }
+
+    #[test]
+    fn parse_config_content_migrates_legacy_acp_agent() {
+        let content = r#"
+[acp]
+program = "codex-acp"
+args = []
+shell_command = "codex-acp"
+saved_sessions = []
+"#;
+
+        let parsed = parse_config_content(content).expect("legacy acp agent should parse");
+
+        assert_eq!(parsed.acp.agents.len(), 1);
+        assert_eq!(parsed.acp.agents[0].name, "Codex");
+        assert_eq!(parsed.acp.agents[0].program, "codex-acp");
+        assert_eq!(
+            parsed.acp.default_agent_id.as_deref(),
+            Some(parsed.acp.agents[0].id.as_str())
+        );
+    }
+
+    #[test]
+    fn migrate_legacy_shortcuts_updates_old_default_ocr_shortcut() {
+        let mut config = AppConfig::default();
+        config.shortcuts.ocr_capture = LEGACY_DEFAULT_OCR_SHORTCUT.to_string();
+
+        assert!(migrate_legacy_shortcuts(&mut config));
+        #[cfg(target_os = "macos")]
+        assert_eq!(config.shortcuts.ocr_capture, "Cmd+Shift+O");
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(config.shortcuts.ocr_capture, "Ctrl+Shift+O");
+    }
+
+    #[test]
+    fn migrate_legacy_shortcuts_keeps_custom_ocr_shortcut() {
+        let mut config = AppConfig::default();
+        config.shortcuts.ocr_capture = "Cmd+Alt+O".to_string();
+
+        assert!(!migrate_legacy_shortcuts(&mut config));
+        assert_eq!(config.shortcuts.ocr_capture, "Cmd+Alt+O");
+    }
+
+    #[test]
+    fn parse_config_content_normalizes_default_llm_provider_id() {
+        let content = r#"
+[llm]
+defaultProviderId = "missing"
+
+[[llm.providers]]
+id = ""
+name = "OpenAI"
+protocol = "openai_compatible"
+baseUrl = "https://api.openai.com/v1/"
+apiKey = ""
+model = "gpt-4.1-mini"
+supportsMultimodal = true
+"#;
+
+        let parsed = parse_config_content(content).expect("llm config should parse");
+
+        assert_eq!(parsed.llm.providers.len(), 1);
+        assert_eq!(parsed.llm.providers[0].id, "openai");
+        assert_eq!(
+            parsed.llm.providers[0].base_url,
+            "https://api.openai.com/v1"
+        );
+        assert_eq!(parsed.llm.default_provider_id.as_deref(), Some("openai"));
+        assert_eq!(parsed.ocr.llm_provider_id.as_deref(), Some("openai"));
+    }
+
+    #[test]
+    fn normalize_rag_settings_deduplicates_inputs_and_repairs_provider_reference() {
+        let mut config = AppConfig::default();
+        config.llm.providers = vec![
+            crate::domain::settings::LlmProviderConfig {
+                id: "chat".to_string(),
+                name: "Chat".to_string(),
+                protocol: LlmProviderProtocolKind::Chat,
+                base_url: "https://api.example.com/v1".to_string(),
+                api_key: String::new(),
+                model: "gpt-4.1-mini".to_string(),
+                supports_multimodal: true,
+            },
+            crate::domain::settings::LlmProviderConfig {
+                id: "embedding".to_string(),
+                name: "Embedding".to_string(),
+                protocol: LlmProviderProtocolKind::Embedding,
+                base_url: "https://api.example.com/v1".to_string(),
+                api_key: String::new(),
+                model: "text-embedding-3-small".to_string(),
+                supports_multimodal: false,
+            },
+        ];
+        config.rag.source_directories = vec![
+            " /tmp/workspace ".to_string(),
+            "/tmp/workspace".to_string(),
+            "/tmp/notes".to_string(),
+        ];
+        config.rag.ignore_globs = vec![
+            " **/*.png ".to_string(),
+            "**/*.png".to_string(),
+            " **/node_modules/** ".to_string(),
+        ];
+        config.rag.embedding_provider_id = Some("missing".to_string());
+
+        config.normalize();
+
+        assert_eq!(
+            config.rag.source_directories,
+            vec!["/tmp/workspace".to_string(), "/tmp/notes".to_string()]
+        );
+        assert_eq!(
+            config.rag.ignore_globs,
+            vec!["**/*.png".to_string(), "**/node_modules/**".to_string()]
+        );
+        assert_eq!(
+            config.rag.embedding_provider_id.as_deref(),
+            Some("embedding")
+        );
+    }
+}

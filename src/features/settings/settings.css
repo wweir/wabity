@@ -1,0 +1,1051 @@
+.settings-shell {
+	min-width: 520px;
+}
+
+.settings-frame {
+	--frame-background: rgba(255, 255, 255, 0.86);
+	--frame-overlay: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(247, 247, 242, 0.82));
+	--frame-highlight-border: rgba(255, 255, 255, 0.75);
+	min-width: 520px;
+	width: 920px;
+	max-width: 920px;
+	padding: 0;
+	box-shadow: none;
+	display: flex;
+	flex-direction: column;
+}
+
+.settings-header {
+	position: relative;
+	z-index: 1;
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 18px 20px 14px;
+	border-bottom: 1px solid rgba(233, 233, 227, 0.95);
+}
+
+.settings-header-drag-zone {
+	min-width: 24px;
+	min-height: 24px;
+	flex: 1 1 48px;
+	cursor: grab;
+}
+
+.settings-header-drag-zone:active {
+	cursor: grabbing;
+}
+
+.settings-title {
+	margin: 0;
+	flex-shrink: 0;
+	font-size: 18px;
+	font-weight: 600;
+	color: #131313;
+}
+
+.settings-back-button,
+.settings-close-button {
+	padding: 8px 14px;
+	font-size: 13px;
+}
+
+.settings-content {
+	position: relative;
+	z-index: 1;
+	flex: 1 1 auto;
+	min-height: 0;
+	padding: 16px 20px 20px;
+	overflow-y: auto;
+}
+
+.settings-banner {
+	padding: 12px 14px;
+	border-radius: 14px;
+	font-size: 12px;
+	line-height: 1.45;
+	margin-bottom: 14px;
+}
+
+.settings-nav {
+	display: grid;
+	gap: 8px;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	margin-bottom: 18px;
+}
+
+.settings-nav-button {
+	--outlined-background: rgba(248, 249, 244, 0.92);
+	--outlined-color: #5b6056;
+	--outlined-radius: 14px;
+	padding: 10px 12px;
+	font-size: 12px;
+	font-weight: 600;
+}
+
+.settings-nav-button-active {
+	--outlined-border: rgba(33, 38, 31, 0.14);
+	--outlined-background: rgba(33, 38, 31, 0.92);
+	--outlined-background-hover: rgba(25, 28, 23, 0.94);
+	--outlined-color: #f7f8f3;
+}
+
+.settings-section {
+	margin-bottom: 24px;
+}
+
+.settings-section:last-child {
+	margin-bottom: 0;
+}
+
+.settings-section-title {
+	margin: 0 0 12px;
+	font-size: 13px;
+	font-weight: 600;
+	color: #74746d;
+	text-transform: uppercase;
+	letter-spacing: 0.5px;
+}
+
+.settings-section-kicker {
+	color: #8a8f82;
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+}
+
+.settings-subsection-title {
+	margin: 0;
+	color: #1d211c;
+	font-size: 18px;
+	font-weight: 600;
+}
+
+.settings-item {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 12px 0;
+	border-bottom: 1px solid rgba(233, 233, 227, 0.5);
+}
+
+.settings-item-stacked {
+	align-items: stretch;
+	flex-direction: column;
+}
+
+.settings-inline-field-row {
+	display: grid;
+	gap: 12px;
+	grid-template-columns: minmax(0, 1fr) minmax(220px, auto);
+	align-items: end;
+}
+
+.settings-inline-field {
+	display: grid;
+	gap: 8px;
+	min-width: 0;
+}
+
+.settings-rag-summary-grid {
+	display: grid;
+	gap: 6px;
+	word-break: break-word;
+}
+
+.settings-item:last-child {
+	border-bottom: none;
+}
+
+.settings-label {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	width: 100%;
+	font-size: 14px;
+	color: #131313;
+	cursor: pointer;
+}
+
+.settings-label-stacked {
+	display: grid;
+	gap: 8px;
+	align-items: stretch;
+}
+
+.settings-toggle {
+	appearance: none;
+	width: 44px;
+	height: 24px;
+	background: rgba(200, 200, 195, 0.5);
+	border-radius: 12px;
+	position: relative;
+	cursor: pointer;
+	transition: background 0.2s ease;
+}
+
+.settings-toggle::after {
+	content: "";
+	position: absolute;
+	top: 2px;
+	left: 2px;
+	width: 20px;
+	height: 20px;
+	background: white;
+	border-radius: 50%;
+	transition: transform 0.2s ease;
+	box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+}
+
+.settings-toggle:checked {
+	background: #007aff;
+}
+
+.settings-toggle:checked::after {
+	transform: translateX(20px);
+}
+
+.settings-select {
+	text-align: right;
+	cursor: pointer;
+}
+
+.settings-input {
+	text-align: left;
+	cursor: text;
+}
+
+.settings-textarea {
+	width: 100%;
+	min-width: 0;
+	resize: vertical;
+	line-height: 1.45;
+}
+
+.settings-input-wide {
+	width: 100%;
+	min-width: 0;
+	text-align: left;
+}
+
+.settings-combobox {
+	position: relative;
+}
+
+.settings-combobox .settings-input {
+	padding-right: 34px;
+}
+
+.settings-combobox-toggle {
+	position: absolute;
+	top: 50%;
+	right: 8px;
+	border: 0;
+	background: transparent;
+	color: #7d8178;
+	font-size: 11px;
+	cursor: pointer;
+	transform: translateY(-50%);
+}
+
+.settings-combobox-panel {
+	position: absolute;
+	top: calc(100% + 8px);
+	left: 0;
+	right: 0;
+	--floating-z: 20;
+	--floating-gap: 6px;
+	--floating-padding: 8px;
+	--floating-radius: 12px;
+	--floating-background: rgba(251, 251, 247, 0.98);
+	--floating-shadow: 0 12px 24px rgba(29, 32, 27, 0.12);
+}
+
+.settings-combobox-option {
+	display: grid;
+	gap: 2px;
+	padding: 8px 10px;
+	border: 0;
+	border-radius: 10px;
+	background: rgba(243, 244, 238, 0.92);
+	cursor: pointer;
+	text-align: left;
+}
+
+.settings-combobox-option:hover {
+	background: rgba(233, 235, 227, 0.96);
+}
+
+.settings-agent-preset-row {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.settings-agent-preset-row-inline {
+	width: 100%;
+}
+
+.settings-acp-overview {
+	--card-border: rgba(226, 228, 220, 0.9);
+	--card-radius: 18px;
+	--card-background:
+		radial-gradient(circle at top right, rgba(255, 214, 167, 0.2), transparent 32%),
+		rgba(251, 251, 247, 0.92);
+	display: grid;
+	gap: 14px;
+	padding: 14px 16px;
+}
+
+.settings-acp-overview-copy {
+	display: grid;
+	gap: 6px;
+}
+
+.settings-acp-metrics {
+	display: grid;
+	gap: 8px;
+}
+
+.settings-status-chip {
+	display: inline-flex;
+	align-items: center;
+	min-height: 28px;
+	padding: 6px 10px;
+	border-radius: 999px;
+	background: rgba(239, 241, 233, 0.96);
+	color: #4e534a;
+	font-size: 12px;
+}
+
+.settings-status-chip-strong {
+	background: rgba(33, 38, 31, 0.9);
+	color: #f7f8f3;
+}
+
+.settings-agent-template-grid {
+	display: grid;
+	gap: 10px;
+	grid-template-columns: 1fr;
+}
+
+.settings-agent-template {
+	display: grid;
+	gap: 4px;
+	padding: 12px 14px;
+	border: 1px solid rgba(226, 228, 220, 0.9);
+	border-radius: 16px;
+	background: rgba(249, 249, 245, 0.92);
+	color: #232720;
+	text-align: left;
+}
+
+.settings-agent-template-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.settings-agent-template:hover {
+	background: rgba(245, 246, 240, 0.98);
+}
+
+.settings-agent-template-active {
+	border-color: rgba(189, 196, 180, 0.94);
+	background: rgba(241, 243, 236, 0.96);
+}
+
+.settings-agent-template-label {
+	font-size: 13px;
+	font-weight: 600;
+}
+
+.settings-agent-template-state {
+	color: #58604f;
+	font-size: 11px;
+	font-weight: 600;
+}
+
+.settings-agent-template-meta {
+	color: #73786d;
+	font-size: 11px;
+}
+
+.settings-acp-shell {
+	display: grid;
+	gap: 14px;
+	margin-top: 14px;
+	grid-template-columns: minmax(240px, 280px) minmax(0, 1fr);
+}
+
+.settings-acp-form-layout {
+	display: grid;
+	gap: 14px;
+	margin-top: 14px;
+	grid-template-columns: 1fr;
+	align-items: start;
+}
+
+.settings-acp-sidebar,
+.settings-acp-detail,
+.settings-editor-card {
+	--card-border: rgba(226, 228, 220, 0.94);
+	--card-radius: 18px;
+	--card-background: rgba(250, 250, 246, 0.92);
+	display: grid;
+	gap: 12px;
+	padding: 14px;
+}
+
+.settings-editor-card-subtle {
+	background: rgba(245, 246, 241, 0.92);
+}
+
+.settings-acp-sidebar-header,
+.settings-acp-detail-header,
+.settings-editor-card-header {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 12px;
+}
+
+.settings-acp-sidebar-copy,
+.settings-acp-detail-copy {
+	display: grid;
+	gap: 6px;
+}
+
+.settings-acp-sidebar-secondary {
+	align-self: start;
+}
+
+.settings-button-compact {
+	padding: 7px 12px;
+	font-size: 12px;
+}
+
+.settings-agent-preset {
+	--button-background: rgba(240, 241, 234, 0.96);
+	--button-color: #383d34;
+	width: 100%;
+	padding: 7px 10px;
+	font-size: 12px;
+}
+
+.settings-agent-list {
+	display: grid;
+	gap: 12px;
+}
+
+.settings-agent-list-master {
+	gap: 10px;
+}
+
+.settings-agent-list-compact {
+	grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.settings-agent-list-item,
+.settings-mcp-list-item {
+	display: grid;
+	gap: 10px;
+	padding: 10px;
+	border: 1px solid rgba(226, 228, 220, 0.92);
+	border-radius: 16px;
+	background: rgba(247, 248, 242, 0.92);
+}
+
+.settings-agent-list-item-selected,
+.settings-mcp-list-item-selected {
+	border-color: rgba(33, 38, 31, 0.18);
+	background: rgba(241, 243, 236, 0.95);
+}
+
+.settings-agent-list-item-invalid,
+.settings-mcp-list-item-invalid {
+	border-color: rgba(220, 166, 154, 0.88);
+	background: rgba(249, 242, 239, 0.95);
+}
+
+.settings-agent-list-item-main,
+.settings-mcp-list-item-main {
+	display: grid;
+	gap: 6px;
+	border: 0;
+	background: transparent;
+	padding: 0;
+	text-align: left;
+	cursor: pointer;
+}
+
+.settings-agent-card {
+	--card-border: rgba(226, 228, 220, 0.94);
+	--card-radius: 16px;
+	--card-background: rgba(250, 250, 246, 0.92);
+	display: grid;
+	gap: 12px;
+	padding: 12px;
+}
+
+.settings-agent-card-invalid {
+	border-color: rgba(220, 166, 154, 0.9);
+	background: rgba(251, 246, 244, 0.96);
+}
+
+.settings-agent-card-header {
+	display: flex;
+	align-items: stretch;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.settings-agent-title-wrap {
+	display: grid;
+	gap: 4px;
+	min-width: 0;
+}
+
+.settings-agent-title-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+.settings-agent-name {
+	color: #1d211c;
+	font-size: 14px;
+	font-weight: 600;
+}
+
+.settings-agent-command-preview {
+	color: #565b52;
+	font-size: 11px;
+	overflow-wrap: anywhere;
+}
+
+.settings-agent-meta-row {
+	display: grid;
+	gap: 10px;
+}
+
+.settings-agent-meta {
+	color: #7b8075;
+	font-size: 11px;
+}
+
+.settings-inline-actions {
+	display: flex;
+	align-items: stretch;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.settings-agent-secondary {
+	--button-background: rgba(240, 241, 234, 0.96);
+	--button-color: #3e443a;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 100%;
+	padding: 6px 10px;
+	font-size: 12px;
+}
+
+.settings-agent-remove {
+	--button-background: rgba(236, 222, 217, 0.9);
+	--button-background-hover: rgba(229, 212, 206, 0.96);
+	--button-color: #7a4a3d;
+	width: 100%;
+	padding: 6px 10px;
+	font-size: 12px;
+}
+
+.settings-agent-fields {
+	display: grid;
+	gap: 10px;
+}
+
+.settings-acp-preset-layout {
+	display: grid;
+	gap: 14px;
+	grid-template-columns: minmax(180px, 0.72fr) minmax(400px, 1.28fr);
+	align-items: start;
+}
+
+.settings-acp-preset-controls {
+	display: grid;
+	min-width: 0;
+}
+
+.settings-acp-preset-panel {
+	--card-border: rgba(225, 227, 218, 0.96);
+	--card-radius: 14px;
+	--card-background: linear-gradient(180deg, rgba(250, 250, 246, 0.98), rgba(244, 245, 239, 0.94));
+	--card-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+	display: grid;
+	gap: 10px;
+	padding: 14px;
+}
+
+.settings-acp-preset-kicker {
+	display: inline-flex;
+	align-items: center;
+	width: fit-content;
+	min-height: 22px;
+	padding: 0 8px;
+	border-radius: 999px;
+	background: rgba(233, 236, 225, 0.96);
+	color: #586052;
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.02em;
+}
+
+.settings-acp-preset-label {
+	font-size: 12px;
+	font-weight: 600;
+	color: #454c41;
+}
+
+.settings-acp-preset-action {
+	width: 100%;
+}
+
+.settings-acp-empty-actions {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin-top: 8px;
+}
+
+.settings-install-guide {
+	display: grid;
+	gap: 6px;
+	align-content: start;
+	min-width: 0;
+}
+
+.settings-install-guide-card {
+	--card-border: rgba(224, 226, 218, 0.96);
+	--card-radius: 14px;
+	--card-background: linear-gradient(180deg, rgba(247, 248, 243, 0.96), rgba(241, 243, 236, 0.92));
+	--card-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+	padding: 14px;
+}
+
+.settings-install-guide-list {
+	display: block;
+}
+
+.settings-install-guide-summary {
+	margin: 0;
+	color: #40463b;
+	font-size: 13px;
+	line-height: 1.5;
+}
+
+.settings-text-link {
+	display: inline;
+	padding: 0;
+	border: 0;
+	background: transparent;
+	color: #385f86;
+	font: inherit;
+	text-decoration: underline;
+	text-underline-offset: 2px;
+	cursor: pointer;
+}
+
+.settings-text-link:hover {
+	color: #244766;
+}
+
+.settings-install-guide-item {
+	display: grid;
+	gap: 4px;
+	padding: 8px 10px;
+	border: 1px solid rgba(226, 228, 220, 0.94);
+	border-radius: 12px;
+	background: rgba(245, 246, 240, 0.88);
+}
+
+.settings-install-guide-item-title {
+	color: #485046;
+	font-size: 12px;
+	font-weight: 600;
+}
+
+.settings-install-guide-command {
+	display: block;
+	padding: 10px 12px;
+	border: 1px solid rgba(219, 222, 212, 0.96);
+	border-radius: 12px;
+	background: rgba(252, 252, 248, 0.96);
+	color: #2f362c;
+	font-size: 11px;
+	line-height: 1.45;
+	overflow-wrap: anywhere;
+}
+
+@media (max-width: 760px) {
+	.settings-acp-preset-layout {
+		grid-template-columns: 1fr;
+	}
+}
+
+.settings-agent-mcp {
+	display: grid;
+	gap: 10px;
+}
+
+.settings-agent-mcp-header {
+	display: flex;
+	align-items: stretch;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.settings-agent-mcp-title {
+	font-size: 13px;
+	font-weight: 600;
+	color: #4e534a;
+}
+
+.settings-mcp-list {
+	display: grid;
+	gap: 10px;
+}
+
+.settings-mcp-list-master {
+	gap: 10px;
+}
+
+.settings-mcp-list-compact {
+	grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.settings-mcp-card {
+	--card-border: rgba(226, 228, 220, 0.9);
+	--card-radius: 14px;
+	--card-background: rgba(242, 243, 237, 0.92);
+	display: grid;
+	gap: 10px;
+	padding: 12px;
+}
+
+.settings-mcp-card-invalid {
+	border-color: rgba(220, 166, 154, 0.88);
+	background: rgba(249, 242, 239, 0.95);
+}
+
+.settings-mcp-badge {
+	display: inline-flex;
+	align-items: center;
+	padding: 4px 8px;
+	border-radius: 999px;
+	background: rgba(230, 233, 223, 0.95);
+	color: #50564a;
+	font-size: 11px;
+	text-transform: uppercase;
+}
+
+.settings-empty-panel {
+	--card-border: rgba(212, 215, 205, 0.95);
+	--card-radius: 16px;
+	--card-background: rgba(247, 248, 242, 0.8);
+	display: grid;
+	gap: 4px;
+	padding: 14px 16px;
+	border-style: dashed;
+}
+
+.settings-empty-panel-subtle {
+	padding: 12px 14px;
+}
+
+.settings-acp-savebar {
+	--card-border: rgba(226, 228, 220, 0.94);
+	--card-radius: 18px;
+	--card-background: rgba(252, 252, 248, 0.96);
+	--card-shadow: 0 -6px 20px rgba(29, 32, 27, 0.06);
+	position: sticky;
+	bottom: 0;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 14px;
+}
+
+.settings-acp-savebar-copy {
+	display: grid;
+	gap: 4px;
+}
+
+.settings-acp-savebar-actions {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-shrink: 0;
+}
+
+.settings-empty-title {
+	color: #232720;
+	font-size: 13px;
+}
+
+.settings-validation-box {
+	padding: 12px 14px;
+	border-radius: 14px;
+	font-size: 12px;
+	line-height: 1.45;
+}
+
+.settings-issue-list {
+	display: grid;
+	gap: 4px;
+	margin: 0;
+	padding-left: 18px;
+	color: #8b3f32;
+	font-size: 12px;
+}
+
+.settings-combobox-option-label {
+	color: #232720;
+	font-size: 12px;
+	font-weight: 600;
+}
+
+.settings-combobox-option-meta {
+	color: #6d7168;
+	font-size: 11px;
+}
+
+.settings-help-text {
+	margin-top: 8px;
+	color: #74746d;
+	font-size: 12px;
+	line-height: 1.45;
+}
+
+.settings-help-text-tight {
+	margin-top: 0;
+}
+
+.settings-inline-code {
+	display: inline-block;
+	padding: 1px 6px;
+	border-radius: 999px;
+	background: rgba(238, 240, 233, 0.96);
+	color: #3f463c;
+	font-size: 11px;
+	overflow-wrap: anywhere;
+}
+
+.settings-skill-table-wrap {
+	overflow-x: auto;
+	border: 1px solid rgba(226, 228, 220, 0.92);
+	border-radius: 16px;
+	background: rgba(246, 247, 241, 0.92);
+}
+
+.settings-skill-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 13px;
+	color: #2f342c;
+}
+
+.settings-skill-table th,
+.settings-skill-table td {
+	padding: 10px 12px;
+	border-bottom: 1px solid rgba(226, 228, 220, 0.92);
+	text-align: left;
+	vertical-align: top;
+}
+
+.settings-skill-table thead th {
+	background: rgba(239, 241, 233, 0.96);
+	color: #4d5449;
+	font-size: 12px;
+	font-weight: 600;
+}
+
+.settings-skill-table tbody th {
+	width: 132px;
+	color: #697065;
+	font-size: 12px;
+	font-weight: 600;
+	background: rgba(241, 243, 236, 0.86);
+}
+
+.settings-skill-table tr:last-child th,
+.settings-skill-table tr:last-child td {
+	border-bottom: 0;
+}
+
+.settings-skill-table td {
+	overflow-wrap: anywhere;
+}
+
+.settings-skill-tree-panel {
+	--card-border: rgba(226, 228, 220, 0.92);
+	--card-radius: 16px;
+	--card-background: rgba(246, 247, 241, 0.88);
+	display: grid;
+	gap: 8px;
+	padding: 12px;
+}
+
+.settings-skill-tree-directory {
+	display: grid;
+	gap: 8px;
+}
+
+.settings-skill-tree-summary {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	cursor: pointer;
+	list-style: none;
+	color: #283024;
+	font-size: 13px;
+	font-weight: 600;
+}
+
+.settings-skill-tree-summary::-webkit-details-marker {
+	display: none;
+}
+
+.settings-skill-tree-caret {
+	color: #6b7368;
+	font-size: 11px;
+}
+
+.settings-skill-tree-directory:not([open])
+	> .settings-skill-tree-summary
+	.settings-skill-tree-caret {
+	transform: rotate(-90deg);
+}
+
+.settings-skill-tree-children {
+	display: grid;
+	gap: 6px;
+	padding-left: 14px;
+	border-left: 1px solid rgba(217, 220, 210, 0.96);
+}
+
+.settings-skill-tree-file {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	color: #464d43;
+	font-size: 12px;
+	overflow-wrap: anywhere;
+}
+
+.settings-skill-tree-bullet {
+	color: #7b8178;
+}
+
+.settings-select:focus,
+.settings-input:focus,
+.settings-textarea:focus {
+	outline: none;
+	border-color: #007aff;
+}
+
+.settings-input.recording {
+	animation: pulse 1s infinite;
+	border-color: #007aff;
+	background: rgba(0, 122, 255, 0.1);
+}
+
+@keyframes pulse {
+	0% {
+		box-shadow: 0 0 0 0 rgba(0, 122, 255, 0.4);
+	}
+	70% {
+		box-shadow: 0 0 0 6px rgba(0, 122, 255, 0);
+	}
+	100% {
+		box-shadow: 0 0 0 0 rgba(0, 122, 255, 0);
+	}
+}
+
+.settings-button {
+	--button-background: rgba(243, 243, 239, 0.92);
+	--button-color: #5f5f58;
+	--button-radius: 8px;
+	padding: 8px 16px;
+	font-size: 13px;
+}
+
+.settings-agent-remove-inline,
+.settings-agent-remove-compact {
+	width: auto;
+}
+
+.settings-info-label {
+	font-size: 14px;
+	color: #131313;
+}
+
+.settings-info-value {
+	font-size: 14px;
+	color: #74746d;
+}
+
+@media (max-width: 720px) {
+	.settings-nav {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.settings-shell {
+		min-width: 100%;
+	}
+
+	.settings-frame {
+		--radius-frame: 22px;
+		min-width: auto;
+		max-width: 100%;
+	}
+
+	.settings-acp-shell {
+		grid-template-columns: 1fr;
+	}
+
+	.settings-acp-sidebar-header,
+	.settings-acp-detail-header,
+	.settings-editor-card-header,
+	.settings-acp-savebar {
+		flex-direction: column;
+	}
+
+	.settings-acp-savebar-actions {
+		width: 100%;
+	}
+
+	.settings-acp-preset-controls {
+		grid-template-columns: 1fr;
+	}
+
+	.settings-inline-actions {
+		width: 100%;
+	}
+
+	.settings-inline-field-row {
+		grid-template-columns: 1fr;
+	}
+
+	.settings-agent-secondary,
+	.settings-agent-remove,
+	.settings-button {
+		flex: 1 1 0;
+		justify-content: center;
+	}
+}

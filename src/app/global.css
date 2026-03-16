@@ -1,0 +1,308 @@
+:root {
+	--font-sans:
+		Inter, "SF Pro Text", "PingFang SC", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+		sans-serif;
+	--font-mono: "SF Mono", "JetBrains Mono", monospace;
+	--text-strong: #131313;
+	--text-primary: #2f332d;
+	--text-secondary: #4e534a;
+	--text-muted: #74746d;
+	--text-soft: #5f5f58;
+	--text-contrast: #f7f8f3;
+	--surface-frame: rgba(255, 255, 255, 0.88);
+	--surface-card: rgba(251, 251, 247, 0.96);
+	--surface-card-subtle: rgba(247, 248, 242, 0.92);
+	--surface-card-selected: rgba(241, 243, 236, 0.95);
+	--surface-control: rgba(243, 243, 239, 0.92);
+	--surface-control-hover: rgba(230, 230, 225, 0.92);
+	--surface-control-soft: rgba(249, 249, 245, 0.72);
+	--surface-control-strong: rgba(33, 38, 31, 0.92);
+	--surface-input: rgba(255, 255, 255, 0.6);
+	--surface-panel: rgba(251, 251, 247, 0.96);
+	--border-frame: rgba(231, 231, 226, 0.9);
+	--border-regular: rgba(226, 228, 220, 0.94);
+	--border-soft: rgba(233, 233, 227, 0.95);
+	--border-strong: rgba(216, 218, 209, 0.84);
+	--border-selected: rgba(33, 38, 31, 0.18);
+	--focus-ring: rgba(70, 77, 62, 0.44);
+	--shadow-panel: 0 14px 30px rgba(29, 32, 27, 0.12);
+	--shadow-panel-strong: 0 18px 36px rgba(29, 32, 27, 0.14);
+	--shadow-floating: 0 8px 16px rgba(32, 32, 28, 0.08);
+	--radius-frame: 28px;
+	--radius-frame-compact: 22px;
+	--radius-panel: 18px;
+	--radius-card: 16px;
+	--radius-control: 12px;
+	--radius-small: 10px;
+	--radius-input: 8px;
+	--radius-pill: 999px;
+	--transition-fast: 0.15s ease;
+	--transition-standard: 0.16s ease;
+	--blur-frame: blur(22px) saturate(135%);
+	--blur-panel: blur(14px);
+	--status-info-bg: rgba(230, 237, 245, 0.92);
+	--status-info-fg: #33506a;
+	--status-success-bg: rgba(222, 238, 225, 0.96);
+	--status-success-fg: #275338;
+	--status-warn-bg: rgba(246, 234, 211, 0.92);
+	--status-warn-fg: #7a5820;
+	--status-error-bg: rgba(244, 223, 218, 0.92);
+	--status-error-fg: #8b3f32;
+	font-family: var(--font-sans);
+	color: var(--text-strong);
+	background: transparent;
+	line-height: 1.5;
+	font-weight: 400;
+	color-scheme: light;
+}
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+	background: transparent;
+}
+
+body {
+	margin: 0;
+	overflow: hidden;
+}
+
+#root {
+	display: flex;
+	width: fit-content;
+	height: fit-content;
+}
+
+:where(button, input, textarea, select) {
+	font: inherit;
+}
+
+:where(button) {
+	cursor: pointer;
+}
+
+:where(button, input, textarea, select):focus-visible {
+	outline: 2px solid var(--focus-ring);
+	outline-offset: 2px;
+}
+
+:where(.launcher-shell, .settings-shell) {
+	display: inline-block;
+	width: fit-content;
+	padding: 2px;
+	background: transparent;
+}
+
+:where(.launcher-frame, .settings-frame) {
+	position: relative;
+	min-width: 520px;
+	border: 1px solid var(--frame-border, var(--border-frame));
+	border-radius: var(--radius-frame);
+	overflow: hidden;
+	background: var(--frame-background, var(--surface-frame));
+	backdrop-filter: var(--blur-frame);
+	-webkit-backdrop-filter: var(--blur-frame);
+}
+
+:where(.launcher-frame, .settings-frame)::before {
+	content: "";
+	position: absolute;
+	inset: 0;
+	border-radius: inherit;
+	background: var(--frame-overlay);
+	pointer-events: none;
+}
+
+:where(.launcher-frame, .settings-frame)::after {
+	content: "";
+	position: absolute;
+	inset: 1px;
+	border-radius: calc(var(--radius-frame) - 1px);
+	border: 1px solid var(--frame-highlight-border, rgba(255, 255, 255, 0.75));
+	pointer-events: none;
+}
+
+:where(
+	.workspace-picker-panel,
+	.agent-picker-panel,
+	.session-panel,
+	.completion-popup,
+	.settings-combobox-panel
+) {
+	display: grid;
+	gap: var(--floating-gap, 8px);
+	padding: var(--floating-padding, 10px);
+	border: 1px solid var(--floating-border, var(--border-regular));
+	border-radius: var(--floating-radius, var(--radius-card));
+	background: var(--floating-background, var(--surface-panel));
+	box-shadow: var(--floating-shadow, var(--shadow-panel));
+	backdrop-filter: var(--floating-backdrop, var(--blur-panel));
+	-webkit-backdrop-filter: var(--floating-backdrop, var(--blur-panel));
+	z-index: var(--floating-z, 100);
+}
+
+:where(
+	.control-button,
+	.settings-back-button,
+	.settings-close-button,
+	.settings-button,
+	.settings-agent-secondary,
+	.settings-agent-remove,
+	.settings-agent-preset,
+	.session-create-button,
+	.session-overflow-button,
+	.session-panel-close
+) {
+	border: 0;
+	border-radius: var(--button-radius, var(--radius-pill));
+	background: var(--button-background, var(--surface-control));
+	color: var(--button-color, var(--text-soft));
+	transition:
+		background var(--transition-fast),
+		box-shadow var(--transition-fast),
+		transform var(--transition-fast),
+		opacity var(--transition-fast);
+}
+
+:where(
+	.control-button,
+	.settings-back-button,
+	.settings-close-button,
+	.settings-button,
+	.settings-agent-secondary,
+	.settings-agent-remove,
+	.settings-agent-preset,
+	.session-create-button,
+	.session-overflow-button,
+	.session-panel-close
+):hover {
+	background: var(--button-background-hover, var(--surface-control-hover));
+}
+
+:where(
+	.control-button,
+	.settings-back-button,
+	.settings-close-button,
+	.settings-button,
+	.settings-agent-secondary,
+	.settings-agent-remove,
+	.settings-agent-preset,
+	.session-create-button,
+	.session-overflow-button,
+	.session-panel-close
+):disabled {
+	cursor: not-allowed;
+	opacity: 0.55;
+}
+
+:where(.workspace-picker-input, .agent-picker-trigger, .settings-nav-button) {
+	border: 1px solid var(--outlined-border, var(--border-strong));
+	border-radius: var(--outlined-radius, 14px);
+	background: var(--outlined-background, var(--surface-control-soft));
+	color: var(--outlined-color, var(--text-soft));
+	transition:
+		border-color var(--transition-standard),
+		background var(--transition-standard),
+		color var(--transition-standard),
+		transform var(--transition-fast);
+}
+
+:where(.workspace-picker-input, .agent-picker-trigger, .settings-nav-button):hover {
+	background: var(--outlined-background-hover, rgba(252, 252, 248, 0.92));
+}
+
+:where(.settings-select, .settings-input, .settings-textarea) {
+	padding: 8px 12px;
+	border: 1px solid rgba(200, 200, 195, 0.8);
+	border-radius: var(--radius-input);
+	background: var(--surface-input);
+	color: var(--text-strong);
+	font-size: 13px;
+	min-width: 120px;
+	transition:
+		border-color var(--transition-fast),
+		background var(--transition-fast),
+		box-shadow var(--transition-fast);
+}
+
+:where(
+	.settings-acp-sidebar,
+	.settings-acp-detail,
+	.settings-editor-card,
+	.settings-agent-card,
+	.settings-mcp-card,
+	.settings-acp-preset-panel,
+	.settings-install-guide-card,
+	.settings-empty-panel,
+	.settings-skill-tree-panel,
+	.settings-acp-overview,
+	.settings-acp-savebar
+) {
+	border: 1px solid var(--card-border, var(--border-regular));
+	border-radius: var(--card-radius, var(--radius-card));
+	background: var(--card-background, var(--surface-card));
+	box-shadow: var(--card-shadow, none);
+}
+
+:where(.settings-banner-info, .settings-status-chip-info) {
+	background: var(--status-info-bg);
+	color: var(--status-info-fg);
+}
+
+:where(.settings-banner-warn, .settings-status-chip-warn, .settings-validation-box-warn) {
+	background: var(--status-warn-bg);
+	color: var(--status-warn-fg);
+}
+
+:where(.settings-banner-error, .settings-status-chip-error, .settings-validation-box-error) {
+	background: var(--status-error-bg);
+	color: var(--status-error-fg);
+}
+
+:where(.settings-status-chip-success, .settings-validation-box-success) {
+	background: var(--status-success-bg);
+	color: var(--status-success-fg);
+}
+
+:where(
+	.settings-input-mono,
+	.settings-agent-command-preview,
+	.settings-combobox-option-meta,
+	.settings-inline-code,
+	.settings-install-guide-command,
+	.settings-mcp-badge,
+	.thought-content,
+	.session-thought-content,
+	.session-message-content,
+	.action-bar-detail pre
+) {
+	font-family: var(--font-mono);
+}
+
+.app-loading-state {
+	display: grid;
+	place-items: center;
+	min-width: 320px;
+	min-height: 160px;
+	padding: 24px;
+	color: rgba(30, 26, 22, 0.72);
+	background:
+		radial-gradient(circle at top, rgba(255, 250, 240, 0.96), rgba(247, 237, 220, 0.92)),
+		linear-gradient(180deg, rgba(255, 255, 255, 0.3), rgba(222, 206, 178, 0.18));
+	border-radius: 24px;
+	backdrop-filter: blur(18px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		scroll-behavior: auto !important;
+	}
+}

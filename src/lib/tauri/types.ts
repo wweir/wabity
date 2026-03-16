@@ -1,0 +1,206 @@
+export interface ShortcutConfig {
+	toggle_launcher: string;
+	ocr_capture: string;
+}
+
+export interface GeneralSettings {
+	autoStart: boolean;
+	showInDock: boolean;
+	language: string;
+}
+
+export interface AppearanceSettings {
+	theme: string;
+	fontSize: string;
+}
+
+export type LlmProviderProtocolKind = "openai_chat" | "openai_responses" | "openai_embedding";
+
+export interface LlmProviderConfig {
+	id: string;
+	name: string;
+	protocol: LlmProviderProtocolKind;
+	baseUrl: string;
+	apiKey: string;
+	model: string;
+	supportsMultimodal: boolean;
+}
+
+export interface LlmSettings {
+	providers: LlmProviderConfig[];
+	defaultProviderId: string | null;
+}
+
+export type OcrProviderKind = "disabled" | "system" | "llm_ocr";
+
+export interface OcrSettings {
+	provider: OcrProviderKind;
+	llmProviderId: string | null;
+}
+
+export interface RagSettings {
+	sourceDirectories: string[];
+	ignoreGlobs: string[];
+	embeddingProviderId: string | null;
+}
+
+export interface RagScanResult {
+	databasePath: string;
+	sourceCount: number;
+	scannedFileCount: number;
+	indexedFileCount: number;
+	skippedFileCount: number;
+	chunkCount: number;
+	finishedAtMs: number;
+}
+
+export interface AppSettings {
+	general: GeneralSettings;
+	appearance: AppearanceSettings;
+	llm: LlmSettings;
+	ocr: OcrSettings;
+	rag: RagSettings;
+}
+
+export interface PublicSkillMetaEntry {
+	key: string;
+	value: string;
+}
+
+export interface PublicSkillMeta {
+	name: string | null;
+	description: string | null;
+	argumentHint: string | null;
+	license: string | null;
+	metadata: PublicSkillMetaEntry[];
+}
+
+export type SkillTreeNodeKind = "directory" | "file";
+
+export interface SkillTreeNode {
+	name: string;
+	relativePath: string;
+	kind: SkillTreeNodeKind;
+	children: SkillTreeNode[];
+}
+
+export interface PublicSkillEntry {
+	id: string;
+	directoryName: string;
+	relativePath: string;
+	meta: PublicSkillMeta;
+	directoryCount: number;
+	fileCount: number;
+	tree: SkillTreeNode;
+}
+
+export interface PublicSkillCatalog {
+	rootPath: string;
+	exists: boolean;
+	skills: PublicSkillEntry[];
+}
+
+export interface WorkspaceState {
+	rootPath: string;
+	recentRoots: string[];
+	homePath: string | null;
+	displayHomeAsTilde: boolean;
+}
+
+export interface AcpNameValuePair {
+	name: string;
+	value: string;
+}
+
+export interface AcpMcpServerStdioConfig {
+	transport: "stdio";
+	name: string;
+	command: string;
+	args: string[];
+	env: AcpNameValuePair[];
+}
+
+export interface AcpMcpServerHttpConfig {
+	transport: "http";
+	name: string;
+	url: string;
+	headers: AcpNameValuePair[];
+}
+
+export interface AcpMcpServerSseConfig {
+	transport: "sse";
+	name: string;
+	url: string;
+	headers: AcpNameValuePair[];
+}
+
+export type AcpMcpServerConfig =
+	| AcpMcpServerStdioConfig
+	| AcpMcpServerHttpConfig
+	| AcpMcpServerSseConfig;
+
+export interface AcpAgentConfig {
+	id: string;
+	name: string;
+	program: string;
+	args: string[];
+	shellCommand: string | null;
+}
+
+export interface AcpAgentCatalog {
+	agents: AcpAgentConfig[];
+	defaultAgentId: string | null;
+}
+
+export interface AcpMcpServerCatalog {
+	servers: AcpMcpServerConfig[];
+}
+
+export type AcpSessionStatus = "starting" | "idle" | "running" | "error" | "exited";
+export type AcpSessionErrorLevel = "recoverable" | "fatal";
+
+export type AcpMessageRole = "user" | "assistant" | "system";
+
+export interface AcpActionEvent {
+	kind: string;
+	title: string;
+	correlationId: string | null;
+	detail: string | null;
+}
+
+export type AcpMessageBlock =
+	| { type: "thought"; content: string }
+	| { type: "actions"; items: AcpActionEvent[] }
+	| { type: "content"; text: string };
+
+export interface AcpSessionMessage {
+	id: string;
+	role: AcpMessageRole;
+	blocks: AcpMessageBlock[];
+	pending: boolean;
+}
+
+export interface AcpSessionSummary {
+	sessionId: string;
+	workspaceRoot: string;
+	title: string;
+	agentId: string | null;
+	agentName: string;
+	status: AcpSessionStatus;
+	errorLevel: AcpSessionErrorLevel | null;
+	attention: boolean;
+	isActive: boolean;
+	lastError: string | null;
+	lastUpdatedAtMs: number;
+}
+
+export interface AcpSessionDetail {
+	session: AcpSessionSummary;
+	messages: AcpSessionMessage[];
+}
+
+export interface AcpRestoreNotice {
+	sessionId: string;
+	workspaceRoot: string;
+	message: string;
+}
