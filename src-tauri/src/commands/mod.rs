@@ -20,6 +20,7 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
         | "search_apps"
         | "execute_action"
         | "launch_app"
+        | "open_document_reference"
         | "hide_launcher_window"
         | "resize_launcher_window"
         | "begin_transient_window_interaction"
@@ -29,7 +30,9 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
         "get_app_settings" | "set_app_settings" | "list_llm_provider_models" => {
             settings::handle_invoke(invoke)
         }
-        "scan_rag_sources" => rag::handle_invoke(invoke),
+        "scan_rag_sources" | "get_rag_runtime_status" | "get_builtin_rag_mcp_server_status" => {
+            rag::handle_invoke(invoke)
+        }
         "get_public_skill_catalog" => skills::handle_invoke(invoke),
         "get_workspace" | "set_workspace" => workspace::handle_invoke(invoke),
         "get_acp_agents"

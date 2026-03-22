@@ -1,11 +1,16 @@
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::domain::settings::LlmProviderConfig;
+use crate::infrastructure::openai_compatible::{
+    extract_provider_error_message, extract_responses_text, normalize_base_url,
+    parse_json_or_sse_payload,
+};
 
 const OPENAI_COMPATIBLE_OCR_PROMPT: &str =
     "Extract all readable text from this image. Return only the extracted text and preserve line breaks. If there is no readable text, return an empty string.";
@@ -98,7 +103,7 @@ impl OpenAiCompatibleOcrProvider {
         api_key: impl Into<String>,
         model: impl Into<String>,
     ) -> Result<Self> {
-        let base_url = normalize_base_url(&base_url.into())?;
+        let base_url = normalize_base_url(&base_url.into(), "OpenAI-compatible base URL")?;
         let api_key = api_key.into().trim().to_string();
         let model = model.into().trim().to_string();
         if model.is_empty() {
@@ -188,17 +193,6 @@ fn next_screenshot_path() -> PathBuf {
     std::env::temp_dir().join(format!("wabity-ocr-{timestamp_ms}.png"))
 }
 
-fn normalize_base_url(base_url: &str) -> Result<String> {
-    let normalized = base_url.trim().trim_end_matches('/');
-    if normalized.is_empty() {
-        bail!("OpenAI-compatible base URL must not be empty");
-    }
-
-    reqwest::Url::parse(normalized)
-        .with_context(|| format!("invalid OpenAI-compatible base URL: {normalized}"))?;
-    Ok(normalized.to_string())
-}
-
 fn aggregate_text(blocks: &[OcrTextBlock]) -> String {
     blocks
         .iter()
@@ -280,29 +274,30 @@ fn recognize_with_openai_compatible(
         BASE64_STANDARD.encode(image_bytes)
     );
 
-    let mut request_builder = client.post(format!("{base_url}/chat/completions"));
+    let mut request_builder = client.post(format!("{base_url}/responses"));
     if !api_key.is_empty() {
         request_builder = request_builder.bearer_auth(api_key);
     }
 
     let response = request_builder
-        .json(&OpenAiCompatibleChatRequest {
-            model,
-            messages: vec![OpenAiCompatibleInputMessage {
-                role: "user",
-                content: vec![
-                    OpenAiCompatibleInputPart::Text {
-                        text: OPENAI_COMPATIBLE_OCR_PROMPT,
-                    },
-                    OpenAiCompatibleInputPart::ImageUrl {
-                        image_url: OpenAiCompatibleImageUrl {
-                            url: image_data_url,
+        .json(&json!({
+            "model": model,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": OPENAI_COMPATIBLE_OCR_PROMPT,
                         },
-                    },
-                ],
-            }],
-            temperature: 0.0,
-        })
+                        {
+                            "type": "input_image",
+                            "image_url": image_data_url,
+                        }
+                    ],
+                }
+            ],
+        }))
         .send()
         .context("failed to send OCR request to OpenAI-compatible endpoint")?;
     let status = response.status();
@@ -311,11 +306,11 @@ fn recognize_with_openai_compatible(
         .context("failed to read OpenAI-compatible OCR response body")?;
 
     if !status.is_success() {
-        let message = extract_openai_compatible_error_message(&body);
+        let message = extract_provider_error_message(&body);
         bail!("OpenAI-compatible OCR request failed with status {status}: {message}");
     }
 
-    let parsed: OpenAiCompatibleChatResponse = serde_json::from_str(&body)
+    let parsed = parse_json_or_sse_payload(&body, "OpenAI-compatible OCR response body")
         .context("failed to parse OpenAI-compatible OCR response JSON")?;
     Ok(map_openai_compatible_response_to_result(parsed))
 }
@@ -335,28 +330,8 @@ fn infer_image_mime_type(path: &Path) -> &'static str {
     }
 }
 
-fn extract_openai_compatible_error_message(body: &str) -> String {
-    serde_json::from_str::<OpenAiCompatibleErrorEnvelope>(body)
-        .ok()
-        .and_then(|response| response.error.message.map(|value| value.trim().to_string()))
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| {
-            let trimmed = body.trim();
-            if trimmed.is_empty() {
-                "empty response body".to_string()
-            } else {
-                trimmed.to_string()
-            }
-        })
-}
-
-fn map_openai_compatible_response_to_result(response: OpenAiCompatibleChatResponse) -> OcrResult {
-    let text = response
-        .choices
-        .into_iter()
-        .next()
-        .map(|choice| extract_openai_message_text(choice.message.content))
-        .unwrap_or_default();
+fn map_openai_compatible_response_to_result(response: Value) -> OcrResult {
+    let text = extract_responses_text(&response).unwrap_or_default();
 
     OcrResult {
         text: text.trim().to_string(),
@@ -365,100 +340,6 @@ fn map_openai_compatible_response_to_result(response: OpenAiCompatibleChatRespon
         blocks: Vec::new(),
         matched_block: None,
     }
-}
-
-fn extract_openai_message_text(content: OpenAiCompatibleOutputContent) -> String {
-    match content {
-        OpenAiCompatibleOutputContent::Text(text) => text,
-        OpenAiCompatibleOutputContent::Parts(parts) => parts
-            .into_iter()
-            .filter_map(|part| match part {
-                OpenAiCompatibleOutputPart::Text { text } => Some(text),
-                OpenAiCompatibleOutputPart::Refusal { refusal } => Some(refusal),
-                OpenAiCompatibleOutputPart::Ignored => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
-    }
-}
-
-#[derive(Debug, Serialize)]
-struct OpenAiCompatibleChatRequest<'a> {
-    model: &'a str,
-    messages: Vec<OpenAiCompatibleInputMessage<'a>>,
-    temperature: f32,
-}
-
-#[derive(Debug, Serialize)]
-struct OpenAiCompatibleInputMessage<'a> {
-    role: &'a str,
-    content: Vec<OpenAiCompatibleInputPart<'a>>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum OpenAiCompatibleInputPart<'a> {
-    Text { text: &'a str },
-    ImageUrl { image_url: OpenAiCompatibleImageUrl },
-}
-
-#[derive(Debug, Serialize)]
-struct OpenAiCompatibleImageUrl {
-    url: String,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct OpenAiCompatibleChatResponse {
-    #[serde(default)]
-    choices: Vec<OpenAiCompatibleChatChoice>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiCompatibleChatChoice {
-    message: OpenAiCompatibleChatCompletionMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiCompatibleChatCompletionMessage {
-    #[serde(default)]
-    content: OpenAiCompatibleOutputContent,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum OpenAiCompatibleOutputContent {
-    Text(String),
-    Parts(Vec<OpenAiCompatibleOutputPart>),
-}
-
-impl Default for OpenAiCompatibleOutputContent {
-    fn default() -> Self {
-        Self::Text(String::new())
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum OpenAiCompatibleOutputPart {
-    Text {
-        text: String,
-    },
-    Refusal {
-        refusal: String,
-    },
-    #[serde(other)]
-    Ignored,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenAiCompatibleErrorEnvelope {
-    error: OpenAiCompatibleErrorPayload,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct OpenAiCompatibleErrorPayload {
-    #[serde(default)]
-    message: Option<String>,
 }
 
 #[cfg(target_os = "macos")]
@@ -581,11 +462,12 @@ pub fn remove_screenshot_file(path: &Path) {
 mod tests {
     use super::{
         aggregate_text, average_confidence, block_for_focus_point,
-        extract_openai_compatible_error_message, map_openai_compatible_response_to_result,
-        normalize_base_url, OcrBoundingBox, OcrPoint, OcrTextBlock, OpenAiCompatibleChatChoice,
-        OpenAiCompatibleChatCompletionMessage, OpenAiCompatibleChatResponse,
-        OpenAiCompatibleOutputContent, OpenAiCompatibleOutputPart,
+        map_openai_compatible_response_to_result, OcrBoundingBox, OcrPoint, OcrTextBlock,
     };
+    use crate::infrastructure::openai_compatible::{
+        extract_provider_error_message, normalize_base_url,
+    };
+    use serde_json::json;
 
     fn block(text: &str, x: f32, y: f32, width: f32, height: f32) -> OcrTextBlock {
         OcrTextBlock {
@@ -634,20 +516,20 @@ mod tests {
 
     #[test]
     fn normalize_base_url_trims_trailing_slash() {
-        let normalized = normalize_base_url(" https://api.openai.example.com/v1/ ").unwrap();
+        let normalized = normalize_base_url(
+            " https://api.openai.example.com/v1/ ",
+            "OpenAI-compatible base URL",
+        )
+        .unwrap();
 
         assert_eq!(normalized, "https://api.openai.example.com/v1");
     }
 
     #[test]
     fn map_openai_compatible_response_reads_text_content() {
-        let response = OpenAiCompatibleChatResponse {
-            choices: vec![OpenAiCompatibleChatChoice {
-                message: OpenAiCompatibleChatCompletionMessage {
-                    content: OpenAiCompatibleOutputContent::Text("invoice total".to_string()),
-                },
-            }],
-        };
+        let response = json!({
+            "output_text": "invoice total"
+        });
 
         let result = map_openai_compatible_response_to_result(response);
 
@@ -658,20 +540,16 @@ mod tests {
 
     #[test]
     fn map_openai_compatible_response_reads_part_array() {
-        let response = OpenAiCompatibleChatResponse {
-            choices: vec![OpenAiCompatibleChatChoice {
-                message: OpenAiCompatibleChatCompletionMessage {
-                    content: OpenAiCompatibleOutputContent::Parts(vec![
-                        OpenAiCompatibleOutputPart::Text {
-                            text: "line 1".to_string(),
-                        },
-                        OpenAiCompatibleOutputPart::Text {
-                            text: "line 2".to_string(),
-                        },
-                    ]),
-                },
-            }],
-        };
+        let response = json!({
+            "output": [
+                {
+                    "content": [
+                        { "type": "output_text", "text": "line 1" },
+                        { "type": "output_text", "text": "line 2" }
+                    ]
+                }
+            ]
+        });
 
         let result = map_openai_compatible_response_to_result(response);
 
@@ -680,7 +558,7 @@ mod tests {
 
     #[test]
     fn extract_openai_compatible_error_prefers_message_field() {
-        let message = extract_openai_compatible_error_message(
+        let message = extract_provider_error_message(
             r#"{"error":{"message":"provider rejected image input"}}"#,
         );
 

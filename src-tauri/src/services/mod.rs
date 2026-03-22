@@ -6,4 +6,8 @@ pub mod matcher;
 pub mod ocr;
 pub mod public_skills;
 pub mod rag;
+pub mod rag_answer;
+pub mod rag_mcp;
+pub mod rag_query;
 pub mod selection;
+pub mod translate;

@@ -531,6 +531,8 @@ mod tests {
                     source_hint: "test".to_string(),
                 },
             },
+            conversation: Vec::new(),
+            conversation_state: None,
         }
     }
 

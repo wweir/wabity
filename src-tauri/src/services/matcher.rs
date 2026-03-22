@@ -8,6 +8,8 @@ use crate::domain::{
 const JSON_FORMAT_COMMAND_ALIASES: [&str; 3] = ["/format", "/fmt", "/json"];
 const BASE64_COMMAND_ALIASES: [&str; 1] = ["/base64"];
 const MARKDOWN_RENDER_COMMAND_ALIASES: [&str; 2] = ["/md", "/markdown"];
+const TRANSLATE_COMMAND_ALIASES: [&str; 3] = ["/translate", "/fy", "/tr"];
+const RAG_ANSWER_COMMAND_ALIASES: [&str; 3] = ["/ask", "/qa", "/docs"];
 
 #[derive(Debug, Clone)]
 pub struct MatcherService {
@@ -105,6 +107,16 @@ fn score_action(
 
     if action.id == "markdown_render" && extract_markdown_render_payload(&query.raw_text).is_some()
     {
+        score += 44;
+        matched = true;
+    }
+
+    if action.id == "translate_text" && extract_translate_payload(&query.raw_text).is_some() {
+        score += 44;
+        matched = true;
+    }
+
+    if action.id == "rag_answer" && extract_rag_answer_payload(&query.raw_text).is_some() {
         score += 44;
         matched = true;
     }
@@ -311,7 +323,7 @@ fn builtin_actions() -> Vec<ActionDescriptor> {
                 "decode".to_string(),
                 "text".to_string(),
             ],
-            supported_input_modes: vec![Inline, Multiline, Clipboard],
+            supported_input_modes: vec![Inline, Multiline, Ocr, Clipboard, Selection],
             category: "text".to_string(),
             priority: 86,
         },
@@ -334,6 +346,44 @@ fn builtin_actions() -> Vec<ActionDescriptor> {
             category: "text".to_string(),
             priority: 85,
         },
+        ActionDescriptor {
+            id: "translate_text".to_string(),
+            title: "翻译".to_string(),
+            summary: "调用已配置翻译 LLM 翻译文本".to_string(),
+            aliases: TRANSLATE_COMMAND_ALIASES
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            keywords: vec![
+                "translate".to_string(),
+                "translation".to_string(),
+                "fy".to_string(),
+                "tr".to_string(),
+                "text".to_string(),
+            ],
+            supported_input_modes: vec![Inline, Multiline, Ocr, Clipboard, Selection],
+            category: "text".to_string(),
+            priority: 96,
+        },
+        ActionDescriptor {
+            id: "rag_answer".to_string(),
+            title: "文档问答".to_string(),
+            summary: "基于本地 RAG 索引回答问题".to_string(),
+            aliases: RAG_ANSWER_COMMAND_ALIASES
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            keywords: vec![
+                "ask".to_string(),
+                "qa".to_string(),
+                "docs".to_string(),
+                "knowledge".to_string(),
+                "rag".to_string(),
+            ],
+            supported_input_modes: vec![Inline, Multiline, Clipboard, Selection],
+            category: "knowledge".to_string(),
+            priority: 94,
+        },
     ]
 }
 
@@ -355,6 +405,14 @@ fn extract_base64_payload(raw_text: &str) -> Option<&str> {
 
 fn extract_markdown_render_payload(raw_text: &str) -> Option<&str> {
     extract_prefixed_payload(raw_text, &MARKDOWN_RENDER_COMMAND_ALIASES)
+}
+
+fn extract_translate_payload(raw_text: &str) -> Option<&str> {
+    extract_prefixed_payload(raw_text, &TRANSLATE_COMMAND_ALIASES)
+}
+
+fn extract_rag_answer_payload(raw_text: &str) -> Option<&str> {
+    extract_prefixed_payload(raw_text, &RAG_ANSWER_COMMAND_ALIASES)
 }
 
 fn extract_prefixed_payload<'a>(raw_text: &'a str, aliases: &[&str]) -> Option<&'a str> {
@@ -458,7 +516,7 @@ mod tests {
             .match_actions(&query(InputMode::Inline, "/"))
             .unwrap();
 
-        assert_eq!(matches.len(), 13);
+        assert_eq!(matches.len(), 15);
         assert!(matches
             .iter()
             .all(|item| item.descriptor.id.as_str() != "copy_text"));
@@ -488,6 +546,22 @@ mod tests {
             matches.first().map(|item| item.descriptor.id.as_str()),
             Some("base64_text")
         );
+    }
+
+    #[test]
+    fn base64_command_is_available_for_ocr_and_selection_inputs() {
+        let service = MatcherService::new();
+
+        for mode in [InputMode::Ocr, InputMode::Selection] {
+            let matches = service
+                .match_actions(&query(mode, "/base64 dGVzdA=="))
+                .unwrap();
+
+            assert_eq!(
+                matches.first().map(|item| item.descriptor.id.as_str()),
+                Some("base64_text")
+            );
+        }
     }
 
     #[test]
@@ -539,6 +613,32 @@ mod tests {
         assert_eq!(
             matches.first().map(|item| item.descriptor.id.as_str()),
             Some("title_case_text")
+        );
+    }
+
+    #[test]
+    fn translate_command_with_payload_matches_translate_action() {
+        let service = MatcherService::new();
+        let matches = service
+            .match_actions(&query(InputMode::Inline, "/fy hello world"))
+            .unwrap();
+
+        assert_eq!(
+            matches.first().map(|item| item.descriptor.id.as_str()),
+            Some("translate_text")
+        );
+    }
+
+    #[test]
+    fn rag_command_with_payload_matches_rag_answer_action() {
+        let service = MatcherService::new();
+        let matches = service
+            .match_actions(&query(InputMode::Inline, "/ask 解释 embedding 缓存"))
+            .unwrap();
+
+        assert_eq!(
+            matches.first().map(|item| item.descriptor.id.as_str()),
+            Some("rag_answer")
         );
     }
 }

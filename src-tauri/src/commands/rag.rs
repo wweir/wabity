@@ -5,11 +5,23 @@ use tauri::{
 
 use crate::{
     domain::{
-        rag::RagScanResult,
+        rag::{BuiltinRagMcpServerStatus, RagRuntimeStatus, RagScanResult},
         settings::{LlmSettings, RagSettings},
     },
     state::AppState,
 };
+
+pub async fn get_rag_runtime_status(
+    state: State<'_, AppState>,
+) -> Result<RagRuntimeStatus, String> {
+    Ok(state.rag_runtime_status().await)
+}
+
+pub async fn get_builtin_rag_mcp_server_status(
+    state: State<'_, AppState>,
+) -> Result<BuiltinRagMcpServerStatus, String> {
+    Ok(state.builtin_rag_mcp_server_status().await)
+}
 
 pub async fn scan_rag_sources(
     state: State<'_, AppState>,
@@ -24,6 +36,27 @@ pub async fn scan_rag_sources(
 
 pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
     match invoke.message.command() {
+        "get_rag_runtime_status" => {
+            let resolver = invoke.resolver.clone();
+            resolver.respond_async(async move {
+                let state = super::parse_arg(&invoke, "get_rag_runtime_status", "state")?;
+                get_rag_runtime_status(state)
+                    .await
+                    .map_err(InvokeError::from)
+            });
+            true
+        }
+        "get_builtin_rag_mcp_server_status" => {
+            let resolver = invoke.resolver.clone();
+            resolver.respond_async(async move {
+                let state =
+                    super::parse_arg(&invoke, "get_builtin_rag_mcp_server_status", "state")?;
+                get_builtin_rag_mcp_server_status(state)
+                    .await
+                    .map_err(InvokeError::from)
+            });
+            true
+        }
         "scan_rag_sources" => {
             let resolver = invoke.resolver.clone();
             resolver.respond_async(async move {

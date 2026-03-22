@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 use tauri::{Manager, Wry};
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_global_shortcut::{Builder as GlobalShortcutBuilder, ShortcutState};
 use time::{format_description::well_known::Rfc3339, UtcOffset};
 use tokio::{task, time as tokio_time};
@@ -8,13 +10,23 @@ use tracing_subscriber::EnvFilter;
 
 use crate::{
     commands,
-    infrastructure::{hotkey, window},
+    infrastructure::{
+        autostart,
+        config::{ShortcutConfig, ShortcutKey},
+        hotkey, window,
+    },
     services::{
         application::APPLICATION_CACHE_REFRESH_INTERVAL, executor::ExecutorService,
-        matcher::MatcherService, ocr, selection,
+        matcher::MatcherService, ocr, selection, translate,
     },
     state::{AppState, ShortcutAction, ShortcutRuntimeState},
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShortcutTranslationSource {
+    mode: window::ShortcutTranslationSourceMode,
+    text: String,
+}
 
 pub fn run() -> Result<()> {
     init_tracing();
@@ -31,6 +43,12 @@ pub fn run() -> Result<()> {
 
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(tauri_nspanel::init());
+
+    #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+    let builder = builder.plugin(tauri_plugin_autostart::init(
+        MacosLauncher::LaunchAgent,
+        None,
+    ));
 
     let builder = builder
         .plugin(tauri_plugin_dialog::init())
@@ -97,6 +115,52 @@ pub fn run() -> Result<()> {
                                         }
                                     });
                                 }
+                                ShortcutAction::OcrTranslate => {
+                                    if !shortcut_for_handler.begin_ocr_capture() {
+                                        return;
+                                    }
+
+                                    // On macOS, simulated copy must stay on the shortcut handler
+                                    // thread. Running enigo from a Tokio worker crashes inside
+                                    // HIToolbox input-source lookup.
+                                    let selected_text = selection::get_selected_text()
+                                        .inspect_err(|error| {
+                                            tracing::warn!(
+                                                ?error,
+                                                "failed to get selected text for shortcut"
+                                            )
+                                        })
+                                        .ok()
+                                        .flatten();
+                                    let app_handle = _app.clone();
+                                    let shortcut_state = shortcut_for_handler.clone();
+                                    tauri::async_runtime::spawn(async move {
+                                        let flow_result = handle_ocr_translate_shortcut(
+                                            app_handle.clone(),
+                                            selected_text,
+                                        )
+                                        .await;
+                                        shortcut_state.end_ocr_capture();
+
+                                        if let Err(error) = flow_result {
+                                            tracing::error!(
+                                                ?error,
+                                                "failed to complete translate shortcut"
+                                            );
+                                            if let Err(show_error) =
+                                                window::show_main_window_with_error(
+                                                    &app_handle,
+                                                    &format!("翻译失败：{error}"),
+                                                )
+                                            {
+                                                tracing::error!(
+                                                    ?show_error,
+                                                    "failed to show launcher after translate shortcut error"
+                                                );
+                                            }
+                                        }
+                                    });
+                                }
                             }
                         }
                         ShortcutState::Released => {
@@ -106,7 +170,7 @@ pub fn run() -> Result<()> {
                 })
                 .build(),
         );
-    let builder = attach_invoke_handler(builder);
+    let builder = builder.invoke_handler(commands::handle_invoke);
 
     builder
         .setup(move |app| {
@@ -117,6 +181,7 @@ pub fn run() -> Result<()> {
 
             app.manage(app_state.clone());
             app.manage(shortcut_state.clone());
+            reconcile_configured_autostart(&app.handle().clone(), &app_state);
             app_state.acp().start_event_loop();
             tauri::async_runtime::block_on(app_state.restore_acp_sessions())?;
             start_application_cache_tasks(app_state.application().clone());
@@ -127,61 +192,11 @@ pub fn run() -> Result<()> {
 
             window::configure_main_window(&main_window)?;
 
-            // Register shortcut from config
-            tauri::async_runtime::block_on(async {
-                let config = app_state.app_config().await?;
-                let shortcut = match hotkey::parse_shortcut(&config.shortcuts.toggle_launcher) {
-                    Some(shortcut) => shortcut,
-                    None => {
-                        let default_shortcut =
-                            crate::infrastructure::config::ShortcutConfig::default();
-                        tracing::warn!(
-                            invalid_shortcut = %config.shortcuts.toggle_launcher,
-                            fallback_shortcut = %default_shortcut.toggle_launcher,
-                            "invalid shortcut in config, falling back to default"
-                        );
-                        app_state
-                            .update_shortcut("toggle_launcher", &default_shortcut.toggle_launcher)
-                            .await?;
-                        hotkey::parse_shortcut(&default_shortcut.toggle_launcher)
-                            .context("default launcher shortcut must be valid")?
-                    }
-                };
-
-                hotkey::register_shortcut(app.handle(), shortcut)?;
-                shortcut_state.set_launcher_shortcut(Some(shortcut));
-
-                let ocr_shortcut = match hotkey::parse_shortcut(&config.shortcuts.ocr_capture) {
-                    Some(shortcut) => shortcut,
-                    None => {
-                        let default_shortcut =
-                            crate::infrastructure::config::ShortcutConfig::default();
-                        tracing::warn!(
-                            invalid_shortcut = %config.shortcuts.ocr_capture,
-                            fallback_shortcut = %default_shortcut.ocr_capture,
-                            "invalid OCR shortcut in config, falling back to default"
-                        );
-                        app_state
-                            .update_shortcut("ocr_capture", &default_shortcut.ocr_capture)
-                            .await?;
-                        hotkey::parse_shortcut(&default_shortcut.ocr_capture)
-                            .context("default OCR shortcut must be valid")?
-                    }
-                };
-
-                match hotkey::register_shortcut(app.handle(), ocr_shortcut) {
-                    Ok(()) => shortcut_state.set_ocr_shortcut(Some(ocr_shortcut)),
-                    Err(error) => {
-                        tracing::warn!(
-                            ?error,
-                            configured_shortcut = %config.shortcuts.ocr_capture,
-                            "failed to register OCR capture shortcut"
-                        );
-                        shortcut_state.set_ocr_shortcut(None);
-                    }
-                }
-                Ok::<(), anyhow::Error>(())
-            })?;
+            tauri::async_runtime::block_on(initialize_shortcuts(
+                &app.handle().clone(),
+                &app_state,
+                &shortcut_state,
+            ))?;
 
             main_window
                 .hide()
@@ -196,6 +211,25 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
+fn reconcile_configured_autostart(app: &tauri::AppHandle, app_state: &AppState) {
+    let configured_enabled = match tauri::async_runtime::block_on(app_state.app_config()) {
+        Ok(config) => config.general.auto_start,
+        Err(error) => {
+            tracing::warn!(?error, "failed to load config for autostart reconciliation");
+            return;
+        }
+    };
+
+    // Startup reconciliation is best-effort because login-item drift should not block launcher startup.
+    if let Err(error) = autostart::sync_autostart(app, configured_enabled) {
+        tracing::warn!(
+            ?error,
+            enabled = configured_enabled,
+            "failed to reconcile autostart state on startup"
+        );
+    }
+}
+
 #[cfg(rust_analyzer)]
 fn application_context() -> tauri::Context<Wry> {
     // Keep rust-analyzer on a macro-free path because Tauri context generation currently triggers false hard errors.
@@ -205,10 +239,6 @@ fn application_context() -> tauri::Context<Wry> {
 #[cfg(not(rust_analyzer))]
 fn application_context() -> tauri::Context<Wry> {
     tauri::generate_context!("tauri.conf.json")
-}
-
-fn attach_invoke_handler(builder: tauri::Builder<Wry>) -> tauri::Builder<Wry> {
-    builder.invoke_handler(commands::handle_invoke)
 }
 
 fn init_tracing() {
@@ -222,7 +252,179 @@ fn init_tracing() {
         .try_init();
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ShortcutRegistrationMode {
+    Required,
+    Optional,
+}
+
+async fn initialize_shortcuts(
+    app: &tauri::AppHandle,
+    app_state: &AppState,
+    shortcut_state: &ShortcutRuntimeState,
+) -> Result<()> {
+    let config = app_state.app_config().await?;
+
+    register_startup_shortcut(
+        app,
+        app_state,
+        shortcut_state,
+        &config.shortcuts,
+        ShortcutKey::ToggleLauncher,
+        ShortcutRegistrationMode::Required,
+    )
+    .await?;
+    register_startup_shortcut(
+        app,
+        app_state,
+        shortcut_state,
+        &config.shortcuts,
+        ShortcutKey::OcrCapture,
+        ShortcutRegistrationMode::Optional,
+    )
+    .await?;
+    register_startup_shortcut(
+        app,
+        app_state,
+        shortcut_state,
+        &config.shortcuts,
+        ShortcutKey::OcrTranslate,
+        ShortcutRegistrationMode::Optional,
+    )
+    .await?;
+
+    Ok(())
+}
+
+async fn register_startup_shortcut(
+    app: &tauri::AppHandle,
+    app_state: &AppState,
+    shortcut_state: &ShortcutRuntimeState,
+    shortcuts: &ShortcutConfig,
+    key: ShortcutKey,
+    mode: ShortcutRegistrationMode,
+) -> Result<()> {
+    let (shortcut, configured_value) =
+        resolve_configured_shortcut(app_state, shortcuts, key).await?;
+
+    match hotkey::register_shortcut(app, shortcut) {
+        Ok(()) => {
+            shortcut_state.set_shortcut(key, Some(shortcut));
+            Ok(())
+        }
+        Err(error) => match mode {
+            ShortcutRegistrationMode::Required => Err(error).with_context(|| {
+                format!(
+                    "failed to register required {} shortcut",
+                    key.display_name()
+                )
+            }),
+            ShortcutRegistrationMode::Optional => {
+                tracing::warn!(
+                    ?error,
+                    shortcut_key = %key.as_str(),
+                    configured_shortcut = %configured_value,
+                    "failed to register optional shortcut"
+                );
+                shortcut_state.set_shortcut(key, None);
+                Ok(())
+            }
+        },
+    }
+}
+
+async fn resolve_configured_shortcut(
+    app_state: &AppState,
+    shortcuts: &ShortcutConfig,
+    key: ShortcutKey,
+) -> Result<(tauri_plugin_global_shortcut::Shortcut, String)> {
+    let configured_value = shortcuts.get(key);
+    if let Some(shortcut) = hotkey::parse_shortcut(configured_value) {
+        return Ok((shortcut, configured_value.to_string()));
+    }
+
+    let fallback_value = ShortcutConfig::default_value(key);
+    tracing::warn!(
+        shortcut_key = %key.as_str(),
+        invalid_shortcut = %configured_value,
+        fallback_shortcut = %fallback_value,
+        "invalid shortcut in config, falling back to default"
+    );
+    app_state.update_shortcut(key, fallback_value).await?;
+
+    let fallback_shortcut = hotkey::parse_shortcut(fallback_value)
+        .with_context(|| format!("default {} shortcut must be valid", key.display_name()))?;
+    Ok((fallback_shortcut, fallback_value.to_string()))
+}
+
 async fn handle_ocr_shortcut(app: tauri::AppHandle) -> Result<()> {
+    let Some(ocr_text) = capture_ocr_text(app.clone()).await? else {
+        return Ok(());
+    };
+
+    window::show_main_window_with_text(&app, ocr_text)?;
+    Ok(())
+}
+
+async fn handle_ocr_translate_shortcut(
+    app: tauri::AppHandle,
+    selected_text: Option<String>,
+) -> Result<()> {
+    let translation_source =
+        if let Some(source) = resolve_shortcut_translation_source(selected_text, None) {
+            source
+        } else {
+            let ocr_text = capture_ocr_text(app.clone()).await?;
+            let Some(source) = resolve_shortcut_translation_source(None, ocr_text) else {
+                return Ok(());
+            };
+            source
+        };
+
+    window::show_main_window_with_shortcut_translation_started(
+        &app,
+        translation_source.mode,
+        translation_source.text.clone(),
+    )?;
+
+    let settings = app.state::<AppState>().app_settings().await?;
+    let translation_result = task::spawn_blocking({
+        let source_text = translation_source.text.clone();
+        move || translate::execute_translation(&source_text, &settings.prompts, &settings.llm)
+    })
+    .await
+    .context("failed to join shortcut translation task")??;
+
+    window::emit_shortcut_translation_result(
+        &app,
+        translation_source.mode,
+        translation_source.text,
+        translation_result,
+    )?;
+    Ok(())
+}
+
+fn resolve_shortcut_translation_source(
+    selected_text: Option<String>,
+    ocr_text: Option<String>,
+) -> Option<ShortcutTranslationSource> {
+    selected_text
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| ShortcutTranslationSource {
+            mode: window::ShortcutTranslationSourceMode::Selection,
+            text,
+        })
+        .or_else(|| {
+            ocr_text
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| ShortcutTranslationSource {
+                    mode: window::ShortcutTranslationSourceMode::Ocr,
+                    text,
+                })
+        })
+}
+
+async fn capture_ocr_text(app: tauri::AppHandle) -> Result<Option<String>> {
     let ocr_provider = {
         let state = app.state::<AppState>();
         state.ocr_provider()
@@ -250,16 +452,15 @@ async fn handle_ocr_shortcut(app: tauri::AppHandle) -> Result<()> {
     .context("failed to join OCR capture task")??;
 
     let Some(ocr_result) = ocr_result else {
-        return Ok(());
+        return Ok(None);
     };
 
     if ocr_result.text.trim().is_empty() {
         window::show_main_window_with_error(&app, "OCR 未识别到可用文本")?;
-        return Ok(());
+        return Ok(None);
     }
 
-    window::show_main_window_with_text(&app, ocr_result.text)?;
-    Ok(())
+    Ok(Some(ocr_result.text))
 }
 
 fn start_application_cache_tasks(application: crate::services::application::ApplicationService) {
@@ -277,4 +478,40 @@ fn start_application_cache_tasks(application: crate::services::application::Appl
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_shortcut_translation_source;
+    use crate::infrastructure::window::ShortcutTranslationSourceMode;
+
+    #[test]
+    fn shortcut_translation_prefers_selected_text() {
+        let source = resolve_shortcut_translation_source(
+            Some("selected".to_string()),
+            Some("ocr".to_string()),
+        )
+        .expect("selection should win");
+
+        assert_eq!(source.mode, ShortcutTranslationSourceMode::Selection);
+        assert_eq!(source.text, "selected");
+    }
+
+    #[test]
+    fn shortcut_translation_falls_back_to_ocr_text() {
+        let source = resolve_shortcut_translation_source(None, Some("ocr".to_string()))
+            .expect("ocr should be used when selection is absent");
+
+        assert_eq!(source.mode, ShortcutTranslationSourceMode::Ocr);
+        assert_eq!(source.text, "ocr");
+    }
+
+    #[test]
+    fn shortcut_translation_rejects_blank_sources() {
+        assert!(resolve_shortcut_translation_source(
+            Some("   ".to_string()),
+            Some("\n".to_string()),
+        )
+        .is_none());
+    }
 }

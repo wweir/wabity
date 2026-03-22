@@ -13,10 +13,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = ["codegen"] }
 
 [dependencies]
-agent-client-protocol = "0.10.1"
+agent-client-protocol = "0.10.2"
 anyhow = "1"
 arboard = "3"
 async-trait = "0.1"
+axum = { version = "0.8.6", features = ["http1", "json", "tokio"] }
 arrow-array = "57.2"
 arrow-schema = "57.2"
 base64 = "0.22"
@@ -27,8 +28,10 @@ fuzzy-matcher = "0.3.7"
 globset = "0.4.18"
 ignore = "0.4.25"
 lancedb = "0.26.2"
+md5 = "0.7"
 notify = "8.2.0"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 text-splitter = { version = "0.29.3", features = ["markdown"] }
@@ -40,8 +43,11 @@ tauri-plugin-opener = "2"
 time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "time"] }
-tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["compat"] }
+
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-autostart = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"

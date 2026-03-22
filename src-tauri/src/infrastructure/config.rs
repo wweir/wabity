@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -10,8 +10,8 @@ use crate::domain::acp::{
     AcpMcpServerStdioConfig, AcpNameValuePair,
 };
 use crate::domain::settings::{
-    AppearanceSettings, GeneralSettings, LlmProviderProtocolKind, LlmSettings, OcrSettings,
-    RagSettings,
+    AppearanceSettings, GeneralSettings, LlmModelType, LlmProviderConfig, LlmProviderProtocol,
+    LlmSettings, OcrSettings, PromptsSettings, RagSettings,
 };
 
 const CONFIG_FILE_NAME: &str = "config.toml";
@@ -33,6 +33,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub appearance: AppearanceSettings,
     #[serde(default)]
+    pub prompts: PromptsSettings,
+    #[serde(default)]
     pub llm: LlmSettings,
     #[serde(default)]
     pub ocr: OcrSettings,
@@ -45,27 +47,80 @@ pub struct AppConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ShortcutConfig {
-    /// Format: "modifiers+key", e.g., "Cmd+Shift+Space" or "Ctrl+Shift+Space"
+    /// Format: "modifiers+key", e.g., "Alt+Space" or "Ctrl+Shift+Space"
     pub toggle_launcher: String,
-    /// Format: "modifiers+key", e.g., "Cmd+Shift+O"
+    /// Format: "modifiers+key", e.g., "Alt+R"
     pub ocr_capture: String,
+    /// Format: "modifiers+key", e.g., "Alt+D"
+    pub ocr_translate: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShortcutKey {
+    ToggleLauncher,
+    OcrCapture,
+    OcrTranslate,
+}
+
+impl ShortcutKey {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "toggle_launcher" => Ok(Self::ToggleLauncher),
+            "ocr_capture" => Ok(Self::OcrCapture),
+            "ocr_translate" => Ok(Self::OcrTranslate),
+            other => anyhow::bail!("unknown shortcut key: {other}"),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ToggleLauncher => "toggle_launcher",
+            Self::OcrCapture => "ocr_capture",
+            Self::OcrTranslate => "ocr_translate",
+        }
+    }
+
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::ToggleLauncher => "launcher",
+            Self::OcrCapture => "OCR capture",
+            Self::OcrTranslate => "OCR translate",
+        }
+    }
 }
 
 impl Default for ShortcutConfig {
     fn default() -> Self {
-        #[cfg(target_os = "macos")]
-        {
-            Self {
-                toggle_launcher: "Cmd+Shift+Space".to_string(),
-                ocr_capture: "Cmd+Shift+O".to_string(),
-            }
+        Self {
+            toggle_launcher: "Alt+Space".to_string(),
+            ocr_capture: "Alt+R".to_string(),
+            ocr_translate: "Alt+D".to_string(),
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            Self {
-                toggle_launcher: "Ctrl+Shift+Space".to_string(),
-                ocr_capture: "Ctrl+Shift+O".to_string(),
-            }
+    }
+}
+
+impl ShortcutConfig {
+    pub fn get(&self, key: ShortcutKey) -> &str {
+        match key {
+            ShortcutKey::ToggleLauncher => &self.toggle_launcher,
+            ShortcutKey::OcrCapture => &self.ocr_capture,
+            ShortcutKey::OcrTranslate => &self.ocr_translate,
+        }
+    }
+
+    pub fn set(&mut self, key: ShortcutKey, shortcut: impl Into<String>) {
+        match key {
+            ShortcutKey::ToggleLauncher => self.toggle_launcher = shortcut.into(),
+            ShortcutKey::OcrCapture => self.ocr_capture = shortcut.into(),
+            ShortcutKey::OcrTranslate => self.ocr_translate = shortcut.into(),
+        }
+    }
+
+    pub fn default_value(key: ShortcutKey) -> &'static str {
+        match key {
+            ShortcutKey::ToggleLauncher => "Alt+Space",
+            ShortcutKey::OcrCapture => "Alt+R",
+            ShortcutKey::OcrTranslate => "Alt+D",
         }
     }
 }
@@ -207,9 +262,14 @@ impl AcpConfig {
 
 impl AppConfig {
     pub(crate) fn normalize(&mut self) {
-        self.llm.normalize();
-        self.ocr.normalize(&self.llm);
-        self.rag.normalize(&self.llm);
+        let legacy_translation_prompt = self.general.take_legacy_translation_prompt();
+        self.general.normalize();
+        self.prompts
+            .adopt_legacy_translation_prompt(legacy_translation_prompt);
+        self.prompts.normalize();
+        let llm_provider_id_mapping = self.llm.normalize();
+        self.ocr.normalize(&self.llm, &llm_provider_id_mapping);
+        self.rag.normalize(&self.llm, &llm_provider_id_mapping);
         self.acp.normalize();
     }
 }
@@ -321,6 +381,11 @@ impl ConfigStore {
         let config_dir = dirs::config_dir().context("failed to determine config directory")?;
         Ok(config_dir.join("wabity"))
     }
+
+    pub fn data_dir() -> Result<PathBuf> {
+        let data_dir = dirs::data_dir().context("failed to determine data directory")?;
+        Ok(data_dir.join("wabity"))
+    }
 }
 
 fn normalize_agent_name(name: &str, program: &str, shell_command: Option<&str>) -> String {
@@ -332,53 +397,175 @@ fn normalize_agent_name(name: &str, program: &str, shell_command: Option<&str>) 
     derive_agent_name(shell_command, program)
 }
 
-impl LlmSettings {
-    fn normalize(&mut self) {
-        let mut used_ids = HashSet::new();
-        for (index, provider) in self.providers.iter_mut().enumerate() {
-            provider.name =
-                normalize_llm_provider_name(&provider.name, &provider.model, &provider.base_url);
-            provider.base_url = provider.base_url.trim().trim_end_matches('/').to_string();
-            provider.api_key = provider.api_key.trim().to_string();
-            provider.model = provider.model.trim().to_string();
-            if provider.protocol == LlmProviderProtocolKind::Embedding {
-                provider.supports_multimodal = false;
-            }
-            provider.id = make_llm_provider_id(&provider.id, &provider.name, index, &used_ids);
-            used_ids.insert(provider.id.clone());
+#[derive(Debug, Clone, Default)]
+struct LlmProviderIdTargets {
+    llm_id: Option<String>,
+    embedding_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LlmProviderIdMapping {
+    entries: HashMap<String, LlmProviderIdTargets>,
+}
+
+impl LlmProviderIdMapping {
+    fn insert(&mut self, original_id: &str, targets: LlmProviderIdTargets) {
+        let trimmed = original_id.trim();
+        if trimmed.is_empty() {
+            return;
         }
 
-        if !self
-            .default_provider_id
-            .as_ref()
-            .map(|id| self.providers.iter().any(|provider| &provider.id == id))
-            .unwrap_or(false)
-        {
-            self.default_provider_id = self.providers.first().map(|provider| provider.id.clone());
-        }
+        self.entries.insert(trimmed.to_string(), targets);
+    }
+
+    fn resolve_llm_id(&self, provider_id: &str) -> Option<String> {
+        self.entries
+            .get(provider_id)
+            .and_then(|targets| targets.llm_id.clone())
+    }
+
+    fn resolve_embedding_id(&self, provider_id: &str) -> Option<String> {
+        self.entries
+            .get(provider_id)
+            .and_then(|targets| targets.embedding_id.clone())
     }
 }
 
+impl LlmSettings {
+    fn normalize(&mut self) -> LlmProviderIdMapping {
+        let original_translation_provider_id = self
+            .translation_provider_id
+            .clone()
+            .or_else(|| self.legacy_default_provider_id.clone());
+        let original_question_answer_provider_id = self
+            .question_answer_provider_id
+            .clone()
+            .or_else(|| self.legacy_default_provider_id.clone());
+        let original_providers = std::mem::take(&mut self.providers);
+        let mut normalized_providers = Vec::new();
+        let mut used_ids = HashSet::new();
+        let mut id_mapping = LlmProviderIdMapping::default();
+
+        for (index, provider) in original_providers.into_iter().enumerate() {
+            let original_id = provider.id.clone();
+            let expanded_providers = expand_llm_provider(provider);
+            let split_from_single_entry = expanded_providers.len() > 1;
+            let mut targets = LlmProviderIdTargets::default();
+
+            for mut expanded_provider in expanded_providers {
+                expanded_provider.name = normalize_llm_provider_name(
+                    &expanded_provider.name,
+                    expanded_provider.model_name(),
+                    &expanded_provider.base_url,
+                    expanded_provider.model_type,
+                    split_from_single_entry,
+                );
+                expanded_provider.base_url = expanded_provider
+                    .base_url
+                    .trim()
+                    .trim_end_matches('/')
+                    .to_string();
+                expanded_provider.api_key = expanded_provider.api_key.trim().to_string();
+                expanded_provider.model = expanded_provider.model_name().to_string();
+                if !expanded_provider.has_responses_model() {
+                    expanded_provider.supports_multimodal = false;
+                    expanded_provider.supports_stateful = false;
+                }
+                if !expanded_provider.has_llm_model() {
+                    expanded_provider.supports_multimodal = false;
+                }
+                expanded_provider.id = make_llm_provider_id(
+                    &build_llm_provider_id_seed(
+                        &expanded_provider.id,
+                        &expanded_provider.name,
+                        expanded_provider.model_type,
+                        split_from_single_entry,
+                    ),
+                    &expanded_provider.name,
+                    index,
+                    &used_ids,
+                );
+                used_ids.insert(expanded_provider.id.clone());
+
+                if expanded_provider.has_llm_model() {
+                    targets.llm_id = Some(expanded_provider.id.clone());
+                }
+                if expanded_provider.has_embedding_model() {
+                    targets.embedding_id = Some(expanded_provider.id.clone());
+                }
+
+                normalized_providers.push(expanded_provider);
+            }
+
+            id_mapping.insert(&original_id, targets);
+        }
+
+        self.providers = normalized_providers;
+        self.translation_provider_id = normalize_llm_provider_reference(
+            &self.providers,
+            &id_mapping,
+            original_translation_provider_id.as_deref(),
+        );
+        self.question_answer_provider_id = normalize_llm_provider_reference(
+            &self.providers,
+            &id_mapping,
+            original_question_answer_provider_id.as_deref(),
+        );
+
+        id_mapping
+    }
+}
+
+fn normalize_llm_provider_reference(
+    providers: &[LlmProviderConfig],
+    id_mapping: &LlmProviderIdMapping,
+    provider_id: Option<&str>,
+) -> Option<String> {
+    provider_id
+        .and_then(|provider_id| {
+            id_mapping
+                .resolve_llm_id(provider_id)
+                .or_else(|| Some(provider_id.to_string()))
+        })
+        .filter(|provider_id| {
+            providers
+                .iter()
+                .any(|provider| &provider.id == provider_id && provider.has_llm_model())
+        })
+}
+
 impl OcrSettings {
-    fn normalize(&mut self, llm_settings: &LlmSettings) {
-        if !self
-            .llm_provider_id
+    fn normalize(&mut self, llm_settings: &LlmSettings, id_mapping: &LlmProviderIdMapping) {
+        let resolved_provider_id = self.llm_provider_id.as_deref().and_then(|provider_id| {
+            id_mapping
+                .resolve_llm_id(provider_id)
+                .or_else(|| Some(provider_id.to_string()))
+        });
+
+        if resolved_provider_id
             .as_ref()
-            .map(|id| {
+            .map(|provider_id| {
                 llm_settings
                     .providers
                     .iter()
-                    .any(|provider| &provider.id == id)
+                    .any(|provider| &provider.id == provider_id && provider.has_responses_model())
             })
             .unwrap_or(false)
         {
-            self.llm_provider_id = llm_settings.default_provider_id.clone();
+            self.llm_provider_id = resolved_provider_id;
+            return;
         }
+
+        self.llm_provider_id = llm_settings
+            .providers
+            .iter()
+            .find(|provider| provider.has_responses_model())
+            .map(|provider| provider.id.clone());
     }
 }
 
 impl RagSettings {
-    fn normalize(&mut self, llm_settings: &LlmSettings) {
+    fn normalize(&mut self, llm_settings: &LlmSettings, id_mapping: &LlmProviderIdMapping) {
         let mut seen_directories = HashSet::new();
         self.source_directories = self
             .source_directories
@@ -397,22 +584,34 @@ impl RagSettings {
             .filter(|value| seen_globs.insert(value.clone()))
             .collect();
 
-        if !self
+        let resolved_provider_id = self
             .embedding_provider_id
+            .as_deref()
+            .and_then(|provider_id| {
+                id_mapping
+                    .resolve_embedding_id(provider_id)
+                    .or_else(|| Some(provider_id.to_string()))
+            });
+
+        if resolved_provider_id
             .as_ref()
-            .map(|id| {
-                llm_settings.providers.iter().any(|provider| {
-                    &provider.id == id && provider.protocol == LlmProviderProtocolKind::Embedding
-                })
+            .map(|provider_id| {
+                llm_settings
+                    .providers
+                    .iter()
+                    .any(|provider| &provider.id == provider_id && provider.has_embedding_model())
             })
             .unwrap_or(false)
         {
-            self.embedding_provider_id = llm_settings
-                .providers
-                .iter()
-                .find(|provider| provider.protocol == LlmProviderProtocolKind::Embedding)
-                .map(|provider| provider.id.clone());
+            self.embedding_provider_id = resolved_provider_id;
+            return;
         }
+
+        self.embedding_provider_id = llm_settings
+            .providers
+            .iter()
+            .find(|provider| provider.has_embedding_model())
+            .map(|provider| provider.id.clone());
     }
 }
 
@@ -420,9 +619,134 @@ fn sanitize_mcp_servers(servers: &[AcpMcpServerConfig]) -> Vec<AcpMcpServerConfi
     servers.iter().map(sanitize_mcp_server).collect()
 }
 
-fn normalize_llm_provider_name(name: &str, model: &str, base_url: &str) -> String {
+fn expand_llm_provider(provider: LlmProviderConfig) -> Vec<LlmProviderConfig> {
+    let explicit_model = provider.model_name().to_string();
+    let legacy_responses_model = provider.legacy_responses_model_name().to_string();
+    let legacy_embedding_model = provider.legacy_embedding_model_name().to_string();
+    let has_legacy_split_fields =
+        !legacy_responses_model.is_empty() || !legacy_embedding_model.is_empty();
+    let has_legacy_protocol_fields =
+        provider.legacy_model_type().is_some() || provider.legacy_supports_embedding;
+    let mut llm_model = String::new();
+    let mut embedding_model = String::new();
+    let mut llm_supports_multimodal = false;
+    let mut llm_supports_stateful = false;
+    let mut llm_protocol = provider.protocol;
+
+    if has_legacy_split_fields {
+        llm_model = legacy_responses_model;
+        embedding_model = legacy_embedding_model;
+        llm_supports_multimodal = provider.supports_multimodal;
+        llm_supports_stateful = provider.supports_stateful;
+        llm_protocol = LlmProviderProtocol::Responses;
+    } else if has_legacy_protocol_fields {
+        match provider.legacy_model_type().unwrap_or_default() {
+            LlmModelType::Llm => {
+                llm_model = explicit_model.clone();
+                llm_supports_multimodal = provider.supports_multimodal;
+                llm_supports_stateful = provider.supports_stateful;
+                llm_protocol = provider
+                    .legacy_llm_protocol()
+                    .unwrap_or(LlmProviderProtocol::Responses);
+                if provider.legacy_supports_embedding {
+                    embedding_model = explicit_model;
+                }
+            }
+            LlmModelType::Embedding => {
+                embedding_model = explicit_model;
+            }
+        }
+    } else {
+        match provider.model_type {
+            LlmModelType::Llm => {
+                llm_model = explicit_model;
+                llm_supports_multimodal = provider.supports_multimodal;
+                llm_supports_stateful = provider.supports_stateful;
+                llm_protocol = provider.protocol;
+            }
+            LlmModelType::Embedding => {
+                embedding_model = explicit_model;
+            }
+        }
+    }
+
+    if llm_model.is_empty() && embedding_model.is_empty() {
+        let mut fallback_provider = provider;
+        fallback_provider.model_type = LlmModelType::Llm;
+        fallback_provider.protocol = LlmProviderProtocol::Responses;
+        fallback_provider.model.clear();
+        fallback_provider.supports_multimodal = false;
+        fallback_provider.supports_stateful = false;
+        clear_legacy_llm_provider_fields(&mut fallback_provider);
+        return vec![fallback_provider];
+    }
+
+    let mut expanded_providers = Vec::new();
+    if !llm_model.is_empty() {
+        let mut llm_provider = provider.clone();
+        llm_provider.model_type = LlmModelType::Llm;
+        llm_provider.protocol = llm_protocol;
+        llm_provider.model = llm_model;
+        llm_provider.supports_multimodal = llm_supports_multimodal;
+        llm_provider.supports_stateful = llm_supports_stateful;
+        clear_legacy_llm_provider_fields(&mut llm_provider);
+        expanded_providers.push(llm_provider);
+    }
+    if !embedding_model.is_empty() {
+        let mut embedding_provider = provider;
+        embedding_provider.model_type = LlmModelType::Embedding;
+        embedding_provider.protocol = LlmProviderProtocol::Responses;
+        embedding_provider.model = embedding_model;
+        embedding_provider.supports_multimodal = false;
+        embedding_provider.supports_stateful = false;
+        clear_legacy_llm_provider_fields(&mut embedding_provider);
+        expanded_providers.push(embedding_provider);
+    }
+
+    expanded_providers
+}
+
+fn clear_legacy_llm_provider_fields(provider: &mut LlmProviderConfig) {
+    provider.legacy_protocol = None;
+    provider.legacy_supports_embedding = false;
+    provider.legacy_responses_model.clear();
+    provider.legacy_embedding_model.clear();
+}
+
+fn build_llm_provider_id_seed(
+    current_id: &str,
+    name: &str,
+    model_type: LlmModelType,
+    split_from_single_entry: bool,
+) -> String {
+    let seed = if current_id.trim().is_empty() {
+        name.trim().to_string()
+    } else {
+        current_id.trim().to_string()
+    };
+    if !split_from_single_entry || model_type == LlmModelType::Llm {
+        return seed;
+    }
+
+    if seed.is_empty() {
+        "embedding".to_string()
+    } else {
+        format!("{seed}-embedding")
+    }
+}
+
+fn normalize_llm_provider_name(
+    name: &str,
+    model: &str,
+    base_url: &str,
+    model_type: LlmModelType,
+    split_from_single_entry: bool,
+) -> String {
     let trimmed = name.trim();
     if !trimmed.is_empty() {
+        if split_from_single_entry {
+            return format!("{trimmed} · {}", llm_model_type_label(model_type));
+        }
         return trimmed.to_string();
     }
 
@@ -433,10 +757,20 @@ fn normalize_llm_provider_name(name: &str, model: &str, base_url: &str) -> Strin
 
     let trimmed_base_url = base_url.trim();
     if !trimmed_base_url.is_empty() {
+        if split_from_single_entry {
+            return format!("{trimmed_base_url} · {}", llm_model_type_label(model_type));
+        }
         return trimmed_base_url.to_string();
     }
 
-    "LLM Provider".to_string()
+    format!("{} 模型", llm_model_type_label(model_type))
+}
+
+fn llm_model_type_label(model_type: LlmModelType) -> &'static str {
+    match model_type {
+        LlmModelType::Llm => "LLM",
+        LlmModelType::Embedding => "Embedding",
+    }
 }
 
 fn sanitize_mcp_server(server: &AcpMcpServerConfig) -> AcpMcpServerConfig {
@@ -717,14 +1051,23 @@ mod tests {
     #[test]
     fn test_shortcut_config_default() {
         let config = ShortcutConfig::default();
-        #[cfg(target_os = "macos")]
-        assert_eq!(config.toggle_launcher, "Cmd+Shift+Space");
-        #[cfg(target_os = "macos")]
-        assert_eq!(config.ocr_capture, "Cmd+Shift+O");
-        #[cfg(not(target_os = "macos"))]
-        assert_eq!(config.toggle_launcher, "Ctrl+Shift+Space");
-        #[cfg(not(target_os = "macos"))]
-        assert_eq!(config.ocr_capture, "Ctrl+Shift+O");
+        assert_eq!(config.toggle_launcher, "Alt+Space");
+        assert_eq!(config.ocr_capture, "Alt+R");
+        assert_eq!(config.ocr_translate, "Alt+D");
+    }
+
+    #[test]
+    fn shortcut_key_round_trips_config_access() {
+        let mut config = ShortcutConfig::default();
+        let key = ShortcutKey::parse("ocr_translate").expect("known shortcut key should parse");
+
+        assert_eq!(key.as_str(), "ocr_translate");
+        assert_eq!(config.get(key), "Alt+D");
+
+        config.set(key, "Cmd+Alt+D");
+
+        assert_eq!(config.get(key), "Cmd+Alt+D");
+        assert_eq!(ShortcutConfig::default_value(key), "Alt+D");
     }
 
     #[test]
@@ -774,13 +1117,15 @@ mod tests {
         config.llm.providers = vec![crate::domain::settings::LlmProviderConfig {
             id: "openai".to_string(),
             name: "OpenAI".to_string(),
-            protocol: LlmProviderProtocolKind::Chat,
             base_url: "https://api.openai.com/v1".to_string(),
             api_key: "sk-test".to_string(),
+            model_type: crate::domain::settings::LlmModelType::Llm,
             model: "gpt-4.1-mini".to_string(),
             supports_multimodal: true,
+            ..crate::domain::settings::LlmProviderConfig::default()
         }];
-        config.llm.default_provider_id = Some("openai".to_string());
+        config.llm.translation_provider_id = Some("openai".to_string());
+        config.llm.question_answer_provider_id = Some("openai".to_string());
         config.ocr.provider = crate::domain::settings::OcrProviderKind::LlmOcr;
         config.ocr.llm_provider_id = Some("openai".to_string());
         config.rag.source_directories = vec!["/tmp/workspace".to_string()];
@@ -824,6 +1169,7 @@ mod tests {
         );
         assert_eq!(parsed.general.language, config.general.language);
         assert_eq!(parsed.appearance.theme, config.appearance.theme);
+        assert_eq!(parsed.prompts, config.prompts);
         assert_eq!(parsed.llm, config.llm);
         assert_eq!(parsed.ocr.provider, config.ocr.provider);
         assert_eq!(parsed.ocr.llm_provider_id, config.ocr.llm_provider_id);
@@ -835,7 +1181,7 @@ mod tests {
     fn parse_config_content_fills_missing_shortcut_fields_from_defaults() {
         let content = r#"
 [shortcuts]
-toggle_launcher = "Cmd+Shift+Space"
+toggle_launcher = "Alt+Space"
 
 [workspace]
 root_path = "/Users/wweir"
@@ -857,13 +1203,63 @@ saved_sessions = []
 
         let parsed = parse_config_content(content).expect("legacy config should parse");
 
-        #[cfg(target_os = "macos")]
-        assert_eq!(parsed.shortcuts.ocr_capture, "Cmd+Shift+O");
-        #[cfg(not(target_os = "macos"))]
-        assert_eq!(parsed.shortcuts.ocr_capture, "Ctrl+Shift+O");
+        assert_eq!(parsed.shortcuts.ocr_capture, "Alt+R");
+        assert_eq!(parsed.shortcuts.ocr_translate, "Alt+D");
         assert_eq!(parsed.ocr, OcrSettings::default());
         assert_eq!(parsed.llm, LlmSettings::default());
+        assert_eq!(
+            parsed.prompts.translation_prompt,
+            crate::domain::settings::default_translation_prompt()
+        );
         assert!(parsed.acp.agents.is_empty());
+    }
+
+    #[test]
+    fn parse_config_content_restores_default_translation_prompt_when_blank() {
+        let content = r#"
+[general]
+autoStart = false
+showInDock = true
+language = "zh-CN"
+translationPrompt = "   "
+"#;
+
+        let parsed = parse_config_content(content).expect("blank translation prompt should parse");
+
+        assert_eq!(
+            parsed.prompts.translation_prompt,
+            crate::domain::settings::default_translation_prompt()
+        );
+    }
+
+    #[test]
+    fn parse_config_content_restores_default_rag_answer_prompt_when_blank() {
+        let content = r#"
+[prompts]
+ragAnswerSystemPrompt = "   "
+"#;
+
+        let parsed = parse_config_content(content).expect("blank rag answer prompt should parse");
+
+        assert_eq!(
+            parsed.prompts.rag_answer_system_prompt,
+            crate::domain::settings::default_rag_answer_system_prompt()
+        );
+    }
+
+    #[test]
+    fn parse_config_content_migrates_legacy_translation_prompt_into_prompts_section() {
+        let content = r#"
+[general]
+autoStart = false
+showInDock = true
+language = "zh-CN"
+translationPrompt = "Translate only."
+"#;
+
+        let parsed = parse_config_content(content).expect("legacy translation prompt should parse");
+
+        assert_eq!(parsed.prompts.translation_prompt, "Translate only.");
     }
 
     #[test]
@@ -893,10 +1289,7 @@ saved_sessions = []
         config.shortcuts.ocr_capture = LEGACY_DEFAULT_OCR_SHORTCUT.to_string();
 
         assert!(migrate_legacy_shortcuts(&mut config));
-        #[cfg(target_os = "macos")]
-        assert_eq!(config.shortcuts.ocr_capture, "Cmd+Shift+O");
-        #[cfg(not(target_os = "macos"))]
-        assert_eq!(config.shortcuts.ocr_capture, "Ctrl+Shift+O");
+        assert_eq!(config.shortcuts.ocr_capture, "Alt+R");
     }
 
     #[test]
@@ -909,7 +1302,7 @@ saved_sessions = []
     }
 
     #[test]
-    fn parse_config_content_normalizes_default_llm_provider_id() {
+    fn parse_config_content_migrates_legacy_default_llm_provider_id() {
         let content = r#"
 [llm]
 defaultProviderId = "missing"
@@ -932,8 +1325,84 @@ supportsMultimodal = true
             parsed.llm.providers[0].base_url,
             "https://api.openai.com/v1"
         );
-        assert_eq!(parsed.llm.default_provider_id.as_deref(), Some("openai"));
-        assert_eq!(parsed.ocr.llm_provider_id.as_deref(), Some("openai"));
+        assert_eq!(parsed.llm.translation_provider_id.as_deref(), None);
+        assert_eq!(parsed.llm.question_answer_provider_id.as_deref(), None);
+        assert_eq!(parsed.ocr.llm_provider_id, None);
+    }
+
+    #[test]
+    fn parse_config_content_maps_legacy_chat_protocol_to_chat_completions() {
+        let content = r#"
+[llm]
+
+[[llm.providers]]
+id = "chat"
+name = "Chat"
+protocol = "openai_compatible"
+baseUrl = "https://api.example.com/v1"
+apiKey = ""
+model = "gpt-4.1-mini"
+"#;
+
+        let parsed = parse_config_content(content).expect("legacy chat config should parse");
+
+        assert_eq!(parsed.llm.providers.len(), 1);
+        assert_eq!(
+            parsed.llm.providers[0].protocol,
+            crate::domain::settings::LlmProviderProtocol::ChatCompletions
+        );
+    }
+
+    #[test]
+    fn parse_config_content_splits_combined_provider_and_repairs_references() {
+        let content = r#"
+[llm]
+defaultProviderId = "combo"
+
+[[llm.providers]]
+id = "combo"
+name = "OpenAI"
+baseUrl = "https://api.openai.com/v1/"
+apiKey = ""
+responsesModel = "gpt-4.1-mini"
+supportsMultimodal = true
+embeddingModel = "text-embedding-3-small"
+
+[ocr]
+provider = "llm_ocr"
+llmProviderId = "combo"
+
+[rag]
+embeddingProviderId = "combo"
+"#;
+
+        let parsed = parse_config_content(content).expect("combined provider config should parse");
+
+        assert_eq!(parsed.llm.providers.len(), 2);
+        let llm_provider = parsed
+            .llm
+            .providers
+            .iter()
+            .find(|provider| provider.has_responses_model())
+            .expect("llm provider should exist");
+        let embedding_provider = parsed
+            .llm
+            .providers
+            .iter()
+            .find(|provider| provider.has_embedding_model())
+            .expect("embedding provider should exist");
+        assert_eq!(llm_provider.id, "combo");
+        assert_eq!(embedding_provider.id, "combo-embedding");
+        assert_eq!(parsed.llm.translation_provider_id.as_deref(), Some("combo"));
+        assert_eq!(
+            parsed.llm.question_answer_provider_id.as_deref(),
+            Some("combo")
+        );
+        assert_eq!(parsed.ocr.llm_provider_id.as_deref(), Some("combo"));
+        assert_eq!(
+            parsed.rag.embedding_provider_id.as_deref(),
+            Some("combo-embedding")
+        );
     }
 
     #[test]
@@ -943,20 +1412,22 @@ supportsMultimodal = true
             crate::domain::settings::LlmProviderConfig {
                 id: "chat".to_string(),
                 name: "Chat".to_string(),
-                protocol: LlmProviderProtocolKind::Chat,
                 base_url: "https://api.example.com/v1".to_string(),
                 api_key: String::new(),
+                model_type: crate::domain::settings::LlmModelType::Llm,
                 model: "gpt-4.1-mini".to_string(),
                 supports_multimodal: true,
+                ..crate::domain::settings::LlmProviderConfig::default()
             },
             crate::domain::settings::LlmProviderConfig {
                 id: "embedding".to_string(),
                 name: "Embedding".to_string(),
-                protocol: LlmProviderProtocolKind::Embedding,
                 base_url: "https://api.example.com/v1".to_string(),
                 api_key: String::new(),
+                model_type: crate::domain::settings::LlmModelType::Embedding,
                 model: "text-embedding-3-small".to_string(),
                 supports_multimodal: false,
+                ..crate::domain::settings::LlmProviderConfig::default()
             },
         ];
         config.rag.source_directories = vec![
@@ -984,6 +1455,21 @@ supportsMultimodal = true
         assert_eq!(
             config.rag.embedding_provider_id.as_deref(),
             Some("embedding")
+        );
+    }
+
+    #[test]
+    fn parse_config_content_uses_default_rag_ignore_globs_when_missing() {
+        let content = r#"
+[rag]
+sourceDirectories = ["/tmp/docs"]
+"#;
+
+        let parsed = parse_config_content(content).expect("rag config should parse");
+
+        assert_eq!(
+            parsed.rag.ignore_globs,
+            crate::domain::settings::default_rag_ignore_globs()
         );
     }
 }

@@ -727,10 +727,33 @@ impl SessionRecord {
         }
     }
 
+    fn thought_block_index(message: &AcpSessionMessage) -> Option<usize> {
+        message
+            .blocks
+            .iter()
+            .position(|block| matches!(block, AcpMessageBlock::Thought { .. }))
+    }
+
+    fn actions_block_index(message: &AcpSessionMessage) -> Option<usize> {
+        message
+            .blocks
+            .iter()
+            .position(|block| matches!(block, AcpMessageBlock::Actions { .. }))
+    }
+
+    fn content_block_index(message: &AcpSessionMessage) -> Option<usize> {
+        message
+            .blocks
+            .iter()
+            .position(|block| matches!(block, AcpMessageBlock::Content { .. }))
+    }
+
     fn append_assistant_chunk(&mut self, content: String) {
         if let Some(message) = self.pending_assistant_message_mut() {
-            // Append to the last Content block if it exists, otherwise create a new one
-            if let Some(AcpMessageBlock::Content { text }) = message.blocks.last_mut() {
+            if let Some(index) = Self::content_block_index(message) {
+                let AcpMessageBlock::Content { text } = &mut message.blocks[index] else {
+                    unreachable!("content block index must point to a content block");
+                };
                 text.push_str(&content);
                 return;
             }
@@ -750,18 +773,25 @@ impl SessionRecord {
 
     fn append_thought_chunk(&mut self, content: String) {
         if let Some(message) = self.pending_assistant_message_mut() {
-            // Append to the last Thought block if it exists, otherwise create a new one
-            if let Some(AcpMessageBlock::Thought { content: thought }) = message.blocks.last_mut() {
+            if let Some(index) = Self::thought_block_index(message) {
+                let AcpMessageBlock::Thought { content: thought } = &mut message.blocks[index]
+                else {
+                    unreachable!("thought block index must point to a thought block");
+                };
                 thought.push_str(&content);
                 return;
             }
-            message.blocks.push(AcpMessageBlock::Thought { content });
+            message
+                .blocks
+                .insert(0, AcpMessageBlock::Thought { content });
             return;
         }
 
         self.start_assistant_message();
         if let Some(message) = self.pending_assistant_message_mut() {
-            message.blocks.push(AcpMessageBlock::Thought { content });
+            message
+                .blocks
+                .insert(0, AcpMessageBlock::Thought { content });
         }
     }
 
@@ -773,8 +803,10 @@ impl SessionRecord {
         detail: Option<String>,
     ) {
         if let Some(message) = self.pending_assistant_message_mut() {
-            // Append to the last Actions block if it exists, otherwise create a new one
-            if let Some(AcpMessageBlock::Actions { items }) = message.blocks.last_mut() {
+            if let Some(index) = Self::actions_block_index(message) {
+                let AcpMessageBlock::Actions { items } = &mut message.blocks[index] else {
+                    unreachable!("actions block index must point to an actions block");
+                };
                 items.push(AcpActionEvent {
                     kind,
                     title,
@@ -783,27 +815,47 @@ impl SessionRecord {
                 });
                 return;
             }
-            message.blocks.push(AcpMessageBlock::Actions {
-                items: vec![AcpActionEvent {
-                    kind,
-                    title,
-                    correlation_id,
-                    detail,
-                }],
-            });
+            let insert_at = if let Some(index) = Self::thought_block_index(message) {
+                index + 1
+            } else if let Some(index) = Self::content_block_index(message) {
+                index
+            } else {
+                message.blocks.len()
+            };
+            message.blocks.insert(
+                insert_at,
+                AcpMessageBlock::Actions {
+                    items: vec![AcpActionEvent {
+                        kind,
+                        title,
+                        correlation_id,
+                        detail,
+                    }],
+                },
+            );
             return;
         }
 
         self.start_assistant_message();
         if let Some(message) = self.pending_assistant_message_mut() {
-            message.blocks.push(AcpMessageBlock::Actions {
-                items: vec![AcpActionEvent {
-                    kind,
-                    title,
-                    correlation_id,
-                    detail,
-                }],
-            });
+            let insert_at = if let Some(index) = Self::thought_block_index(message) {
+                index + 1
+            } else if let Some(index) = Self::content_block_index(message) {
+                index
+            } else {
+                message.blocks.len()
+            };
+            message.blocks.insert(
+                insert_at,
+                AcpMessageBlock::Actions {
+                    items: vec![AcpActionEvent {
+                        kind,
+                        title,
+                        correlation_id,
+                        detail,
+                    }],
+                },
+            );
         }
     }
 
@@ -1411,6 +1463,36 @@ fn is_load_not_supported(error: &anyhow::Error) -> bool {
 mod tests {
     use super::*;
 
+    fn make_session_record() -> SessionRecord {
+        SessionRecord {
+            agent: AcpAgentConfig {
+                id: "agent".to_string(),
+                name: "Agent".to_string(),
+                program: "agent".to_string(),
+                args: Vec::new(),
+                shell_command: None,
+                mcp_servers: Vec::new(),
+            },
+            mcp_servers: Vec::new(),
+            summary: AcpSessionSummary {
+                session_id: "session-1".to_string(),
+                workspace_root: "/tmp".to_string(),
+                title: "tmp".to_string(),
+                agent_id: Some("agent".to_string()),
+                agent_name: "Agent".to_string(),
+                status: AcpSessionStatus::Idle,
+                error_level: None,
+                attention: false,
+                is_active: false,
+                last_error: None,
+                last_updated_at_ms: 0,
+            },
+            messages: Vec::new(),
+            next_message_id: 0,
+            command_tx: mpsc::unbounded_channel().0,
+        }
+    }
+
     #[test]
     fn ordered_stream_events_finish_after_prior_updates() {
         let session_id = "session-1";
@@ -1512,40 +1594,16 @@ mod tests {
 
     #[test]
     fn new_turn_events_do_not_backfill_into_older_pending_assistant() {
-        let mut record = SessionRecord {
-            agent: AcpAgentConfig {
-                id: "agent".to_string(),
-                name: "Agent".to_string(),
-                program: "agent".to_string(),
-                args: Vec::new(),
-                shell_command: None,
-                mcp_servers: Vec::new(),
-            },
-            mcp_servers: Vec::new(),
-            summary: AcpSessionSummary {
-                session_id: "session-1".to_string(),
-                workspace_root: "/tmp".to_string(),
-                title: "tmp".to_string(),
-                agent_id: Some("agent".to_string()),
-                agent_name: "Agent".to_string(),
-                status: AcpSessionStatus::Idle,
-                error_level: None,
-                attention: false,
-                is_active: false,
-                last_error: None,
-                last_updated_at_ms: 0,
-            },
-            messages: vec![AcpSessionMessage {
-                id: "0".to_string(),
-                role: AcpMessageRole::Assistant,
-                blocks: vec![AcpMessageBlock::Content {
-                    text: "older".to_string(),
-                }],
-                pending: true,
+        let mut record = make_session_record();
+        record.messages.push(AcpSessionMessage {
+            id: "0".to_string(),
+            role: AcpMessageRole::Assistant,
+            blocks: vec![AcpMessageBlock::Content {
+                text: "older".to_string(),
             }],
-            next_message_id: 1,
-            command_tx: mpsc::unbounded_channel().0,
-        };
+            pending: true,
+        });
+        record.next_message_id = 1;
 
         record.push_message(AcpMessageRole::User, "next".to_string(), false);
         record.start_assistant_message();
@@ -1563,6 +1621,52 @@ mod tests {
                 if items.len() == 1
                     && items[0].title == "Read file"
                     && items[0].correlation_id.is_none()
+        ));
+    }
+
+    #[test]
+    fn assistant_content_chunks_merge_across_action_events() {
+        let mut record = make_session_record();
+
+        record.start_assistant_message();
+        record.append_assistant_chunk("part-1".to_string());
+        record.append_action_event(
+            "tool-call".to_string(),
+            "Read file".to_string(),
+            Some("tool-1".to_string()),
+            Some("{\"path\":\"README.md\"}".to_string()),
+        );
+        record.append_assistant_chunk("part-2".to_string());
+
+        assert!(matches!(
+            &record.messages[0].blocks[..],
+            [
+                AcpMessageBlock::Actions { items },
+                AcpMessageBlock::Content { text }
+            ] if items.len() == 1 && text == "part-1part-2"
+        ));
+    }
+
+    #[test]
+    fn assistant_thought_chunks_merge_across_action_events() {
+        let mut record = make_session_record();
+
+        record.start_assistant_message();
+        record.append_thought_chunk("think-1".to_string());
+        record.append_action_event(
+            "tool-update".to_string(),
+            "Read file".to_string(),
+            Some("tool-1".to_string()),
+            Some("{\"ok\":true}".to_string()),
+        );
+        record.append_thought_chunk("think-2".to_string());
+
+        assert!(matches!(
+            &record.messages[0].blocks[..],
+            [
+                AcpMessageBlock::Thought { content },
+                AcpMessageBlock::Actions { items }
+            ] if content == "think-1think-2" && items.len() == 1
         ));
     }
 }

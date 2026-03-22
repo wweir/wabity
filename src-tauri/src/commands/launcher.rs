@@ -1,14 +1,21 @@
+use std::path::PathBuf;
+
 use tauri::{
     ipc::{Invoke, InvokeError},
     AppHandle, Emitter, State, Wry,
 };
+use tauri_plugin_opener::OpenerExt;
 
 use crate::{
     domain::{
         actions::ActionMatch, application::InstalledAppMatch, execution::ExecutionRequest,
         execution::ExecutionResult, file_search::FileSearchMatch, query::QueryPayload,
     },
-    infrastructure::{config::normalize_workspace_root, window},
+    infrastructure::{
+        config::{normalize_workspace_root, ShortcutKey},
+        window,
+    },
+    services::rag,
     state::{AppState, ShortcutRuntimeState},
 };
 
@@ -48,13 +55,13 @@ pub fn search_apps(
         .map_err(|error| error.to_string())
 }
 
-pub fn execute_action(
+pub async fn execute_action(
     state: State<'_, AppState>,
     request: ExecutionRequest,
 ) -> Result<ExecutionResult, String> {
     state
-        .executor()
-        .execute(&request)
+        .execute_action(request)
+        .await
         .map_err(|error| error.to_string())
 }
 
@@ -62,6 +69,45 @@ pub fn launch_app(state: State<'_, AppState>, path: String) -> Result<ExecutionR
     state
         .application()
         .launch(&path)
+        .map_err(|error| error.to_string())
+}
+
+pub async fn open_document_reference(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<(), String> {
+    let normalized = path.trim();
+    if normalized.is_empty() {
+        return Err("文档引用路径不能为空".to_string());
+    }
+
+    let workspace = state.workspace().await.map_err(|error| error.to_string())?;
+    let workspace_root =
+        normalize_workspace_root(&workspace.root_path).map_err(|error| error.to_string())?;
+    let settings = state
+        .app_settings()
+        .await
+        .map_err(|error| error.to_string())?;
+    let allowed_roots = rag::collect_document_access_roots(&workspace_root, &settings.rag);
+    let canonical_path = PathBuf::from(normalized)
+        .canonicalize()
+        .map_err(|error| format!("无法解析文档引用路径: {error}"))?;
+    if !canonical_path.is_file() {
+        return Err(format!("文档引用不是文件: {}", canonical_path.display()));
+    }
+    if !rag::path_is_within_roots(&canonical_path, &allowed_roots) {
+        return Err(format!(
+            "文档引用超出允许范围，只能打开当前 workspace 或显式配置的 RAG 目录: {}",
+            canonical_path.display()
+        ));
+    }
+
+    app.opener()
+        .open_path(
+            canonical_path.to_string_lossy().into_owned(),
+            None::<String>,
+        )
         .map_err(|error| error.to_string())
 }
 
@@ -100,14 +146,11 @@ pub async fn set_shortcut(
     key: String,
     shortcut: String,
 ) -> Result<(), String> {
+    let key = ShortcutKey::parse(&key).map_err(|error| error.to_string())?;
     let next_shortcut = crate::infrastructure::hotkey::parse_shortcut(&shortcut)
         .ok_or_else(|| format!("invalid shortcut: {shortcut}"))?;
 
-    let previous_shortcut = match key.as_str() {
-        "toggle_launcher" => shortcut_state.current_launcher_shortcut(),
-        "ocr_capture" => shortcut_state.current_ocr_shortcut(),
-        _ => return Err(format!("unknown shortcut key: {key}")),
-    };
+    let previous_shortcut = shortcut_state.current_shortcut(key);
 
     if let Some(previous_shortcut) = previous_shortcut {
         crate::infrastructure::hotkey::unregister_shortcut(&app, previous_shortcut)
@@ -121,7 +164,7 @@ pub async fn set_shortcut(
         return Err(error.to_string());
     }
 
-    if let Err(error) = state.update_shortcut(&key, &shortcut).await {
+    if let Err(error) = state.update_shortcut(key, &shortcut).await {
         let _ = crate::infrastructure::hotkey::unregister_shortcut(&app, next_shortcut);
         if let Some(previous_shortcut) = previous_shortcut {
             let _ = crate::infrastructure::hotkey::register_shortcut(&app, previous_shortcut);
@@ -129,11 +172,7 @@ pub async fn set_shortcut(
         return Err(error.to_string());
     }
 
-    match key.as_str() {
-        "toggle_launcher" => shortcut_state.set_launcher_shortcut(Some(next_shortcut)),
-        "ocr_capture" => shortcut_state.set_ocr_shortcut(Some(next_shortcut)),
-        _ => return Err(format!("unknown shortcut key: {key}")),
-    }
+    shortcut_state.set_shortcut(key, Some(next_shortcut));
 
     let config = state.config().await.map_err(|error| error.to_string())?;
     app.emit("shortcut-updated", config)
@@ -188,16 +227,14 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
         }
         "execute_action" => {
             let resolver = invoke.resolver.clone();
-            let Some(state) = super::parse_or_invoke_error(&invoke, "execute_action", "state")
-            else {
-                return true;
-            };
-            let Some(request) = super::parse_or_invoke_error(&invoke, "execute_action", "request")
-            else {
-                return true;
-            };
+            resolver.respond_async(async move {
+                let state = super::parse_arg(&invoke, "execute_action", "state")?;
+                let request = super::parse_arg(&invoke, "execute_action", "request")?;
 
-            resolver.respond(execute_action(state, request).map_err(InvokeError::from));
+                execute_action(state, request)
+                    .await
+                    .map_err(InvokeError::from)
+            });
             true
         }
         "launch_app" => {
@@ -210,6 +247,19 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
             };
 
             resolver.respond(launch_app(state, path).map_err(InvokeError::from));
+            true
+        }
+        "open_document_reference" => {
+            let resolver = invoke.resolver.clone();
+            resolver.respond_async(async move {
+                let app = super::parse_arg(&invoke, "open_document_reference", "app")?;
+                let state = super::parse_arg(&invoke, "open_document_reference", "state")?;
+                let path = super::parse_arg(&invoke, "open_document_reference", "path")?;
+
+                open_document_reference(app, state, path)
+                    .await
+                    .map_err(InvokeError::from)
+            });
             true
         }
         "hide_launcher_window" => {

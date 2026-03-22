@@ -1,14 +1,12 @@
 use std::{
-    collections::BTreeSet,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, RwLock as StdRwLock,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result};
-use serde_json::Value;
 use tauri_plugin_global_shortcut::Shortcut;
 use tokio::sync::RwLock as AsyncRwLock;
 
@@ -22,6 +20,9 @@ use crate::services::{
     matcher::MatcherService,
     ocr::{OcrProvider, OpenAiCompatibleOcrProvider, UnavailableOcrProvider},
     rag::{self, RagIndexService},
+    rag_answer,
+    rag_mcp::RagMcpServerService,
+    translate,
 };
 use crate::{
     domain::{
@@ -29,9 +30,11 @@ use crate::{
             AcpAgentCatalog, AcpAgentConfig, AcpMcpServerCatalog, AcpMcpServerConfig,
             AcpNameValuePair, AcpRestoreNotice, AcpSessionDetail, AcpSessionSummary,
         },
-        rag::RagScanResult,
+        execution::{ExecutionRequest, ExecutionResult},
+        rag::{BuiltinRagMcpServerStatus, RagRuntimeStatus, RagScanResult},
         settings::{
-            AppSettings, LlmProviderConfig, LlmSettings, OcrProviderKind, OcrSettings, RagSettings,
+            AppSettings, LlmProviderConfig, LlmProviderModelEntry, LlmSettings, OcrProviderKind,
+            OcrSettings, RagSettings,
         },
         skills::PublicSkillCatalog,
         workspace::WorkspaceState,
@@ -39,7 +42,11 @@ use crate::{
     infrastructure::config::{
         default_workspace_root, display_home_as_tilde, home_workspace_root,
         normalize_workspace_root, AppConfig, ConfigStore, SavedAcpSession, ShortcutConfig,
-        WorkspaceHistory, RECENT_WORKSPACE_LIMIT,
+        ShortcutKey, WorkspaceHistory, RECENT_WORKSPACE_LIMIT,
+    },
+    infrastructure::openai_compatible::{
+        extract_model_entries, extract_provider_error_message, normalize_base_url,
+        parse_json_payload,
     },
     services::public_skills::PublicSkillService,
 };
@@ -53,6 +60,7 @@ pub struct AppState {
     acp: AcpService,
     ocr_provider: Arc<StdRwLock<Arc<dyn OcrProvider>>>,
     rag_index: RagIndexService,
+    rag_mcp: RagMcpServerService,
     config_store: Arc<AsyncRwLock<ConfigStore>>,
     workspace_state: Arc<AsyncRwLock<WorkspaceState>>,
 }
@@ -78,10 +86,12 @@ impl AppState {
             home_path: home_workspace_root().map(|path| path.to_string_lossy().into_owned()),
             display_home_as_tilde: display_home_as_tilde(),
         };
-        let rag_index = RagIndexService::new(ConfigStore::config_dir()?);
+        let rag_index = RagIndexService::new(ConfigStore::data_dir()?);
         rag_index
             .apply_settings(config.rag.clone(), config.llm.clone())
             .await;
+        let rag_mcp = RagMcpServerService::new(ConfigStore::data_dir()?, config_store.clone());
+        rag_mcp.start().await;
 
         Ok(Self {
             matcher,
@@ -91,6 +101,7 @@ impl AppState {
             acp: AcpService::new(),
             ocr_provider: Arc::new(StdRwLock::new(build_ocr_provider(&config.ocr, &config.llm))),
             rag_index,
+            rag_mcp,
             config_store,
             workspace_state: Arc::new(AsyncRwLock::new(initial_workspace)),
         })
@@ -100,8 +111,41 @@ impl AppState {
         &self.matcher
     }
 
-    pub fn executor(&self) -> &ExecutorService {
-        &self.executor
+    pub async fn execute_action(&self, request: ExecutionRequest) -> Result<ExecutionResult> {
+        if request.action_id == "translate_text" {
+            let settings = self.app_settings().await?;
+            return tokio::task::spawn_blocking(move || {
+                translate::execute_translation(
+                    &request.query.raw_text,
+                    &settings.prompts,
+                    &settings.llm,
+                )
+            })
+            .await
+            .context("failed to join translation task")?;
+        }
+
+        if request.action_id == "rag_answer" {
+            let settings = self.app_settings().await?;
+            let data_dir = ConfigStore::data_dir()?;
+            let workspace = self.workspace().await?;
+            let workspace_root = normalize_workspace_root(&workspace.root_path)?;
+            let mcp_servers = self.acp_mcp_servers().await?.servers;
+            return rag_answer::answer_question(rag_answer::QuestionAnswerRequest {
+                data_dir: &data_dir,
+                workspace_root: &workspace_root,
+                raw_text: &request.query.raw_text,
+                conversation: &request.conversation,
+                conversation_state: request.conversation_state.as_ref(),
+                prompts_settings: &settings.prompts,
+                rag_settings: &settings.rag,
+                llm_settings: &settings.llm,
+                mcp_servers: &mcp_servers,
+            })
+            .await;
+        }
+
+        self.executor.execute(&request)
     }
 
     pub fn file_search(&self) -> &FileSearchService {
@@ -153,6 +197,7 @@ impl AppState {
         Ok(AppSettings {
             general: config.general,
             appearance: config.appearance,
+            prompts: config.prompts,
             llm: config.llm,
             ocr: config.ocr,
             rag: config.rag,
@@ -162,7 +207,7 @@ impl AppState {
     pub async fn list_llm_provider_models(
         &self,
         provider: LlmProviderConfig,
-    ) -> Result<Vec<String>> {
+    ) -> Result<Vec<LlmProviderModelEntry>> {
         tokio::task::spawn_blocking(move || fetch_llm_provider_models(&provider))
             .await
             .context("failed to join LLM model list task")?
@@ -172,14 +217,10 @@ impl AppState {
         PublicSkillService::load_catalog()
     }
 
-    pub async fn update_shortcut(&self, key: &str, shortcut: &str) -> Result<()> {
+    pub async fn update_shortcut(&self, key: ShortcutKey, shortcut: &str) -> Result<()> {
         let store = self.config_store.write().await;
         let mut config = store.load().await?;
-        match key {
-            "toggle_launcher" => config.shortcuts.toggle_launcher = shortcut.to_string(),
-            "ocr_capture" => config.shortcuts.ocr_capture = shortcut.to_string(),
-            other => anyhow::bail!("unknown shortcut key: {other}"),
-        }
+        config.shortcuts.set(key, shortcut);
         store.save(&config).await?;
         Ok(())
     }
@@ -247,6 +288,7 @@ impl AppState {
         let mut config = store.load().await?;
         config.general = settings.general.clone();
         config.appearance = settings.appearance.clone();
+        config.prompts = settings.prompts.clone();
         config.llm = settings.llm.clone();
         config.ocr = settings.ocr.clone();
         config.rag = settings.rag.clone();
@@ -259,6 +301,7 @@ impl AppState {
         Ok(AppSettings {
             general: config.general,
             appearance: config.appearance,
+            prompts: config.prompts,
             llm: config.llm,
             ocr: config.ocr,
             rag: config.rag,
@@ -271,8 +314,16 @@ impl AppState {
         llm_settings: LlmSettings,
     ) -> Result<RagScanResult> {
         validate_rag_settings(&rag_settings, &llm_settings)?;
-        let config_dir = ConfigStore::config_dir()?;
-        rag::scan_rag_sources(&config_dir, &rag_settings, &llm_settings).await
+        let data_dir = ConfigStore::data_dir()?;
+        rag::scan_rag_sources(&data_dir, &rag_settings, &llm_settings).await
+    }
+
+    pub async fn rag_runtime_status(&self) -> RagRuntimeStatus {
+        self.rag_index.runtime_status().await
+    }
+
+    pub async fn builtin_rag_mcp_server_status(&self) -> BuiltinRagMcpServerStatus {
+        self.rag_mcp.status().await
     }
 
     pub async fn create_acp_session(&self, agent_id: Option<String>) -> Result<AcpSessionDetail> {
@@ -441,11 +492,11 @@ fn build_ocr_provider(settings: &OcrSettings, llm_settings: &LlmSettings) -> Arc
         OcrProviderKind::System => build_system_ocr_provider(),
         OcrProviderKind::LlmOcr => {
             match resolve_llm_provider(settings, llm_settings).and_then(|provider| {
-                if provider.protocol != crate::domain::settings::LlmProviderProtocolKind::Chat {
-                    anyhow::bail!("OCR 当前只支持 OpenAI Chat 协议的 LLM provider")
+                if !provider.has_responses_model() {
+                    anyhow::bail!("OCR 选择的 LLM 配置缺少 responses 模型")
                 }
-                if !provider.supports_multimodal {
-                    anyhow::bail!("OCR 选择的 LLM provider 未启用多模态能力")
+                if !provider.supports_multimodal() {
+                    anyhow::bail!("OCR 选择的 LLM 配置未启用多模态能力")
                 }
                 OpenAiCompatibleOcrProvider::from_config(provider)
             }) {
@@ -464,17 +515,38 @@ fn validate_llm_settings(settings: &LlmSettings) -> Result<()> {
             .with_context(|| format!("第 {} 个 LLM provider 配置非法", index + 1))?;
     }
 
-    if let Some(default_provider_id) = settings.default_provider_id.as_deref() {
-        if !settings
-            .providers
-            .iter()
-            .any(|provider| provider.id == default_provider_id)
-        {
-            anyhow::bail!("默认 LLM provider 不存在: {default_provider_id}");
-        }
-    }
+    validate_llm_provider_reference(
+        settings,
+        settings.translation_provider_id.as_deref(),
+        "翻译 LLM provider",
+    )?;
+    validate_llm_provider_reference(
+        settings,
+        settings.question_answer_provider_id.as_deref(),
+        "问答 LLM provider",
+    )?;
 
     Ok(())
+}
+
+fn validate_llm_provider_reference(
+    settings: &LlmSettings,
+    provider_id: Option<&str>,
+    label: &str,
+) -> Result<()> {
+    let Some(provider_id) = provider_id else {
+        return Ok(());
+    };
+
+    if settings
+        .providers
+        .iter()
+        .any(|provider| provider.id == provider_id && provider.has_llm_model())
+    {
+        return Ok(());
+    }
+
+    anyhow::bail!("{label} 不存在: {provider_id}");
 }
 
 fn validate_ocr_settings(settings: &OcrSettings, llm_settings: &LlmSettings) -> Result<()> {
@@ -483,11 +555,11 @@ fn validate_ocr_settings(settings: &OcrSettings, llm_settings: &LlmSettings) -> 
         OcrProviderKind::System => validate_system_ocr_settings(),
         OcrProviderKind::LlmOcr => {
             let provider = resolve_llm_provider(settings, llm_settings)?;
-            if provider.protocol != crate::domain::settings::LlmProviderProtocolKind::Chat {
-                anyhow::bail!("OCR 当前只支持 OpenAI Chat 协议的 LLM provider");
+            if !provider.has_responses_model() {
+                anyhow::bail!("OCR 选择的 LLM 配置缺少 responses 模型");
             }
-            if !provider.supports_multimodal {
-                anyhow::bail!("OCR 选择的 LLM provider 未启用多模态能力");
+            if !provider.supports_multimodal() {
+                anyhow::bail!("OCR 选择的 LLM 配置未启用多模态能力");
             }
             OpenAiCompatibleOcrProvider::from_config(provider).map(|_| ())
         }
@@ -530,8 +602,8 @@ fn validate_rag_settings(settings: &RagSettings, llm_settings: &LlmSettings) -> 
             .iter()
             .find(|provider| provider.id == provider_id)
             .with_context(|| format!("RAG 选择的 embedding provider 不存在: {provider_id}"))?;
-        if provider.protocol != crate::domain::settings::LlmProviderProtocolKind::Embedding {
-            anyhow::bail!("RAG 只接受 OpenAI Embedding 协议的 provider");
+        if !provider.has_embedding_model() {
+            anyhow::bail!("RAG 只接受启用了 embedding 能力的 provider");
         }
         validate_llm_provider_config(provider)
             .with_context(|| format!("RAG 选择的 embedding provider 配置非法: {provider_id}"))?;
@@ -566,20 +638,21 @@ fn validate_llm_provider_config(provider: &LlmProviderConfig) -> Result<()> {
     if provider.base_url.trim().is_empty() {
         anyhow::bail!("LLM provider base URL 不能为空");
     }
-    if provider.model.trim().is_empty() {
+    if provider.model_name().is_empty() {
         anyhow::bail!("LLM provider model 不能为空");
     }
-    if provider.protocol == crate::domain::settings::LlmProviderProtocolKind::Embedding
-        && provider.supports_multimodal
-    {
-        anyhow::bail!("OpenAI Embedding 协议不允许启用多模态");
+    if provider.supports_multimodal && !provider.has_responses_model() {
+        anyhow::bail!("多模态开关当前只能和 responses 协议一起使用");
+    }
+    if provider.supports_stateful && !provider.has_responses_model() {
+        anyhow::bail!("stateful 开关只能和 responses 协议一起使用");
     }
 
     Ok(())
 }
 
-fn fetch_llm_provider_models(provider: &LlmProviderConfig) -> Result<Vec<String>> {
-    let base_url = normalize_llm_provider_base_url(&provider.base_url)?;
+fn fetch_llm_provider_models(provider: &LlmProviderConfig) -> Result<Vec<LlmProviderModelEntry>> {
+    let base_url = normalize_base_url(&provider.base_url, "LLM provider base URL")?;
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
@@ -599,13 +672,12 @@ fn fetch_llm_provider_models(provider: &LlmProviderConfig) -> Result<Vec<String>
         .context("failed to read LLM model list response body")?;
 
     if !status.is_success() {
-        let message = extract_llm_provider_error_message(&body);
+        let message = extract_provider_error_message(&body);
         anyhow::bail!("LLM provider /models 请求失败 ({status}): {message}");
     }
 
-    let parsed: Value =
-        serde_json::from_str(&body).context("failed to parse LLM model list response JSON")?;
-    let models = extract_llm_provider_models(&parsed);
+    let parsed = parse_json_payload(&body, "LLM model list response JSON")?;
+    let models = extract_model_entries(&parsed);
     if models.is_empty() {
         anyhow::bail!("LLM provider /models 未返回可识别的模型列表");
     }
@@ -613,62 +685,18 @@ fn fetch_llm_provider_models(provider: &LlmProviderConfig) -> Result<Vec<String>
     Ok(models)
 }
 
-fn normalize_llm_provider_base_url(base_url: &str) -> Result<String> {
-    let normalized = base_url.trim().trim_end_matches('/');
+fn normalize_mcp_remote_url(url: &str, label: &str) -> Result<String> {
+    let normalized = url.trim();
     if normalized.is_empty() {
-        anyhow::bail!("LLM provider base URL 不能为空");
+        anyhow::bail!("{label} 为空");
     }
 
-    reqwest::Url::parse(normalized)
-        .with_context(|| format!("invalid LLM provider base URL: {normalized}"))?;
-
-    Ok(normalized.to_string())
-}
-
-fn extract_llm_provider_error_message(body: &str) -> String {
-    let parsed = serde_json::from_str::<Value>(body).ok();
-    parsed
-        .as_ref()
-        .and_then(|json| {
-            json.get("error")
-                .and_then(|value| {
-                    value
-                        .get("message")
-                        .and_then(Value::as_str)
-                        .or_else(|| value.as_str())
-                })
-                .or_else(|| json.get("message").and_then(Value::as_str))
-        })
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| {
-            body.lines()
-                .next()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or("unknown error")
-                .to_string()
-        })
-}
-
-fn extract_llm_provider_models(payload: &Value) -> Vec<String> {
-    let mut models = BTreeSet::new();
-
-    if let Some(items) = payload.get("data").and_then(Value::as_array) {
-        for item in items {
-            if let Some(model_id) = item
-                .get("id")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                models.insert(model_id.to_string());
-            }
-        }
+    let parsed =
+        reqwest::Url::parse(normalized).with_context(|| format!("{label} 不是合法 URL"))?;
+    match parsed.scheme() {
+        "http" | "https" => Ok(normalized.to_string()),
+        _ => anyhow::bail!("{label} 只支持 http:// 或 https://"),
     }
-
-    models.into_iter().collect()
 }
 
 #[cfg(target_os = "macos")]
@@ -800,10 +828,7 @@ fn normalize_mcp_servers(
                 if name.is_empty() {
                     anyhow::bail!("{label} 名称为空");
                 }
-                let url = config.url.trim().to_string();
-                if url.is_empty() {
-                    anyhow::bail!("{label} 的 http url 为空");
-                }
+                let url = normalize_mcp_remote_url(&config.url, &format!("{label} 的 http url"))?;
 
                 AcpMcpServerConfig::Http(crate::domain::acp::AcpMcpServerHttpConfig {
                     name,
@@ -819,10 +844,7 @@ fn normalize_mcp_servers(
                 if name.is_empty() {
                     anyhow::bail!("{label} 名称为空");
                 }
-                let url = config.url.trim().to_string();
-                if url.is_empty() {
-                    anyhow::bail!("{label} 的 sse url 为空");
-                }
+                let url = normalize_mcp_remote_url(&config.url, &format!("{label} 的 sse url"))?;
 
                 AcpMcpServerConfig::Sse(crate::domain::acp::AcpMcpServerSseConfig {
                     name,
@@ -876,10 +898,12 @@ fn normalize_name_value_pairs(
 pub struct ShortcutRuntimeState {
     launcher_shortcut: Arc<StdRwLock<Option<Shortcut>>>,
     ocr_shortcut: Arc<StdRwLock<Option<Shortcut>>>,
+    ocr_translate_shortcut: Arc<StdRwLock<Option<Shortcut>>>,
     launcher_visible: Arc<AtomicBool>,
-    launcher_shown_once: Arc<AtomicBool>,
+    launcher_resize_reposition_until: Arc<StdRwLock<Option<Instant>>>,
     launcher_shortcut_pressed: Arc<AtomicBool>,
     ocr_shortcut_pressed: Arc<AtomicBool>,
+    ocr_translate_shortcut_pressed: Arc<AtomicBool>,
     ocr_capture_active: Arc<AtomicBool>,
     transient_window_interactions: Arc<AtomicUsize>,
 }
@@ -888,35 +912,40 @@ pub struct ShortcutRuntimeState {
 pub enum ShortcutAction {
     ToggleLauncher,
     OcrCapture,
+    OcrTranslate,
 }
 
 impl ShortcutRuntimeState {
     pub fn shortcut_action(&self, shortcut: Shortcut) -> Option<ShortcutAction> {
-        if self.current_launcher_shortcut() == Some(shortcut) {
-            return Some(ShortcutAction::ToggleLauncher);
-        }
-
-        if self.current_ocr_shortcut() == Some(shortcut) {
-            return Some(ShortcutAction::OcrCapture);
+        for (key, action) in [
+            (ShortcutKey::ToggleLauncher, ShortcutAction::ToggleLauncher),
+            (ShortcutKey::OcrCapture, ShortcutAction::OcrCapture),
+            (ShortcutKey::OcrTranslate, ShortcutAction::OcrTranslate),
+        ] {
+            if self.current_shortcut(key) == Some(shortcut) {
+                return Some(action);
+            }
         }
 
         None
     }
 
-    pub fn current_launcher_shortcut(&self) -> Option<Shortcut> {
-        *self.launcher_shortcut.read().unwrap()
+    pub fn current_shortcut(&self, key: ShortcutKey) -> Option<Shortcut> {
+        match key {
+            ShortcutKey::ToggleLauncher => *self.launcher_shortcut.read().unwrap(),
+            ShortcutKey::OcrCapture => *self.ocr_shortcut.read().unwrap(),
+            ShortcutKey::OcrTranslate => *self.ocr_translate_shortcut.read().unwrap(),
+        }
     }
 
-    pub fn set_launcher_shortcut(&self, shortcut: Option<Shortcut>) {
-        *self.launcher_shortcut.write().unwrap() = shortcut;
-    }
-
-    pub fn current_ocr_shortcut(&self) -> Option<Shortcut> {
-        *self.ocr_shortcut.read().unwrap()
-    }
-
-    pub fn set_ocr_shortcut(&self, shortcut: Option<Shortcut>) {
-        *self.ocr_shortcut.write().unwrap() = shortcut;
+    pub fn set_shortcut(&self, key: ShortcutKey, shortcut: Option<Shortcut>) {
+        match key {
+            ShortcutKey::ToggleLauncher => *self.launcher_shortcut.write().unwrap() = shortcut,
+            ShortcutKey::OcrCapture => *self.ocr_shortcut.write().unwrap() = shortcut,
+            ShortcutKey::OcrTranslate => {
+                *self.ocr_translate_shortcut.write().unwrap() = shortcut;
+            }
+        }
     }
 
     pub fn is_launcher_visible(&self) -> bool {
@@ -927,12 +956,23 @@ impl ShortcutRuntimeState {
         self.launcher_visible.store(visible, Ordering::SeqCst);
     }
 
-    pub fn has_launcher_been_shown(&self) -> bool {
-        self.launcher_shown_once.load(Ordering::SeqCst)
+    pub fn arm_launcher_resize_reposition(&self, duration: Duration) {
+        *self.launcher_resize_reposition_until.write().unwrap() = Some(Instant::now() + duration);
     }
 
-    pub fn mark_launcher_shown(&self) {
-        self.launcher_shown_once.store(true, Ordering::SeqCst);
+    pub fn clear_launcher_resize_reposition(&self) {
+        *self.launcher_resize_reposition_until.write().unwrap() = None;
+    }
+
+    pub fn should_reposition_launcher_on_resize(&self) -> bool {
+        if !self.is_launcher_visible() {
+            return true;
+        }
+
+        self.launcher_resize_reposition_until
+            .read()
+            .unwrap()
+            .is_some_and(|deadline| Instant::now() <= deadline)
     }
 
     pub fn begin_shortcut_press(&self, action: ShortcutAction) -> bool {
@@ -941,6 +981,9 @@ impl ShortcutRuntimeState {
                 !self.launcher_shortcut_pressed.swap(true, Ordering::SeqCst)
             }
             ShortcutAction::OcrCapture => !self.ocr_shortcut_pressed.swap(true, Ordering::SeqCst),
+            ShortcutAction::OcrTranslate => !self
+                .ocr_translate_shortcut_pressed
+                .swap(true, Ordering::SeqCst),
         }
     }
 
@@ -952,6 +995,10 @@ impl ShortcutRuntimeState {
             }
             ShortcutAction::OcrCapture => {
                 self.ocr_shortcut_pressed.store(false, Ordering::SeqCst);
+            }
+            ShortcutAction::OcrTranslate => {
+                self.ocr_translate_shortcut_pressed
+                    .store(false, Ordering::SeqCst);
             }
         }
     }
@@ -984,13 +1031,16 @@ impl ShortcutRuntimeState {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::{
-        extract_llm_provider_models, validate_llm_provider_config, validate_rag_settings,
+        normalize_mcp_remote_url, validate_llm_provider_config, validate_rag_settings,
         ShortcutAction, ShortcutRuntimeState,
     };
     use crate::domain::settings::{
-        LlmProviderConfig, LlmProviderProtocolKind, LlmSettings, RagSettings,
+        LlmProviderConfig, LlmProviderModelEntry, LlmSettings, RagSettings,
     };
+    use crate::infrastructure::openai_compatible::{extract_model_entries, extract_model_ids};
     use serde_json::json;
 
     #[test]
@@ -1006,14 +1056,36 @@ mod tests {
     }
 
     #[test]
-    fn launcher_shown_flag_persists_after_marking() {
+    fn ocr_translate_shortcut_press_only_triggers_once_until_release() {
         let state = ShortcutRuntimeState::default();
 
-        assert!(!state.has_launcher_been_shown());
+        assert!(state.begin_shortcut_press(ShortcutAction::OcrTranslate));
+        assert!(!state.begin_shortcut_press(ShortcutAction::OcrTranslate));
 
-        state.mark_launcher_shown();
+        state.end_shortcut_press(ShortcutAction::OcrTranslate);
 
-        assert!(state.has_launcher_been_shown());
+        assert!(state.begin_shortcut_press(ShortcutAction::OcrTranslate));
+    }
+
+    #[test]
+    fn hidden_launcher_always_repositions_on_resize() {
+        let state = ShortcutRuntimeState::default();
+
+        assert!(state.should_reposition_launcher_on_resize());
+    }
+
+    #[test]
+    fn visible_launcher_only_repositions_within_grace_period() {
+        let state = ShortcutRuntimeState::default();
+
+        state.set_launcher_visible(true);
+        assert!(!state.should_reposition_launcher_on_resize());
+
+        state.arm_launcher_resize_reposition(Duration::from_millis(20));
+        assert!(state.should_reposition_launcher_on_resize());
+
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(!state.should_reposition_launcher_on_resize());
     }
 
     #[test]
@@ -1058,7 +1130,7 @@ mod tests {
             ]
         });
 
-        let models = extract_llm_provider_models(&payload);
+        let models = extract_model_ids(&payload);
 
         assert_eq!(
             models,
@@ -1070,20 +1142,62 @@ mod tests {
     }
 
     #[test]
-    fn embedding_protocol_rejects_multimodal_flag() {
+    fn extract_llm_provider_models_reads_identity_hints_from_digest_fields() {
+        let payload = json!({
+            "data": [
+                {
+                    "id": "text-embedding-3-small",
+                    "digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                }
+            ]
+        });
+
+        assert_eq!(
+            extract_model_entries(&payload),
+            vec![LlmProviderModelEntry {
+                id: "text-embedding-3-small".to_string(),
+                identity_hint: Some(
+                    "digest:sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                        .to_string()
+                ),
+            }]
+        );
+    }
+
+    #[test]
+    fn missing_responses_model_rejects_multimodal_flag() {
         let provider = LlmProviderConfig {
             id: "embedding".to_string(),
             name: "Embedding".to_string(),
-            protocol: LlmProviderProtocolKind::Embedding,
             base_url: "https://api.example.com/v1".to_string(),
             api_key: String::new(),
+            model_type: crate::domain::settings::LlmModelType::Embedding,
             model: "text-embedding-3-small".to_string(),
             supports_multimodal: true,
+            ..LlmProviderConfig::default()
         };
 
         let error =
-            validate_llm_provider_config(&provider).expect_err("embedding must reject multimodal");
-        assert!(error.to_string().contains("不允许启用多模态"));
+            validate_llm_provider_config(&provider).expect_err("multimodal requires responses");
+        assert!(error.to_string().contains("responses 协议"));
+    }
+
+    #[test]
+    fn missing_responses_model_rejects_stateful_flag() {
+        let provider = LlmProviderConfig {
+            id: "embedding".to_string(),
+            name: "Embedding".to_string(),
+            base_url: "https://api.example.com/v1".to_string(),
+            api_key: String::new(),
+            model_type: crate::domain::settings::LlmModelType::Embedding,
+            model: "text-embedding-3-small".to_string(),
+            supports_stateful: true,
+            ..LlmProviderConfig::default()
+        };
+
+        let error =
+            validate_llm_provider_config(&provider).expect_err("stateful requires responses");
+        assert!(error.to_string().contains("responses 协议"));
     }
 
     #[test]
@@ -1114,18 +1228,68 @@ mod tests {
             providers: vec![LlmProviderConfig {
                 id: "chat".to_string(),
                 name: "Chat".to_string(),
-                protocol: LlmProviderProtocolKind::Chat,
                 base_url: "https://api.example.com/v1".to_string(),
                 api_key: String::new(),
+                model_type: crate::domain::settings::LlmModelType::Llm,
                 model: "gpt-4.1-mini".to_string(),
                 supports_multimodal: false,
+                ..LlmProviderConfig::default()
             }],
-            default_provider_id: None,
+            ..LlmSettings::default()
         };
 
         let error = validate_rag_settings(&rag_settings, &llm_settings)
             .expect_err("RAG must reject non-embedding providers");
 
-        assert!(error.to_string().contains("OpenAI Embedding"));
+        assert!(error.to_string().contains("embedding 能力"));
+    }
+
+    #[test]
+    fn rag_settings_accept_chat_provider_with_embedding_capability() {
+        let rag_settings = RagSettings {
+            source_directories: Vec::new(),
+            ignore_globs: Vec::new(),
+            embedding_provider_id: Some("chat".to_string()),
+        };
+        let llm_settings = LlmSettings {
+            providers: vec![LlmProviderConfig {
+                id: "chat".to_string(),
+                name: "Chat".to_string(),
+                base_url: "https://api.example.com/v1".to_string(),
+                api_key: String::new(),
+                model_type: crate::domain::settings::LlmModelType::Embedding,
+                model: "text-embedding-3-small".to_string(),
+                supports_multimodal: false,
+                ..LlmProviderConfig::default()
+            }],
+            ..LlmSettings::default()
+        };
+
+        validate_rag_settings(&rag_settings, &llm_settings)
+            .expect("RAG should accept providers with embedding capability");
+    }
+
+    #[test]
+    fn normalize_mcp_remote_url_trims_valid_http_url() {
+        let normalized = normalize_mcp_remote_url("  https://example.com/mcp  ", "MCP URL")
+            .expect("valid MCP URL should pass");
+
+        assert_eq!(normalized, "https://example.com/mcp");
+    }
+
+    #[test]
+    fn normalize_mcp_remote_url_rejects_invalid_scheme() {
+        let error = normalize_mcp_remote_url("ws://example.com/mcp", "MCP URL")
+            .expect_err("unsupported scheme should fail");
+
+        assert!(error.to_string().contains("只支持 http:// 或 https://"));
+    }
+
+    #[test]
+    fn normalize_mcp_remote_url_rejects_incomplete_url() {
+        let error =
+            normalize_mcp_remote_url("foo", "MCP URL").expect_err("incomplete URL should fail");
+
+        assert!(error.to_string().contains("不是合法 URL"));
     }
 }
