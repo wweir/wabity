@@ -9,6 +9,7 @@
 - 将全局 MCP server 列表透传到 `session/new` / `session/load`
 - 对 `session/update` 和 `session/prompt` response 统一从 ACP SDK 的原始有序 stream 消费，再映射成内部 runtime event，避免 SDK 回调层并发派发造成消息块乱序或错误收口
 - `SessionUpdate::ToolCall` / `ToolCallUpdate` 会把 ACP `tool_call_id` 投影为前端 action event 的 `correlation_id`，供 UI 可靠融合 tool call / tool result，而不是退化成按标题猜
+- 由于 ACP 稳定协议目前只能稳定表达 turn 边界和 `tool_call_id`，不能稳定标注 assistant 文本段边界，所以每个 pending assistant turn 会在后端被规范化为一条 `thought` 流、一条 `actions` 流和一条 `content` 流，避免工具事件把同一轮输出拆成多段 UI
 
 当前约束：
 

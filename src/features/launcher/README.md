@@ -10,16 +10,26 @@
 当前代码组织：
 
 - `LauncherPage.tsx`：页面级状态、effect、键盘流和 Tauri 命令编排；顶部栏、输入区、反馈区都只负责装配组件，不再内联大段 JSX
-- `launcher.css`：只保留 launcher 特有布局、状态和消息流样式；按钮、输入框、浮层、glass frame 等共享外观基线统一回收到 `src/app/global.css`
+- `launcher.css`：只保留 launcher 特有布局、状态和消息流样式；按钮、输入框、浮层和冷静中性色 design tokens 等共享外观基线统一回收到 `src/app/global.css`
+- ACP 会话时间线里的 `user / assistant / system` 消息卡片底色必须基于全局 token 组合，禁止在 `launcher.css` 里直接写死只适合浅色主题的消息背景
+- `MarkdownRenderer` 衍生出来的 Mermaid 状态文本、错误文案和 highlight.js 语法色同样必须走全局 code token；不能继续把只适合浅底块的 hex 色留在 launcher feature
+- ACP 输出区的阅读优先级固定为“答案正文 > 操作轨迹 > 思考过程 > 角色元信息”；正文排版使用常规阅读字体，tool detail 只作为消息内部次级展开区，不能继续做成比答案更抢眼的大黑面板
+- `Agent` 行里的 thought 入口保持紧凑次级按钮，并紧跟在身份标识后方左对齐，不单独占整行；assistant 正文的字号和前景权重必须显著高于 thought / action 元信息
+- `actionCatalog.ts`：集中维护 launcher/browser fallback 共用的动作描述符和 slash alias，避免页面层与 fallback 重复声明动作元数据
+- 透明窗口外沿只保留极小安全边给圆角裁切；launcher frame 的真实底色、提亮边和 overlay 必须基于全局 surface token 推导，不能再硬编码浅色玻璃层覆盖暗色主题
+- 顶部 picker、workspace crumb、session toggle 和底部动作按钮都属于自定义按钮外观，必须先移除浏览器原生 `appearance`，否则 WebKit 会把深色 token 冲回浅色系统按钮
+- focus ring、selected/hover/disabled 状态都必须走语义 token；不要在局部按钮上继续靠统一 `opacity` 或白色高光兜暗色可读性
 - `query.ts`：输入分类、`@token` 解析、补全文本和搜索阈值判断
 - `layout.ts`：输入测量、宽度约束和补全浮层定位基础工具
 - `workspace.ts`：workspace 路径格式化和面包屑构建
 - `sessions.ts`：session 摘要合并、状态文案和 dot class 计算
+- `useFloatingPanel.ts`：浮层附着定位和外部点击关闭的共享 hook，避免 `LauncherPage` 重复堆叠近似 effect
 - `components/SessionTimeline.tsx`：ACP 消息流与 action bar
 - `components/LauncherHeader.tsx`：顶部 workspace bar、agent 选择器、session 摘要按钮和 session dot 带
 - `components/LauncherComposer.tsx`：主输入区和底部操作条
 - `components/RestoreNoticeList.tsx` / `components/LauncherFeedback.tsx`：恢复提示、内联结果卡片、JSON / Markdown 预览和 session 状态反馈
 - `components/MarkdownRenderer.tsx`：共享 markdown 渲染管线，统一处理 GFM、Mermaid、MDX 安全兼容和 Obsidian 风格扩展
+- `MarkdownRenderer.tsx` 里的 `remark-mdx` / `rehype-highlight` 改为异步加载，避免把整套 MDX 和语法高亮依赖静态塞进同一个懒加载 chunk
 - `components/CompletionPopup.tsx` / `SessionPanel.tsx` / `WorkspacePickerPanel.tsx` / `AgentPickerPanel.tsx`：launcher 外层浮层组件
 - `components/SessionTimeline.tsx`：仅在激活 ACP session 后才懒加载；会话 markdown 仍复用共享渲染器，但 mermaid 等较重依赖继续按需动态导入
 
@@ -33,11 +43,14 @@
 - 该拖拽带走 Tauri `startDragging()`，并依赖 capability `core:window:allow-start-dragging`
 - macOS / Linux 下，涉及 HOME 的路径统一用 `~` 缩写
 - launcher 启动时优先恢复上次保存的当前 workspace；无效时回退到用户 `HOME`，最近目录只保留 3 个
+- launcher 外观跟随设置页的外观配置：启动时和设置保存后都会同步应用 `theme` / `fontSize`
 - launcher 默认失焦自动隐藏，但打开原生目录选择器时会临时抑制自动隐藏，避免页面看起来“闪退”
-- launcher 通过快捷键、OCR 回填或其他显示路径重新出现时，主输入框会主动恢复焦点，不能只依赖首次挂载时的 `autoFocus`
+- launcher 通过快捷键、OCR 回填、快捷翻译结果回填或其他显示路径重新出现时，主输入框会主动恢复焦点，不能只依赖首次挂载时的 `autoFocus`
+- `Alt+D` 快捷翻译在拿到原文后会先立即弹出 launcher，并把原文注入输入框；前端进入独立 pending 状态、临时抑制应用/动作建议，等后台 LLM 返回后再把译文渲染到结果卡
 - launcher 主输入框显式关闭浏览器原生 `autocomplete`、`autocorrect`、`autocapitalize` 和 `spellcheck`，避免系统历史候选或拼写建议和自定义补全浮层叠出双层列表
 - 外部应用选中文本注入 launcher 时，主输入框会把光标显式定位到文本开头，并自动切到多行模式，避免默认落在末尾或继续停留在单行输入
 - 主输入框聚焦态只保留柔和的底边提亮和浅背景过渡，不再叠全尺寸粗 outline，避免输入时视觉重心突然跳变
+- 主输入框必须带稳定的程序化名称；单行模式下补全关系按 `combobox + listbox + option` 暴露，active option 通过 `aria-activedescendant` 跟随选中项
 - 多行输入框按内容自动增高，但会基于屏幕可用高度收敛到固定上限；超出部分交给输入框内滚动，避免 Tauri 窗口被长文本继续撑高
 - 主输入区在“本地 launcher 模式”和“ACP session 模式”之间切换
 - 配置好 ACP agent 后，底部操作条会提供 `Agent 执行` 入口；仅在未激活 session 时显示，点击会自动创建或复用 ACP session，并在下方会话面板展示 agent 输出；该入口额外绑定 `Alt+Enter`
@@ -45,12 +58,15 @@
 - 结果改为内联反馈；ACP 激活时下方改为消息流面板
 - 内联结果卡和 ACP 消息流都带固定高度上限与内部滚动，不允许单次长输出把 launcher 主窗口顶出屏幕
 - `/format`、`/fmt`、`/json` 的预览、`/md` / `/markdown` 的 markdown 预览，以及 `/base64` 等快捷命令执行结果统一落在内联结果卡片；结果卡片自带复制按钮，JSON 走语法高亮，Markdown 走共享渲染器
-- 文本处理 slash 命令当前内建 `/upper`、`/title`、`/lower`、`/camel`、`/snake`、`/trim`、`/unique`、`/sort`、`/words`、`/lines`；其中 `/title` 会把每个词的首字母转为大写，`/unique` 和 `/sort` 都按行处理
-- 底部操作条只保留当前状态真正可执行的动作：主按钮会在 `执行` / `发送` / `插入路径` 之间切换，并在没有有效目标时禁用；当前 session 的关闭统一收敛到顶部会话区和会话面板，不再在底部重复放一个“关闭会话”
-- 输入框下方、按钮左侧定义为左对齐状态栏；默认展示最后一次用户提交的内容，文本溢出时自动横向滚动，不再额外在消息区顶部重复回显一块“最后一次提交”
+- 文本处理 slash 命令当前内建 `/upper`、`/title`、`/lower`、`/camel`、`/snake`、`/trim`、`/unique`、`/sort`、`/words`、`/lines`，以及走默认 LLM provider 的 `/translate`、`/fy`、`/tr`；其中 `/title` 会把每个词的首字母转为大写，`/unique` 和 `/sort` 都按行处理，翻译默认在未指定目标语言时按“简中->英文、英文->简中、其他语言->简中”处理，并保留原文风格与格式
+- 底部操作条只保留当前状态真正可执行的动作：未激活 session 时主链路顺序固定为 `设置 -> 翻译 -> Agent 执行 -> 主按钮`；主按钮的文案、色调、禁用态和 Enter 行为共用同一套状态机：普通场景默认显示 `执行`，RAG 回退显示 `问答`，session 内显示 `发送`，文件 token 选中候选后显示 `插入路径`；显式 slash 动作优先显示动作本名（例如 `翻译`、`转大写`），`@token` 尚无候选时显示 `搜索路径` 且保持禁用。`补全` 只作为尾部辅助按钮出现；当前 session 的关闭统一收敛到顶部会话区和会话面板，不再在底部重复放一个“关闭会话”
+- ACP `Agent` 按钮和主按钮共用同一套会话状态，但不能复用“候选搜索加载”这类辅助态；补全查询、普通动作执行、Agent prompt 发送必须分别建模，否则按钮文案和禁用态会被串错
+- 底部 `设置` 入口继续保持 icon-only 次级按钮，但图标语义改成三滑杆调参 glyph，而不是密集的实心齿轮；这种小尺寸下的识别度更高，也更贴近“配置当前行为”的语义
+- 动作条在深色主题下不再额外包一层浅底胶囊容器；主按钮、翻译按钮和设置按钮直接用语义 token 区分强弱状态，避免“按钮上再贴按钮”的贴纸感
+- 输入框下方、按钮左侧定义为左对齐状态栏；空闲时默认展示最近一次本地提交的内容，但当 RAG 后台索引、模型请求或 Agent 长任务在运行时，状态栏会切到 `运行状态` 并优先展示对应进度文案；RAG 重建态除了阶段外，还要显示当前 `completed/total` 文件进度，避免只剩“正在扫描 / 剩余 N 个”这种无法判断进度的弱提示；ACP / 问答态的会话标题、agent、workspace 和错误也统一显示在这里，不再在输出区底部重复补一条状态线；单条长文本自动横向滚动，多条状态项则在状态栏内部纵向滚动
 - `/format` 成为 JSON 格式化主命令，`/fmt` 为短别名，保留 `/json` 兼容；当输入命中该命令且后续内容是合法 JSON 时，输入框下方直接显示 pretty format 预览
 - `/md` 成为 Markdown 渲染主命令，`/markdown` 为长别名；命中后输入框下方直接显示 Markdown 预览，支持 GFM、Mermaid、MDX 安全兼容，以及 Obsidian 风格 `[[wiki link]]`、`> [!note]` callout、`==highlight==`
-- `/base64` 作为文本编解码命令；执行时会自动尝试把载荷识别为 UTF-8 Base64 文本，命中则解码，否则编码
+- `/base64` 作为文本编解码命令；执行时会自动尝试把载荷识别为 UTF-8 Base64 文本，命中则解码，否则编码；当前与其他纯文本 slash 动作一样，支持 `inline`、`multiline`、`ocr`、`clipboard`、`selection`
 - 顶部 `会话` 按钮同时承担入口和状态摘要：显示当前会话/运行态摘要与总数，点击展开全部 session 列表
 - session 面板改为挂在右上角触发按钮下方的附着式浮层，支持外部点击关闭、`Esc` 收起、`+N` 溢出按钮展开全部列表，并通过固定高度上限避免把 launcher 主体继续拉长
 - 展开的 session 列表会显示当前会话标签、状态胶囊和绑定 workspace，并支持直接切换或关闭指定 session
@@ -72,7 +88,8 @@
 - 不再依赖 `windowEffects` 的原生背景和圆角层，窗口外观完全由前端圆角面板控制，避免 macOS 原生效果层和网页面板叠出双层边界
 - macOS 下仍启用 `macOSPrivateApi` 维持透明窗口能力，但不再把原生圆角当成窗口外观来源；这仍然放弃 App Store 兼容性
 - 主输入框横向与窗口外框对齐，不再受内容容器水平内边距二次收缩
-- 窗口宽高由内容实时测量驱动：多行输入自动增高，外框宽度在可用范围内随实际内容收缩或扩展；窗口 resize 不再顺手重新居中，避免页面一变窗口就跳位置
+- 窗口宽高由内容实时测量驱动：多行输入自动增高，外框宽度在可用范围内随实际内容收缩或扩展；前端测量只观察 shell 和直接浮层子节点，避免全树扫描布局盒造成的持续重排；隐藏期间和每次重新显示后的短暂稳定窗口内，后端仍会按默认规则纠正首轮定位，稳定后才停止借 resize 抢位置，避免页面一变窗口就持续跳位
+- launcher 窄窗口下优先保住输入区和主按钮：frame 最小宽度降到 `440px`，顶部 workspace/session 区和底部动作条允许折行，所有主按钮触达尺寸保持 `44px`
 - 光标所在 `@token` 切换到文件搜索模式；文件查询达到 2 个英文字符或 1 个非英文字母（如中文）后，再延迟 50ms 发起搜索
 - 文件搜索根目录固定为当前 workspace，不再默认为用户目录
 - 文件补全只替换当前 `@token`，不会覆盖光标前其他 prompt 内容
@@ -81,14 +98,26 @@
 - session 点只承担轻量切换和通知，不承担完整标签页语义
 - session 光点语义固定为：绿色慢闪=`running`，快闪=有新通知，灰色=会话断开，黄色=可恢复错误，红色=不可恢复错误
 - `prompt` 发出后，前端立即插入用户消息和 pending assistant 占位，避免会话看起来“没反应”
-- ACP 会话流展示改为最新 turn 在上、历史 turn 在下；页面顶部会额外弱化回显最后一次用户提交，便于在 agent 流式输出时保持当前请求上下文
+- ACP 会话流展示改为最新 turn 在上、历史 turn 在下；时间线按 message 边界渲染，同一条 assistant turn 内的 `thought`、`actions`、正文只作为该消息内部块显示，不再先拆成多条独立 item
 - 时间线上相邻的 `thought` 块会在前端合并显示，避免 agent 连续推送 reasoning chunk 时被拆成多个折叠块制造视觉噪音
-- assistant action bar 会把带相同 `correlationId` 的 `tool-call` / `tool-update` 融合成一个 tool pill；详情默认通过 hover 在 action bar 下方展开大面板，并在展示层尽量解码常见转义文本，点击作为触屏兜底
+- 时间线中的“思考”折叠必须使用真实按钮并暴露展开态，不能再用 click-only `div`
+- 第一段 thought 的开关并入 `Agent` 身份行，作为紧跟身份标识的次级控制；只有展开后的 thought 内容才进入正文下方堆叠
+- assistant action bar 会把带相同 `correlationId` 的 `tool-call` / `tool-update` 融合成一个 tool pill；详情默认在 action bar 内作为次级展开区展示，并在展示层尽量解码常见转义文本，点击作为触屏兜底
+- thought block 默认折叠，但用户手动展开后，在同一条消息继续流式追加时必须尽量保留展开状态；不要每次增量更新就把用户已打开的内容重新折回去
 - session 更新合并以 `lastUpdatedAtMs` 和消息权重单调收敛，避免旧快照覆盖异步事件流
 - session 恢复完全依赖 agent 自身能力；agent 不支持 `session/load` 时，只提示，不伪装恢复成功
-- 全局快捷键恢复为平台对应方案：macOS 使用 `⌘⇧Space`，非 macOS 使用 `Ctrl+Shift+Space`
+- 全局快捷键默认使用 `Alt+Space` 唤起 launcher，`Alt+R` 做截图 OCR 回填，`Alt+D` 会先翻译当前应用选中文本；若没有选中内容，再回退到截图 OCR 并翻译
 
 约束：
 
 - 领域匹配与执行逻辑以后端 Rust 命令为准
 - 前端只做展示状态和安全的 UI 侧效果补全
+
+当前已实现的 RAG 问答：
+
+- RAG 问答采用双入口：显式 slash 动作 `/ask` / `/qa` / `/docs` 可以强制进入；普通文本模式下，如果应用搜索没有弹出补全框，则默认主动作回退到 RAG 问答
+- 只要应用搜索存在可见候选，主动作仍保持应用启动优先级；不要把所有普通自然语言都无条件送进问答
+- launcher 会在本地同时保留最近几轮问答的 user/assistant 文本，以及一份显式 `conversationState`：其中包含上一轮 `responses` 的 `response_id`、续链 scope、累计 citation、累计 action 轨迹和累计工具摘要。后端只在 scope 与当前 provider + workspace 一致时继续沿用它；当当前问答协议是 `responses stateful` 时，继续追问优先把 `previous_response_id` 交给后端，只发送当前问题；如果首轮续问被 provider 以预算或上下文过大拒绝，后端会自动丢弃旧 `response_id`，改用最近历史重试一次；`responses stateless` 和 `chat/completions` 则统一回退到显式回传最近历史。这仍只是轻量多轮上下文，不是 ACP session
+- 问答成功后，反馈区优先切到轻量对话历史，而不是只显示最后一张结果卡；assistant 内容仍走 Markdown 渲染，便于继续追问
+- 问答请求会显式携带工具列表：无论 `responses` 还是 `chat/completions`，都会注入内置 `wabity.read_file_lines` 和 `wabity.rag.query`；只有 `responses` 额外注入全局 MCP 里的 HTTP/SSE server。模型可以在单轮里并发调用多个工具，页面不再只显示压缩摘要，而是直接复用 `SessionTimeline` 的 action bar 渲染“第 N 步”、tool call 输入和 tool result 输出
+- 本地文件引用点击打开需要单独命令；不要把桌面 opener 逻辑混进 `MarkdownRenderer`

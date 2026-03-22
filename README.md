@@ -6,9 +6,9 @@
 
 - `Tauri v2` 桌面壳与 `React` 前端集成
 - 全局快捷键切换主窗口
-- macOS 下支持全局快捷键触发交互式截图 OCR，识别后自动回填 launcher 输入框并弹出窗口
+- macOS 下支持全局快捷键触发交互式截图 OCR；`Alt+R` 只识别后回填 launcher，`Alt+D` 会先尝试翻译当前应用的选中文本，只有没有选中文本时才回退到截图 OCR 并翻译
 - OCR provider 现已支持本地 macOS Vision 和远程 OpenAI 兼容多模态模型
-- 设置页中的 OCR 配置已并入“通用”；同时新增 RAG 配置页，支持用 OpenAI Embedding 风格模型为选中目录中的 `.md`、`.mdx`、`.txt`、`.markdown`、`.rst`、`.adoc` 文件构建并持续维护本地 LanceDB 向量索引
+- 设置页已把快捷键、外观和 OCR 配置并入“通用”；“AI 功能”页按“翻译配置 / 文档问答配置”两个任务卡片维护各自的模型和系统提示词；LLM 页面统一维护 OpenAI 风格接入点下的单模型条目：配置类型直接区分 `LLM · responses stateless`、`LLM · responses stateful`、`LLM · chat/completions` 和 `Embedding`，其中 `responses` 页面仍可额外声明多模态；RAG 配置页支持用这些 embedding 模型为选中目录中的 `.md`、`.mdx`、`.txt`、`.markdown`、`.rst`、`.adoc` 文件构建并持续维护本地 LanceDB 向量索引，配套 SQLite 元数据缓存、watcher 增量维护、`staged/active` 版本切换，以及基于 `原文文本 + embedding fingerprint` 的全局向量复用以减少重复 embedding
 - 透明窗口 + 圆角 launcher 外观
 - 默认单行输入框，可按 `Cmd/Ctrl+Enter` 切到多行模式
 - 普通动作补全不再对任意非空输入立刻弹出；只有显式 `/` 命令、`http`/`{` 这类强信号输入，或满足 2 个英文字符 / 1 个非英文字符后才显示候选
@@ -25,10 +25,19 @@
 
 ```bash
 npm install
+npm run clean:target -- --dry-run
 npm run format
 npm run lint
 npm run tauri dev
 ```
+
+如果 `src-tauri/target` 积累了大量旧构建产物，可用下面的命令按修改时间清理：
+
+```bash
+npm run clean:target -- --days 3
+```
+
+默认只删除超过 3 天未更新的常见 Rust/Tauri 构建产物目录与顶层二进制；先预览可加 `--dry-run`，需要全清已识别构建产物可用 `--all`。
 
 Rust 侧当前依赖系统 `protoc`。在 macOS + Homebrew 环境下，确保 `protoc` 已安装并可执行，例如 `/opt/homebrew/bin/protoc`。
 
