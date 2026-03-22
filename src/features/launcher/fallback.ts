@@ -9,187 +9,23 @@ import type {
 	QueryPayload,
 } from "./types";
 import {
-	base64CommandAliases,
+	actionAliasesById,
+	actionCatalog,
+	ragAnswerCommandAliases,
+	translateCommandAliases,
+} from "./actionCatalog";
+import {
 	deriveJsonPrettyPreview,
-	jsonFormatCommandAliases,
-	markdownCommandAliases,
 	parseBase64Command,
 	parseMarkdownCommand,
 	parseSlashActionInput,
 	parseJsonFormatCommand,
 } from "./query";
 
-const action = (
-	id: string,
-	title: string,
-	summary: string,
-	aliases: string[],
-	keywords: string[],
-	supportedInputModes: InputMode[],
-	category: string,
-	priority: number,
-): ActionDescriptor => ({
-	id,
-	title,
-	summary,
-	aliases,
-	keywords,
-	supportedInputModes,
-	category,
-	priority,
-});
-
-const actions: ActionDescriptor[] = [
-	action(
-		"open_url",
-		"打开链接",
-		"打开当前输入的链接",
-		["/open"],
-		["url", "browser", "link", "open"],
-		["inline", "clipboard", "selection"],
-		"system",
-		120,
-	),
-	action(
-		"uppercase_text",
-		"转大写",
-		"把文本转换为全大写",
-		["/upper"],
-		["uppercase", "text", "transform"],
-		["inline", "multiline", "ocr", "clipboard", "selection"],
-		"text",
-		100,
-	),
-	action(
-		"title_case_text",
-		"转标题",
-		"把每个词的首字母转为大写",
-		["/title"],
-		["title", "titlecase", "capitalize", "text", "transform"],
-		["inline", "multiline", "ocr", "clipboard", "selection"],
-		"text",
-		99,
-	),
-	action(
-		"lowercase_text",
-		"转小写",
-		"把文本转换为全小写",
-		["/lower"],
-		["lowercase", "text", "transform"],
-		["inline", "multiline", "ocr", "clipboard", "selection"],
-		"text",
-		99,
-	),
-	action(
-		"camel_case_text",
-		"转驼峰",
-		"把文本转换为 camelCase",
-		["/camel"],
-		["camel", "camelcase", "text", "transform"],
-		["inline", "multiline", "ocr", "clipboard", "selection"],
-		"text",
-		98,
-	),
-	action(
-		"snake_case_text",
-		"转下划线",
-		"把文本转换为 snake_case",
-		["/snake"],
-		["snake", "snakecase", "underscore", "text"],
-		["inline", "multiline", "ocr", "clipboard", "selection"],
-		"text",
-		97,
-	),
-	action(
-		"word_count",
-		"统计词数",
-		"统计输入中的单词数量",
-		["/words"],
-		["count", "words", "text"],
-		["inline", "multiline", "ocr", "clipboard", "selection"],
-		"text",
-		95,
-	),
-	action(
-		"line_count",
-		"统计行数",
-		"统计输入中的行数",
-		["/lines"],
-		["count", "lines", "text"],
-		["multiline", "ocr", "clipboard", "selection"],
-		"text",
-		92,
-	),
-	action(
-		"trim_whitespace",
-		"清理空白",
-		"清理每行首尾和整体多余空白",
-		["/trim"],
-		["trim", "normalize", "text"],
-		["inline", "multiline", "ocr", "clipboard", "selection"],
-		"text",
-		90,
-	),
-	action(
-		"unique_lines",
-		"去重",
-		"按行保留首次出现的内容并去重",
-		["/unique"],
-		["unique", "dedupe", "lines", "text"],
-		["inline", "multiline", "ocr", "clipboard", "selection"],
-		"text",
-		89,
-	),
-	action(
-		"sort_lines",
-		"排序",
-		"按行进行字典序排序",
-		["/sort"],
-		["sort", "lines", "order", "text"],
-		["inline", "multiline", "ocr", "clipboard", "selection"],
-		"text",
-		87,
-	),
-	action(
-		"json_pretty_print",
-		"格式化 JSON",
-		"格式化并缩进 JSON 内容",
-		[...jsonFormatCommandAliases],
-		["json", "format", "pretty"],
-		["inline", "multiline", "clipboard"],
-		"text",
-		88,
-	),
-	action(
-		"markdown_render",
-		"渲染 Markdown",
-		"按 Markdown 渲染输入内容，支持 Mermaid、MDX 安全兼容和 Obsidian 风格扩展",
-		[...markdownCommandAliases],
-		["markdown", "md", "mdx", "mermaid", "obsidian", "oxide"],
-		["inline", "multiline", "ocr", "clipboard", "selection"],
-		"text",
-		89,
-	),
-	action(
-		"base64_text",
-		"Base64 编解码",
-		"自动识别 Base64，命中则解码，否则编码",
-		[...base64CommandAliases],
-		["base64", "encode", "decode", "text"],
-		["inline", "multiline", "clipboard"],
-		"text",
-		86,
-	),
-];
-
-const actionAliasesById: Record<string, readonly string[]> = Object.fromEntries(
-	actions.map((descriptor) => [descriptor.id, descriptor.aliases]),
-);
-
 export function matchActionsFallback(query: QueryPayload): ActionMatch[] {
 	const normalized = query.rawText.trim().toLowerCase();
 
-	const matches = actions
+	const matches = actionCatalog
 		.filter((item) => item.supportedInputModes.includes(query.mode))
 		.map((item) => scoreAction(item, normalized, query.mode))
 		.filter((item): item is ActionMatch => item !== null)
@@ -265,6 +101,14 @@ function scoreAction(
 	}
 
 	if (descriptor.id === "markdown_render" && parseMarkdownCommand(normalized)) {
+		score += 44;
+		matched = true;
+	}
+
+	if (
+		descriptor.id === "rag_answer" &&
+		parseSlashActionInput(normalized, ragAnswerCommandAliases)
+	) {
 		score += 44;
 		matched = true;
 	}
@@ -393,6 +237,34 @@ export function executeActionFallback(request: ExecutionRequest): ExecutionResul
 			return fallbackResult("success", text, "Markdown 预览已生成。", { render: "markdown" }, [
 				"copy_text",
 			]);
+		}
+		case "translate_text": {
+			const payload = parseSlashActionInput(text, translateCommandAliases)?.content ?? text.trim();
+			if (!payload) {
+				return fallbackResult("error", null, "请输入要翻译的内容。", null, []);
+			}
+
+			return fallbackResult(
+				"warning",
+				payload,
+				"浏览器模式不调用模型翻译；请在桌面端执行该命令。",
+				{ effect: "noop" },
+				[],
+			);
+		}
+		case "rag_answer": {
+			const payload = parseSlashActionInput(text, ragAnswerCommandAliases)?.content ?? text.trim();
+			if (!payload) {
+				return fallbackResult("error", null, "请输入要提问的内容。", null, []);
+			}
+
+			return fallbackResult(
+				"warning",
+				payload,
+				"浏览器模式不支持本地 RAG 问答；请在桌面端执行该命令。",
+				{ effect: "noop" },
+				[],
+			);
 		}
 		default:
 			return fallbackResult(

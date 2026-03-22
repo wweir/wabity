@@ -2,9 +2,10 @@ import hljs from "highlight.js/lib/core";
 import jsonLanguage from "highlight.js/lib/languages/json";
 import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import type { RefObject } from "react";
-import type { AcpSessionDetail, WorkspaceState } from "../../../lib/tauri/types";
-import type { ExecutionResult } from "../types";
-import { formatWorkspacePath } from "../workspace";
+import type { AcpSessionDetail, AcpSessionMessage } from "../../../lib/tauri/types";
+import type { ExecutionResult, RagCitation, RagRetrievalSummary } from "../types";
+import { isRagAnswerStructuredPayload } from "../types";
+import { RagCitationList } from "./RagCitationList";
 
 const SessionTimeline = lazy(() =>
 	import("./SessionTimeline").then((module) => ({
@@ -102,7 +103,7 @@ function ResultCard({ label, content, render }: ResultCardProps) {
 					/>
 				</pre>
 			) : (
-				<pre className="result-card-code result-card-code-plain">{content}</pre>
+				<pre className="result-card-text">{content}</pre>
 			)}
 		</section>
 	);
@@ -110,12 +111,14 @@ function ResultCard({ label, content, render }: ResultCardProps) {
 
 interface LauncherFeedbackProps {
 	activeSession: AcpSessionDetail | null;
+	qaCitations: RagCitation[];
+	qaMessages: AcpSessionMessage[];
+	qaRetrieval: RagRetrievalSummary | null;
 	sessionLogRef: RefObject<HTMLDivElement | null>;
 	result: ExecutionResult | null;
 	jsonPreview: string | null;
 	markdownPreview: string | null;
-	workspace: WorkspaceState;
-	error: string | null;
+	onOpenRagCitation: (citation: RagCitation) => void | Promise<void>;
 }
 
 function resolveResultRenderMode(result: ExecutionResult): "plain" | "json" | "markdown" {
@@ -132,13 +135,35 @@ function resolveResultRenderMode(result: ExecutionResult): "plain" | "json" | "m
 
 export function LauncherFeedback({
 	activeSession,
+	qaCitations,
+	qaMessages,
+	qaRetrieval,
 	sessionLogRef,
 	result,
 	jsonPreview,
 	markdownPreview,
-	workspace,
-	error,
+	onOpenRagCitation,
 }: LauncherFeedbackProps) {
+	const ragPayload = useMemo(
+		() =>
+			result && isRagAnswerStructuredPayload(result.structuredPayload)
+				? result.structuredPayload
+				: null,
+		[result],
+	);
+	const resultRenderMode = useMemo(
+		() => (result ? resolveResultRenderMode(result) : null),
+		[result],
+	);
+	const visibleQaMessages = useMemo(
+		() => qaMessages.filter((message) => message.role !== "system"),
+		[qaMessages],
+	);
+	const shouldShowQaMessages =
+		!activeSession && !jsonPreview && !markdownPreview && !result && visibleQaMessages.length > 0;
+	const shouldShowQaCitations =
+		shouldShowQaMessages && qaRetrieval !== null && qaCitations.length > 0;
+
 	return (
 		<>
 			{activeSession ? (
@@ -154,31 +179,44 @@ export function LauncherFeedback({
 			) : markdownPreview ? (
 				<ResultCard label="Markdown Preview" content={markdownPreview} render="markdown" />
 			) : result?.primaryText ? (
-				<ResultCard
-					label={
-						resolveResultRenderMode(result) === "markdown"
-							? "Markdown Output"
-							: resolveResultRenderMode(result) === "json"
-								? "JSON Output"
-								: "Command Output"
-					}
-					content={result.primaryText}
-					render={resolveResultRenderMode(result)}
-				/>
+				<>
+					<ResultCard
+						label={
+							ragPayload
+								? "Document Answer"
+								: resultRenderMode === "markdown"
+									? "Markdown Output"
+									: resultRenderMode === "json"
+										? "JSON Output"
+										: "Text Output"
+						}
+						content={result.primaryText}
+						render={resultRenderMode ?? "plain"}
+					/>
+					{ragPayload ? (
+						<RagCitationList
+							citations={ragPayload.citations}
+							retrieval={ragPayload.retrieval}
+							onOpenCitation={onOpenRagCitation}
+						/>
+					) : null}
+				</>
+			) : shouldShowQaMessages ? (
+				<>
+					<div className="session-log" ref={sessionLogRef}>
+						<Suspense fallback={<p className="status-line">加载问答历史...</p>}>
+							<SessionTimeline messages={visibleQaMessages} />
+						</Suspense>
+					</div>
+					{shouldShowQaCitations ? (
+						<RagCitationList
+							citations={qaCitations}
+							retrieval={qaRetrieval}
+							onOpenCitation={onOpenRagCitation}
+						/>
+					) : null}
+				</>
 			) : null}
-
-			{activeSession ? (
-				<p className="status-line">
-					{activeSession.session.title}
-					{" · "}
-					{activeSession.session.agentName}
-					{" · "}
-					{formatWorkspacePath(activeSession.session.workspaceRoot, workspace)}
-					{activeSession.session.lastError ? ` · ${activeSession.session.lastError}` : ""}
-				</p>
-			) : null}
-
-			{error ? <p className="status-line error">{error}</p> : null}
 		</>
 	);
 }

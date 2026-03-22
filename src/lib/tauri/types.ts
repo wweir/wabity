@@ -1,6 +1,7 @@
 export interface ShortcutConfig {
 	toggle_launcher: string;
 	ocr_capture: string;
+	ocr_translate: string;
 }
 
 export interface GeneralSettings {
@@ -14,21 +15,35 @@ export interface AppearanceSettings {
 	fontSize: string;
 }
 
-export type LlmProviderProtocolKind = "openai_chat" | "openai_responses" | "openai_embedding";
+export interface PromptsSettings {
+	translationPrompt: string;
+	ragAnswerSystemPrompt: string;
+}
+
+export type LlmProviderProtocol = "responses" | "chat_completions";
 
 export interface LlmProviderConfig {
 	id: string;
 	name: string;
-	protocol: LlmProviderProtocolKind;
 	baseUrl: string;
 	apiKey: string;
+	modelType: "llm" | "embedding";
+	protocol: LlmProviderProtocol;
 	model: string;
+	modelIdentityHint: string | null;
 	supportsMultimodal: boolean;
+	supportsStateful: boolean;
+}
+
+export interface LlmProviderModelEntry {
+	id: string;
+	identityHint: string | null;
 }
 
 export interface LlmSettings {
 	providers: LlmProviderConfig[];
-	defaultProviderId: string | null;
+	translationProviderId: string | null;
+	questionAnswerProviderId: string | null;
 }
 
 export type OcrProviderKind = "disabled" | "system" | "llm_ocr";
@@ -54,9 +69,28 @@ export interface RagScanResult {
 	finishedAtMs: number;
 }
 
+export type RagRuntimePhase = "idle" | "scanning" | "indexing" | "error";
+
+export interface RagRuntimeStatus {
+	phase: RagRuntimePhase;
+	scannedFileCount: number;
+	completedFileCount: number;
+	totalFileCount: number;
+	pendingFileCount: number;
+	lastError: string | null;
+	updatedAtMs: number;
+}
+
+export interface BuiltinRagMcpServerStatus {
+	server: AcpMcpServerConfig;
+	running: boolean;
+	lastError: string | null;
+}
+
 export interface AppSettings {
 	general: GeneralSettings;
 	appearance: AppearanceSettings;
+	prompts: PromptsSettings;
 	llm: LlmSettings;
 	ocr: OcrSettings;
 	rag: RagSettings;

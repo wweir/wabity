@@ -59,8 +59,8 @@ export function LauncherHeader({
 			<div className="workspace-bar">
 				<div className="workspace-picker">
 					<button
+						aria-controls="workspace-picker-panel"
 						aria-expanded={workspacePickerOpen}
-						aria-haspopup="menu"
 						className={
 							workspacePickerOpen ? "workspace-picker-input active" : "workspace-picker-input"
 						}
@@ -99,8 +99,8 @@ export function LauncherHeader({
 			<div className="session-strip" aria-label="ACP sessions">
 				{agentConfigured ? (
 					<button
+						aria-controls="agent-picker-panel"
 						aria-expanded={agentPickerOpen}
-						aria-haspopup="menu"
 						className={agentPickerOpen ? "agent-picker-trigger active" : "agent-picker-trigger"}
 						onClick={onToggleAgentPicker}
 						ref={agentPickerTriggerRef}
@@ -126,7 +126,6 @@ export function LauncherHeader({
 				<button
 					aria-controls="session-panel"
 					aria-expanded={sessionPanelOpen}
-					aria-haspopup="dialog"
 					className={sessionPanelOpen ? "session-panel-toggle active" : "session-panel-toggle"}
 					onClick={onToggleSessionPanel}
 					ref={sessionPanelTriggerRef}

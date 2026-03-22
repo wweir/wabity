@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { AcpActionEvent, AcpMessageBlock, AcpSessionMessage } from "../../../lib/tauri/types";
 import { MarkdownRenderer } from "./MarkdownRenderer";
 
@@ -23,13 +23,6 @@ interface ActionPill {
 	correlationId: string | null;
 	inputDetail: string | null;
 	outputDetail: string | null;
-}
-
-interface TimelineItem {
-	id: string;
-	type: "user-message" | "thought" | "actions" | "content";
-	content: string | AcpActionEvent[];
-	pending: boolean;
 }
 
 function getActionIcon(kind: ActionKind): string {
@@ -240,6 +233,7 @@ function ActionBar({ actions }: { actions: AcpActionEvent[] }) {
 	const activeDetailPill = activeDetailPillId
 		? (pills.find((pill) => pill.id === activeDetailPillId) ?? null)
 		: null;
+	const detailPanelId = activeDetailPill ? `action-detail-${activeDetailPill.id}` : null;
 
 	useEffect(() => {
 		if (expandedPill && !pills.some((pill) => pill.id === expandedPill)) {
@@ -259,6 +253,10 @@ function ActionBar({ actions }: { actions: AcpActionEvent[] }) {
 
 	return (
 		<div className="action-bar">
+			<div className="action-bar-header">
+				<span className="action-bar-kicker">操作轨迹</span>
+				<span className="action-bar-summary">{pills.length} 项</span>
+			</div>
 			<div className="action-bar-content">
 				{pills.map((pill) =>
 					pill.detail ? (
@@ -267,6 +265,7 @@ function ActionBar({ actions }: { actions: AcpActionEvent[] }) {
 							type="button"
 							className={`action-pill ${pill.kind} interactive${expandedPill === pill.id ? " detail-open" : ""}`}
 							aria-expanded={expandedPill === pill.id}
+							aria-controls={expandedPill === pill.id && detailPanelId ? detailPanelId : undefined}
 							aria-label={`查看 ${pill.title} 详情`}
 							onMouseEnter={() => setHoveredPill(pill.id)}
 							onMouseLeave={() =>
@@ -290,7 +289,12 @@ function ActionBar({ actions }: { actions: AcpActionEvent[] }) {
 				)}
 			</div>
 			{activeDetailPill?.detail ? (
-				<div className="action-bar-detail" role="tooltip">
+				<div
+					className="action-bar-detail"
+					id={detailPanelId ?? undefined}
+					role="region"
+					aria-label={`${activeDetailPill.title} 详情`}
+				>
 					<span className="action-bar-detail-label">
 						{activeDetailPill.kind === "tool" ? "调用细节" : "详情"}
 					</span>
@@ -301,22 +305,52 @@ function ActionBar({ actions }: { actions: AcpActionEvent[] }) {
 	);
 }
 
+function ThoughtToggle({
+	contentId,
+	collapsed,
+	onToggle,
+	className,
+}: {
+	contentId: string;
+	collapsed: boolean;
+	onToggle: () => void;
+	className?: string;
+}) {
+	return (
+		<button
+			aria-controls={contentId}
+			aria-expanded={!collapsed}
+			className={className ? `thought-toggle ${className}` : "thought-toggle"}
+			onClick={onToggle}
+			type="button"
+		>
+			<span className="thought-label">思考</span>
+			<span className="thought-caret">{collapsed ? "▶" : "▼"}</span>
+		</button>
+	);
+}
+
 function ThoughtBlock({
+	id,
 	content,
 	collapsed,
 	onToggle,
 }: {
+	id: string;
 	content: string;
 	collapsed: boolean;
 	onToggle: () => void;
 }) {
+	const contentId = `${id}-content`;
+
 	return (
 		<div className="message-block thought-block">
-			<div className="thought-toggle" onClick={onToggle}>
-				<span className="thought-label">思考</span>
-				<span className="thought-caret">{collapsed ? "▶" : "▼"}</span>
-			</div>
-			{!collapsed ? <pre className="thought-content">{content}</pre> : null}
+			<ThoughtToggle contentId={contentId} collapsed={collapsed} onToggle={onToggle} />
+			{!collapsed ? (
+				<pre className="thought-content" id={contentId}>
+					{content}
+				</pre>
+			) : null}
 		</div>
 	);
 }
@@ -331,91 +365,82 @@ function MarkdownContent({ content, pending }: { content: string; pending: boole
 	);
 }
 
-function flattenMessagesToTimeline(messages: AcpSessionMessage[]): TimelineItem[] {
-	const timeline: TimelineItem[] = [];
-	let blockIndex = 0;
-	const orderedMessages = [...messages].reverse();
+function normalizeAssistantBlocks(blocks: AcpMessageBlock[]) {
+	const thoughtParts: string[] = [];
+	const actionItems: AcpActionEvent[] = [];
+	const contentParts: string[] = [];
 
-	const pushTimelineItem = (nextItem: TimelineItem) => {
-		const previousItem = timeline[timeline.length - 1];
-		if (
-			previousItem &&
-			previousItem.type === "thought" &&
-			nextItem.type === "thought" &&
-			typeof previousItem.content === "string" &&
-			typeof nextItem.content === "string"
-		) {
-			previousItem.content += nextItem.content;
-			previousItem.pending = previousItem.pending || nextItem.pending;
-			return;
-		}
-
-		timeline.push(nextItem);
-	};
-
-	for (const message of orderedMessages) {
-		if (message.role === "user") {
-			pushTimelineItem({
-				id: `${message.id}-user`,
-				type: "user-message",
-				content: message.blocks
-					.filter(
-						(block: AcpMessageBlock): block is { type: "content"; text: string } =>
-							block.type === "content",
-					)
-					.map((block) => block.text)
-					.join(""),
-				pending: false,
-			});
-			continue;
-		}
-
-		if (message.role !== "assistant") {
-			continue;
-		}
-
-		for (const block of message.blocks) {
-			const id = `${message.id}-${blockIndex++}`;
-			switch (block.type) {
-				case "thought":
-					pushTimelineItem({
-						id,
-						type: "thought",
-						content: block.content,
-						pending: message.pending,
-					});
-					break;
-				case "actions":
-					pushTimelineItem({
-						id,
-						type: "actions",
-						content: block.items,
-						pending: message.pending,
-					});
-					break;
-				case "content":
-					pushTimelineItem({
-						id,
-						type: "content",
-						content: block.text,
-						pending: message.pending,
-					});
-					break;
-			}
+	for (const block of blocks) {
+		switch (block.type) {
+			case "thought":
+				thoughtParts.push(block.content);
+				break;
+			case "actions":
+				actionItems.push(...block.items);
+				break;
+			case "content":
+				contentParts.push(block.text);
+				break;
 		}
 	}
 
-	return timeline;
+	const normalizedBlocks: AcpMessageBlock[] = [];
+	if (thoughtParts.length > 0) {
+		normalizedBlocks.push({ type: "thought", content: thoughtParts.join("") });
+	}
+	if (actionItems.length > 0) {
+		normalizedBlocks.push({ type: "actions", items: actionItems });
+	}
+	if (contentParts.length > 0) {
+		normalizedBlocks.push({ type: "content", text: contentParts.join("") });
+	}
+
+	return normalizedBlocks;
+}
+
+function getUserMessageContent(message: AcpSessionMessage) {
+	return message.blocks
+		.filter(
+			(block: AcpMessageBlock): block is { type: "content"; text: string } =>
+				block.type === "content",
+		)
+		.map((block) => block.text)
+		.join("");
 }
 
 export function SessionTimeline({ messages }: { messages: AcpSessionMessage[] }) {
 	const [collapsedThoughts, setCollapsedThoughts] = useState<Set<string>>(new Set());
-	const timeline = useMemo(() => flattenMessagesToTimeline(messages), [messages]);
+	const knownThoughtIdsRef = useRef<Set<string>>(new Set());
+	const orderedMessages = useMemo(() => [...messages].reverse(), [messages]);
 
 	useLayoutEffect(() => {
-		const thoughtIds = timeline.filter((item) => item.type === "thought").map((item) => item.id);
-		setCollapsedThoughts(new Set(thoughtIds));
-	}, [timeline]);
+		const thoughtIds = orderedMessages.flatMap((message) =>
+			message.role !== "assistant"
+				? []
+				: normalizeAssistantBlocks(message.blocks).flatMap((block, index) =>
+						block.type === "thought" ? [`${message.id}-thought-${index}`] : [],
+					),
+		);
+		setCollapsedThoughts((previous) => {
+			const activeThoughts = new Set(thoughtIds);
+			const next = new Set<string>();
+
+			for (const thoughtId of previous) {
+				if (activeThoughts.has(thoughtId)) {
+					next.add(thoughtId);
+				}
+			}
+
+			for (const thoughtId of activeThoughts) {
+				if (!knownThoughtIdsRef.current.has(thoughtId)) {
+					next.add(thoughtId);
+				}
+			}
+
+			knownThoughtIdsRef.current = activeThoughts;
+			return next;
+		});
+	}, [orderedMessages]);
 
 	const handleToggleThought = (id: string) => {
 		setCollapsedThoughts((previous) => {
@@ -431,38 +456,92 @@ export function SessionTimeline({ messages }: { messages: AcpSessionMessage[] })
 
 	return (
 		<>
-			{timeline.map((item) => {
-				switch (item.type) {
-					case "user-message":
-						return (
-							<article key={item.id} className="session-message user">
-								<header className="session-message-role">
-									<span>你</span>
-								</header>
-								<pre className="session-message-content">{item.content as string}</pre>
-							</article>
-						);
-					case "thought":
-						return (
-							<ThoughtBlock
-								key={item.id}
-								content={item.content as string}
-								collapsed={collapsedThoughts.has(item.id)}
-								onToggle={() => handleToggleThought(item.id)}
-							/>
-						);
-					case "actions":
-						return <ActionBar key={item.id} actions={item.content as AcpActionEvent[]} />;
-					case "content":
-						return (
-							<article key={item.id} className="session-message assistant">
-								<header className="session-message-role">
-									<span>Agent</span>
-								</header>
-								<MarkdownContent content={item.content as string} pending={item.pending} />
-							</article>
-						);
+			{orderedMessages.map((message) => {
+				if (message.role === "user") {
+					return (
+						<article key={message.id} className="session-message user">
+							<header className="session-message-role">
+								<span className="session-message-role-badge">你</span>
+							</header>
+							<div className="session-message-stack">
+								<pre className="session-message-content">{getUserMessageContent(message)}</pre>
+							</div>
+						</article>
+					);
 				}
+
+				if (message.role !== "assistant") {
+					return null;
+				}
+
+				const mergedBlocks = normalizeAssistantBlocks(message.blocks);
+				const firstBlock = mergedBlocks[0] ?? null;
+				const inlineThought =
+					firstBlock?.type === "thought"
+						? {
+								block: firstBlock,
+								id: `${message.id}-thought-0`,
+								contentId: `${message.id}-thought-0-content`,
+							}
+						: null;
+				return (
+					<article key={message.id} className="session-message assistant">
+						<header className="session-message-role">
+							<span className="session-message-role-badge">Agent</span>
+							{inlineThought ? (
+								<ThoughtToggle
+									contentId={inlineThought.contentId}
+									collapsed={collapsedThoughts.has(inlineThought.id)}
+									onToggle={() => handleToggleThought(inlineThought.id)}
+									className="thought-toggle-inline"
+								/>
+							) : null}
+						</header>
+						<div className="session-message-stack">
+							{inlineThought && !collapsedThoughts.has(inlineThought.id) ? (
+								<pre
+									className="thought-content thought-content-inline"
+									id={inlineThought.contentId}
+								>
+									{inlineThought.block.content}
+								</pre>
+							) : null}
+							{mergedBlocks.length === 0 ? (
+								<p className="session-message-content pending">…</p>
+							) : (
+								mergedBlocks.map((block, index) => {
+									if (inlineThought && index === 0) {
+										return null;
+									}
+
+									const blockId = `${message.id}-${block.type}-${index}`;
+									switch (block.type) {
+										case "thought":
+											return (
+												<ThoughtBlock
+													key={blockId}
+													id={blockId}
+													content={block.content}
+													collapsed={collapsedThoughts.has(blockId)}
+													onToggle={() => handleToggleThought(blockId)}
+												/>
+											);
+										case "actions":
+											return <ActionBar key={blockId} actions={block.items} />;
+										case "content":
+											return (
+												<MarkdownContent
+													key={blockId}
+													content={block.text}
+													pending={message.pending}
+												/>
+											);
+									}
+								})
+							)}
+						</div>
+					</article>
+				);
 			})}
 		</>
 	);

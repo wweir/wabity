@@ -1,12 +1,11 @@
+import type { ComponentProps } from "react";
 import { useEffect, useId, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
-import rehypeHighlight from "rehype-highlight";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkFrontmatter from "remark-frontmatter";
 import remarkGfm from "remark-gfm";
-import remarkMdx from "remark-mdx";
 
 interface MarkdownRendererProps {
 	content: string;
@@ -123,6 +122,12 @@ const markdownSanitizeSchema = {
 };
 
 let mermaidLoader: Promise<typeof import("mermaid").default> | null = null;
+let remarkMdxLoader: Promise<(typeof import("remark-mdx"))["default"]> | null = null;
+let rehypeHighlightLoader: Promise<(typeof import("rehype-highlight"))["default"]> | null = null;
+
+type MarkdownRendererComponentProps = ComponentProps<typeof ReactMarkdown>;
+type MarkdownRemarkPlugins = NonNullable<MarkdownRendererComponentProps["remarkPlugins"]>;
+type MarkdownRehypePlugins = NonNullable<MarkdownRendererComponentProps["rehypePlugins"]>;
 
 function isMarkdownNode(value: unknown): value is MarkdownNode {
 	return typeof value === "object" && value !== null && "type" in value;
@@ -497,6 +502,22 @@ async function loadMermaid() {
 	return mermaidLoader;
 }
 
+async function loadRemarkMdx() {
+	if (!remarkMdxLoader) {
+		remarkMdxLoader = import("remark-mdx").then((module) => module.default);
+	}
+
+	return remarkMdxLoader;
+}
+
+async function loadRehypeHighlight() {
+	if (!rehypeHighlightLoader) {
+		rehypeHighlightLoader = import("rehype-highlight").then((module) => module.default);
+	}
+
+	return rehypeHighlightLoader;
+}
+
 function MermaidBlock({ chart }: { chart: string }) {
 	const blockId = useId();
 	const [svg, setSvg] = useState<string | null>(null);
@@ -607,11 +628,53 @@ export function MarkdownRenderer({
 	className = "markdown-body",
 	pending = false,
 }: MarkdownRendererProps) {
+	const [remarkMdxPlugin, setRemarkMdxPlugin] = useState<
+		(typeof import("remark-mdx"))["default"] | null
+	>(null);
+	const [rehypeHighlightPlugin, setRehypeHighlightPlugin] = useState<
+		(typeof import("rehype-highlight"))["default"] | null
+	>(null);
+	const remarkPlugins = useMemo(() => {
+		const plugins: MarkdownRemarkPlugins = [remarkGfm, remarkFrontmatter];
+		if (remarkMdxPlugin) {
+			plugins.push(remarkMdxPlugin);
+		}
+		plugins.push(remarkExtendedMarkdown);
+		return plugins;
+	}, [remarkMdxPlugin]);
+	const rehypePlugins = useMemo(() => {
+		const plugins: MarkdownRehypePlugins = [rehypeRaw, [rehypeSanitize, markdownSanitizeSchema]];
+		if (rehypeHighlightPlugin) {
+			plugins.push(rehypeHighlightPlugin);
+		}
+		return plugins;
+	}, [rehypeHighlightPlugin]);
+
+	useEffect(() => {
+		let cancelled = false;
+
+		void loadRemarkMdx().then((plugin) => {
+			if (!cancelled) {
+				setRemarkMdxPlugin(() => plugin);
+			}
+		});
+
+		void loadRehypeHighlight().then((plugin) => {
+			if (!cancelled) {
+				setRehypeHighlightPlugin(() => plugin);
+			}
+		});
+
+		return () => {
+			cancelled = true;
+		};
+	}, []);
+
 	return (
 		<div className={`${className}${pending ? " pending" : ""}`}>
 			<ReactMarkdown
-				remarkPlugins={[remarkGfm, remarkFrontmatter, remarkMdx, remarkExtendedMarkdown]}
-				rehypePlugins={[rehypeRaw, [rehypeSanitize, markdownSanitizeSchema], rehypeHighlight]}
+				remarkPlugins={remarkPlugins}
+				rehypePlugins={rehypePlugins}
 				components={markdownComponents}
 			>
 				{content}

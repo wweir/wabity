@@ -1,15 +1,12 @@
 import type { RefObject } from "react";
 import type { AcpSessionSummary, WorkspaceState } from "../../../lib/tauri/types";
+import type { FloatingPanelOffset } from "../types";
 import { formatSessionStatus } from "../sessions";
 import { formatWorkspacePath } from "../workspace";
 
 interface SessionPanelProps {
 	open: boolean;
-	offset: {
-		x: number;
-		y: number;
-		width: number;
-	};
+	offset: FloatingPanelOffset;
 	panelRef: RefObject<HTMLElement | null>;
 	agentConfigured: boolean;
 	sessionSummaries: AcpSessionSummary[];
@@ -46,6 +43,7 @@ export function SessionPanel({
 			aria-label="全部会话"
 			id="session-panel"
 			ref={panelRef}
+			role="region"
 			style={{
 				position: "absolute",
 				left: `${offset.x}px`,

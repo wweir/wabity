@@ -1,14 +1,11 @@
 import type { RefObject } from "react";
 import type { WorkspaceState } from "../../../lib/tauri/types";
+import type { FloatingPanelOffset } from "../types";
 import { formatWorkspacePath } from "../workspace";
 
 interface WorkspacePickerPanelProps {
 	open: boolean;
-	offset: {
-		x: number;
-		y: number;
-		width: number;
-	};
+	offset: FloatingPanelOffset;
 	panelRef: RefObject<HTMLDivElement | null>;
 	recentWorkspaceRoots: string[];
 	workspace: WorkspaceState;
@@ -32,8 +29,8 @@ export function WorkspacePickerPanel({
 	return (
 		<div
 			className="workspace-picker-panel"
+			id="workspace-picker-panel"
 			ref={panelRef}
-			role="menu"
 			aria-label="选择 workspace"
 			style={{
 				position: "absolute",

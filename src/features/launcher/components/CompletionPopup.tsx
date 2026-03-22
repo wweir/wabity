@@ -1,16 +1,19 @@
 import type { RefObject } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
-import type { ActionMatch, FileSearchMatch, InstalledAppMatch } from "../types";
+import type {
+	ActionMatch,
+	FileSearchMatch,
+	FloatingPanelOffset,
+	InstalledAppMatch,
+} from "../types";
 import { primaryActionLabel, type SuggestionMode } from "../query";
 
 interface CompletionPopupProps {
 	hasSuggestions: boolean;
 	suggestionMode: SuggestionMode;
-	completionOffset: {
-		x: number;
-		y: number;
-		width: number;
-	};
+	popupId: string;
+	optionIdPrefix: string;
+	completionOffset: FloatingPanelOffset;
 	completionListRef: RefObject<HTMLUListElement | null>;
 	selectedIndex: number;
 	visibleFileMatches: FileSearchMatch[];
@@ -25,6 +28,8 @@ interface CompletionPopupProps {
 export function CompletionPopup({
 	hasSuggestions,
 	suggestionMode,
+	popupId,
+	optionIdPrefix,
 	completionOffset,
 	completionListRef,
 	selectedIndex,
@@ -36,6 +41,10 @@ export function CompletionPopup({
 	onRunSelectedAction,
 	onRunSelectedApp,
 }: CompletionPopupProps) {
+	function buildOptionId(index: number) {
+		return `${optionIdPrefix}-${suggestionMode}-${index}`;
+	}
+
 	function preventFocusSteal(event: ReactMouseEvent<HTMLLIElement>) {
 		event.preventDefault();
 	}
@@ -47,14 +56,6 @@ export function CompletionPopup({
 	return (
 		<div
 			className="completion-popup"
-			role="listbox"
-			aria-label={
-				suggestionMode === "file"
-					? "文件补全候选"
-					: suggestionMode === "action"
-						? "动作补全候选"
-						: "应用候选"
-			}
 			style={{
 				position: "absolute",
 				left: `${completionOffset.x}px`,
@@ -62,7 +63,19 @@ export function CompletionPopup({
 				width: `${completionOffset.width}px`,
 			}}
 		>
-			<ul className="suggestion-list completion-list" ref={completionListRef}>
+			<ul
+				aria-label={
+					suggestionMode === "file"
+						? "文件补全候选"
+						: suggestionMode === "action"
+							? "动作补全候选"
+							: "应用候选"
+				}
+				className="suggestion-list completion-list"
+				id={popupId}
+				ref={completionListRef}
+				role="listbox"
+			>
 				{suggestionMode === "file"
 					? visibleFileMatches.map((match, index) => (
 							<li
@@ -70,6 +83,7 @@ export function CompletionPopup({
 								aria-selected={index === selectedIndex}
 								className={index === selectedIndex ? "suggestion-item selected" : "suggestion-item"}
 								data-suggestion-index={index}
+								id={buildOptionId(index)}
 								onMouseDown={preventFocusSteal}
 								onClick={() => onSelectFile(index)}
 								onMouseEnter={() => onSelectIndex(index)}
@@ -90,6 +104,7 @@ export function CompletionPopup({
 										index === selectedIndex ? "suggestion-item selected" : "suggestion-item"
 									}
 									data-suggestion-index={index}
+									id={buildOptionId(index)}
 									onMouseDown={preventFocusSteal}
 									onClick={() => onRunSelectedAction(index)}
 									onMouseEnter={() => onSelectIndex(index)}
@@ -109,6 +124,7 @@ export function CompletionPopup({
 										index === selectedIndex ? "suggestion-item selected" : "suggestion-item"
 									}
 									data-suggestion-index={index}
+									id={buildOptionId(index)}
 									onMouseDown={preventFocusSteal}
 									onClick={() => onRunSelectedApp(index)}
 									onMouseEnter={() => onSelectIndex(index)}

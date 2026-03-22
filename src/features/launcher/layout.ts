@@ -1,4 +1,4 @@
-export const launcherFrameMinWidth = 520;
+export const launcherFrameMinWidth = 440;
 export const launcherFrameMaxWidth = 920;
 export const multilineInputMinHeight = 132;
 export const completionPanelMaxWidth = 360;
@@ -29,7 +29,7 @@ export function resolveLauncherScrollableHeights() {
 
 	return {
 		inputMaxHeight: clamp(Math.floor(availableScreenHeight * 0.26), multilineInputMinHeight, 280),
-		outputMaxHeight: clamp(Math.floor(availableScreenHeight * 0.34), 180, 360),
+		outputMaxHeight: clamp(Math.floor(availableScreenHeight * 0.4), 220, 420),
 	};
 }
 

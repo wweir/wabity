@@ -1,59 +1,193 @@
 :root {
 	--font-sans:
-		Inter, "SF Pro Text", "PingFang SC", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
-		sans-serif;
-	--font-mono: "SF Mono", "JetBrains Mono", monospace;
-	--text-strong: #131313;
-	--text-primary: #2f332d;
-	--text-secondary: #4e534a;
-	--text-muted: #74746d;
-	--text-soft: #5f5f58;
-	--text-contrast: #f7f8f3;
-	--surface-frame: rgba(255, 255, 255, 0.88);
-	--surface-card: rgba(251, 251, 247, 0.96);
-	--surface-card-subtle: rgba(247, 248, 242, 0.92);
-	--surface-card-selected: rgba(241, 243, 236, 0.95);
-	--surface-control: rgba(243, 243, 239, 0.92);
-	--surface-control-hover: rgba(230, 230, 225, 0.92);
-	--surface-control-soft: rgba(249, 249, 245, 0.72);
-	--surface-control-strong: rgba(33, 38, 31, 0.92);
-	--surface-input: rgba(255, 255, 255, 0.6);
-	--surface-panel: rgba(251, 251, 247, 0.96);
-	--border-frame: rgba(231, 231, 226, 0.9);
-	--border-regular: rgba(226, 228, 220, 0.94);
-	--border-soft: rgba(233, 233, 227, 0.95);
-	--border-strong: rgba(216, 218, 209, 0.84);
-	--border-selected: rgba(33, 38, 31, 0.18);
-	--focus-ring: rgba(70, 77, 62, 0.44);
-	--shadow-panel: 0 14px 30px rgba(29, 32, 27, 0.12);
-	--shadow-panel-strong: 0 18px 36px rgba(29, 32, 27, 0.14);
-	--shadow-floating: 0 8px 16px rgba(32, 32, 28, 0.08);
-	--radius-frame: 28px;
-	--radius-frame-compact: 22px;
+		"Avenir Next", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+	--font-mono: "SF Mono", "JetBrains Mono", "IBM Plex Mono", monospace;
+	--font-scale: 1;
+	--text-2xs: calc(11px * var(--font-scale));
+	--text-xs: calc(12px * var(--font-scale));
+	--text-sm: calc(13px * var(--font-scale));
+	--text-md: calc(14px * var(--font-scale));
+	--text-lg: calc(18px * var(--font-scale));
+	--text-xl: calc(24px * var(--font-scale));
+	--text-hero: calc(26px * var(--font-scale));
+	--surface-canvas: oklch(96.4% 0.006 228);
+	--surface-frame: oklch(98.2% 0.004 228);
+	--surface-card: oklch(99.1% 0.003 228);
+	--surface-card-subtle: oklch(97.3% 0.006 228);
+	--surface-card-selected: oklch(94.2% 0.017 226);
+	--surface-control: oklch(95.8% 0.009 228);
+	--surface-control-hover: oklch(93.1% 0.013 226);
+	--surface-control-soft: oklch(97.2% 0.007 228);
+	--surface-control-strong: oklch(33.8% 0.034 232);
+	--surface-input: oklch(99.2% 0.002 228);
+	--surface-panel: oklch(97.8% 0.005 228);
+	--surface-panel-strong: oklch(95.2% 0.01 228);
+	--surface-raised: color-mix(in srgb, var(--surface-card) 82%, var(--surface-panel));
+	--surface-raised-hover: color-mix(
+		in srgb,
+		var(--surface-card-selected) 74%,
+		var(--surface-panel)
+	);
+	--text-strong: oklch(24.5% 0.024 238);
+	--text-primary: oklch(31.8% 0.021 236);
+	--text-secondary: oklch(44.5% 0.018 234);
+	--text-muted: oklch(54.8% 0.014 232);
+	--text-soft: oklch(40.2% 0.016 234);
+	--text-contrast: oklch(98.1% 0.004 228);
+	--accent-strong: oklch(52.2% 0.071 231);
+	--accent-soft: oklch(92.4% 0.018 231);
+	--accent-border: oklch(73.4% 0.04 229);
+	--button-primary-bg: oklch(47.8% 0.062 229);
+	--button-primary-hover: oklch(51.6% 0.067 229);
+	--button-primary-fg: var(--text-contrast);
+	--button-primary-border: color-mix(in srgb, var(--accent-border) 78%, var(--button-primary-bg));
+	--button-execute-bg: oklch(45.6% 0.076 165);
+	--button-execute-hover: oklch(49.8% 0.082 165);
+	--button-execute-fg: var(--text-contrast);
+	--button-execute-border: color-mix(in srgb, var(--success-strong) 78%, var(--button-execute-bg));
+	--launcher-toggle-active-bg: color-mix(in srgb, var(--accent-soft) 76%, var(--surface-card));
+	--launcher-toggle-active-hover: color-mix(in srgb, var(--accent-soft) 90%, var(--surface-card));
+	--launcher-toggle-active-border: color-mix(
+		in srgb,
+		var(--accent-border) 82%,
+		var(--surface-card-selected)
+	);
+	--launcher-toggle-active-fg: color-mix(in srgb, var(--accent-strong) 82%, black);
+	--launcher-toggle-active-muted: color-mix(in srgb, var(--launcher-toggle-active-fg) 68%, white);
+	--launcher-toggle-active-count-bg: color-mix(in srgb, white 74%, var(--accent-soft));
+	--success-strong: oklch(46% 0.057 166);
+	--warn-strong: oklch(56.5% 0.102 72);
+	--error-strong: oklch(52.8% 0.097 28);
+	--surface-code: color-mix(in srgb, var(--surface-panel-strong) 90%, black);
+	--surface-highlight-soft: color-mix(in srgb, white 72%, transparent);
+	--code-text: oklch(88.2% 0.01 84);
+	--code-accent: oklch(76.5% 0.098 72);
+	--code-string: oklch(79.4% 0.09 145);
+	--code-comment: oklch(70.4% 0.014 232);
+	--code-meta: oklch(74.1% 0.013 232);
+	--code-entity: oklch(81.2% 0.063 170);
+	--code-danger: oklch(72.8% 0.082 28);
+	--border-frame: oklch(86.8% 0.01 226);
+	--border-regular: oklch(89.8% 0.009 226);
+	--border-soft: oklch(93.2% 0.008 226);
+	--border-strong: oklch(80.9% 0.015 228);
+	--border-selected: oklch(65.4% 0.04 229);
+	--focus-ring: color-mix(in srgb, var(--accent-strong) 36%, transparent);
+	--shadow-panel: 0 20px 44px rgba(26, 37, 44, 0.08);
+	--shadow-panel-strong: 0 26px 60px rgba(26, 37, 44, 0.12);
+	--shadow-floating: 0 12px 24px rgba(26, 37, 44, 0.1);
+	--radius-frame: 24px;
+	--radius-frame-compact: 20px;
 	--radius-panel: 18px;
 	--radius-card: 16px;
-	--radius-control: 12px;
+	--radius-control: 14px;
 	--radius-small: 10px;
-	--radius-input: 8px;
+	--radius-input: 12px;
 	--radius-pill: 999px;
-	--transition-fast: 0.15s ease;
-	--transition-standard: 0.16s ease;
-	--blur-frame: blur(22px) saturate(135%);
-	--blur-panel: blur(14px);
-	--status-info-bg: rgba(230, 237, 245, 0.92);
-	--status-info-fg: #33506a;
-	--status-success-bg: rgba(222, 238, 225, 0.96);
-	--status-success-fg: #275338;
-	--status-warn-bg: rgba(246, 234, 211, 0.92);
-	--status-warn-fg: #7a5820;
-	--status-error-bg: rgba(244, 223, 218, 0.92);
-	--status-error-fg: #8b3f32;
+	--transition-fast: 180ms cubic-bezier(0.22, 1, 0.36, 1);
+	--transition-standard: 240ms cubic-bezier(0.22, 1, 0.36, 1);
+	--blur-frame: none;
+	--blur-panel: none;
+	--status-info-bg: color-mix(in srgb, var(--accent-soft) 82%, white);
+	--status-info-fg: color-mix(in srgb, var(--accent-strong) 84%, black);
+	--status-success-bg: color-mix(in srgb, var(--success-strong) 16%, white);
+	--status-success-fg: color-mix(in srgb, var(--success-strong) 88%, black);
+	--status-warn-bg: color-mix(in srgb, var(--warn-strong) 18%, white);
+	--status-warn-fg: color-mix(in srgb, var(--warn-strong) 84%, black);
+	--status-error-bg: color-mix(in srgb, var(--error-strong) 16%, white);
+	--status-error-fg: color-mix(in srgb, var(--error-strong) 84%, black);
 	font-family: var(--font-sans);
 	color: var(--text-strong);
 	background: transparent;
 	line-height: 1.5;
 	font-weight: 400;
 	color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+	--surface-canvas: oklch(18.8% 0.013 236);
+	--surface-frame: oklch(22.4% 0.015 236);
+	--surface-card: oklch(25.6% 0.016 236);
+	--surface-card-subtle: oklch(28.6% 0.017 236);
+	--surface-card-selected: oklch(32.4% 0.029 232);
+	--surface-control: oklch(29.5% 0.017 236);
+	--surface-control-hover: oklch(34.1% 0.02 234);
+	--surface-control-soft: oklch(27.1% 0.015 236);
+	--surface-control-strong: oklch(39.8% 0.04 232);
+	--surface-input: oklch(21.3% 0.013 236);
+	--surface-panel: oklch(23.9% 0.014 236);
+	--surface-panel-strong: oklch(27.6% 0.016 236);
+	--surface-raised: color-mix(in srgb, var(--surface-card) 86%, var(--surface-panel));
+	--surface-raised-hover: color-mix(
+		in srgb,
+		var(--surface-card-selected) 74%,
+		var(--surface-panel)
+	);
+	--text-strong: oklch(95.4% 0.006 236);
+	--text-primary: oklch(88.7% 0.009 236);
+	--text-secondary: oklch(77.2% 0.011 236);
+	--text-muted: oklch(67.5% 0.012 236);
+	--text-soft: oklch(72.8% 0.011 236);
+	--text-contrast: oklch(97.6% 0.004 236);
+	--accent-strong: oklch(76.1% 0.059 225);
+	--accent-soft: oklch(35.8% 0.041 227);
+	--accent-border: oklch(56.8% 0.049 226);
+	--button-primary-bg: oklch(48.2% 0.054 227);
+	--button-primary-hover: oklch(52.1% 0.059 227);
+	--button-primary-fg: var(--text-contrast);
+	--button-primary-border: color-mix(in srgb, var(--accent-border) 72%, var(--button-primary-bg));
+	--button-execute-bg: oklch(55.8% 0.094 164);
+	--button-execute-hover: oklch(59.4% 0.099 164);
+	--button-execute-fg: oklch(17.4% 0.01 164);
+	--button-execute-border: color-mix(in srgb, var(--success-strong) 82%, var(--button-execute-bg));
+	--launcher-toggle-active-bg: var(--surface-control-strong);
+	--launcher-toggle-active-hover: color-mix(in srgb, var(--surface-control-strong) 84%, black);
+	--launcher-toggle-active-border: color-mix(
+		in srgb,
+		var(--accent-border) 62%,
+		var(--surface-control-strong)
+	);
+	--launcher-toggle-active-fg: var(--text-contrast);
+	--launcher-toggle-active-muted: color-mix(in srgb, var(--text-contrast) 72%, transparent);
+	--launcher-toggle-active-count-bg: color-mix(in srgb, var(--surface-frame) 18%, transparent);
+	--success-strong: oklch(77.2% 0.093 164);
+	--warn-strong: oklch(78.8% 0.112 76);
+	--error-strong: oklch(73.8% 0.094 29);
+	--surface-code: color-mix(in srgb, var(--surface-panel-strong) 90%, black);
+	--surface-highlight-soft: color-mix(in srgb, var(--text-contrast) 18%, transparent);
+	--code-text: oklch(92.1% 0.008 84);
+	--code-accent: oklch(81.6% 0.085 72);
+	--code-string: oklch(82.4% 0.074 145);
+	--code-comment: oklch(74.8% 0.012 232);
+	--code-meta: oklch(78.2% 0.011 232);
+	--code-entity: oklch(84.1% 0.055 170);
+	--code-danger: oklch(78.1% 0.073 28);
+	--border-frame: oklch(34.2% 0.016 236);
+	--border-regular: oklch(37.9% 0.015 236);
+	--border-soft: oklch(31.8% 0.014 236);
+	--border-strong: oklch(44.2% 0.018 236);
+	--border-selected: oklch(59.8% 0.041 226);
+	--focus-ring: oklch(78.4% 0.053 226);
+	--shadow-panel: 0 24px 52px rgba(0, 0, 0, 0.34);
+	--shadow-panel-strong: 0 28px 64px rgba(0, 0, 0, 0.42);
+	--shadow-floating: 0 18px 32px rgba(0, 0, 0, 0.34);
+	--status-info-bg: color-mix(in srgb, var(--accent-soft) 58%, black);
+	--status-info-fg: oklch(89.2% 0.017 230);
+	--status-success-bg: color-mix(in srgb, var(--success-strong) 22%, black);
+	--status-success-fg: color-mix(in srgb, var(--success-strong) 82%, white);
+	--status-warn-bg: color-mix(in srgb, var(--warn-strong) 20%, black);
+	--status-warn-fg: color-mix(in srgb, var(--warn-strong) 86%, white);
+	--status-error-bg: color-mix(in srgb, var(--error-strong) 20%, black);
+	--status-error-fg: color-mix(in srgb, var(--error-strong) 84%, white);
+	color-scheme: dark;
+}
+
+:root[data-font-size="small"] {
+	--font-scale: 0.94;
+}
+
+:root[data-font-size="large"] {
+	--font-scale: 1.08;
 }
 
 *,
@@ -79,11 +213,25 @@ body {
 	height: fit-content;
 }
 
+.sr-only {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	margin: -1px;
+	overflow: hidden;
+	clip: rect(0, 0, 0, 0);
+	white-space: nowrap;
+	border: 0;
+}
+
 :where(button, input, textarea, select) {
 	font: inherit;
 }
 
 :where(button) {
+	appearance: none;
+	-webkit-appearance: none;
 	cursor: pointer;
 }
 
@@ -101,7 +249,7 @@ body {
 
 :where(.launcher-frame, .settings-frame) {
 	position: relative;
-	min-width: 520px;
+	min-width: 0;
 	border: 1px solid var(--frame-border, var(--border-frame));
 	border-radius: var(--radius-frame);
 	overflow: hidden;
@@ -124,7 +272,7 @@ body {
 	position: absolute;
 	inset: 1px;
 	border-radius: calc(var(--radius-frame) - 1px);
-	border: 1px solid var(--frame-highlight-border, rgba(255, 255, 255, 0.75));
+	border: 1px solid var(--frame-highlight-border, var(--surface-highlight-soft));
 	pointer-events: none;
 }
 
@@ -198,7 +346,12 @@ body {
 	.session-panel-close
 ):disabled {
 	cursor: not-allowed;
-	opacity: 0.55;
+	opacity: 1;
+	--button-background: var(--button-background-disabled, var(--surface-control-soft));
+	--button-background-hover: var(--button-background-disabled, var(--surface-control-soft));
+	--button-color: var(--button-color-disabled, var(--text-muted));
+	border-color: var(--button-border-disabled, var(--border-soft));
+	box-shadow: none;
 }
 
 :where(.workspace-picker-input, .agent-picker-trigger, .settings-nav-button) {
@@ -214,16 +367,16 @@ body {
 }
 
 :where(.workspace-picker-input, .agent-picker-trigger, .settings-nav-button):hover {
-	background: var(--outlined-background-hover, rgba(252, 252, 248, 0.92));
+	background: var(--outlined-background-hover, var(--surface-control-hover));
 }
 
 :where(.settings-select, .settings-input, .settings-textarea) {
-	padding: 8px 12px;
-	border: 1px solid rgba(200, 200, 195, 0.8);
+	padding: 10px 12px;
+	border: 1px solid var(--border-strong);
 	border-radius: var(--radius-input);
 	background: var(--surface-input);
 	color: var(--text-strong);
-	font-size: 13px;
+	font-size: var(--text-sm);
 	min-width: 120px;
 	transition:
 		border-color var(--transition-fast),
@@ -291,12 +444,12 @@ body {
 	min-width: 320px;
 	min-height: 160px;
 	padding: 24px;
-	color: rgba(30, 26, 22, 0.72);
+	color: var(--text-secondary);
 	background:
-		radial-gradient(circle at top, rgba(255, 250, 240, 0.96), rgba(247, 237, 220, 0.92)),
-		linear-gradient(180deg, rgba(255, 255, 255, 0.3), rgba(222, 206, 178, 0.18));
+		linear-gradient(180deg, var(--surface-frame), var(--surface-card-subtle)), var(--surface-canvas);
 	border-radius: 24px;
-	backdrop-filter: blur(18px);
+	border: 1px solid var(--border-frame);
+	box-shadow: var(--shadow-panel);
 }
 
 @media (prefers-reduced-motion: reduce) {

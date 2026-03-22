@@ -12,6 +12,7 @@ import {
 	executeAction,
 	getAcpAgents,
 	getAcpSessionDetail,
+	getRagRuntimeStatus,
 	getWorkspace,
 	hideLauncherWindow,
 	isDesktopRuntimeAvailable,
@@ -19,9 +20,12 @@ import {
 	listAcpSessions,
 	matchActions,
 	onOcrError,
+	onOcrTranslationStarted,
+	onOcrTranslationResult,
 	subscribeAcpSessionRemovals,
 	subscribeAcpSessionUpdates,
 	onSelectedText,
+	openDocumentReference,
 	onWorkspaceUpdated,
 	searchApps,
 	searchFiles,
@@ -34,19 +38,27 @@ import type {
 	AcpAgentCatalog,
 	AcpAgentConfig,
 	AcpRestoreNotice,
+	AcpSessionMessage,
 	AcpSessionDetail,
 	AcpSessionSummary,
+	RagRuntimeStatus,
 	WorkspaceState,
 } from "../../lib/tauri/types";
 import type {
 	ActionMatch,
 	ActionDescriptor,
+	ExecutionConversationState,
+	ExecutionConversationTurn,
 	ExecutionResult,
 	FileSearchMatch,
 	FloatingPanelOffset,
 	InputMode,
 	InstalledAppMatch,
+	RagAnswerStructuredPayload,
+	RagCitation,
+	RagRetrievalSummary,
 } from "./types";
+import { ragAnswerActionDescriptor, translateActionDescriptor } from "./actionCatalog";
 import {
 	appSearchDebounceMs,
 	buildQuery,
@@ -87,7 +99,8 @@ import {
 	upsertSessionSummary,
 	visibleSessionDotsLimit,
 } from "./sessions";
-import { buildWorkspaceBreadcrumbs } from "./workspace";
+import { buildWorkspaceBreadcrumbs, formatWorkspacePath } from "./workspace";
+import { useDismissOnPointerDownOutside, useFloatingPanelOffset } from "./useFloatingPanel";
 import { LauncherHeader } from "./components/LauncherHeader";
 import { LauncherComposer } from "./components/LauncherComposer";
 import { LauncherFeedback } from "./components/LauncherFeedback";
@@ -97,8 +110,28 @@ import { SessionPanel } from "./components/SessionPanel";
 import { WorkspacePickerPanel } from "./components/WorkspacePickerPanel";
 import { AgentPickerPanel } from "./components/AgentPickerPanel";
 import "./launcher.css";
+import { isRagAnswerStructuredPayload } from "./types";
 
 const defaultInputMode: InputMode = "inline";
+const launcherCompletionPopupId = "launcher-completion-popup";
+const launcherCompletionOptionIdPrefix = "launcher-completion-option";
+
+type PrimaryActionTone = "qa" | "execute" | "send" | "path" | "translate";
+
+type PrimaryActionState =
+	| { kind: "search_path"; label: string; tone: PrimaryActionTone; enabled: false }
+	| { kind: "insert_path"; label: string; tone: PrimaryActionTone; enabled: true }
+	| { kind: "send"; label: string; tone: PrimaryActionTone; enabled: boolean }
+	| {
+			kind: "pending_action" | "run_action";
+			label: string;
+			tone: PrimaryActionTone;
+			enabled: boolean;
+	  }
+	| { kind: "rag_answer"; label: string; tone: PrimaryActionTone; enabled: true }
+	| { kind: "launch_app"; label: string; tone: PrimaryActionTone; enabled: boolean }
+	| { kind: "idle"; label: string; tone: PrimaryActionTone; enabled: false };
+
 async function applyClientEffect(result: ExecutionResult) {
 	if (!result.structuredPayload) {
 		return;
@@ -118,26 +151,110 @@ async function applyClientEffect(result: ExecutionResult) {
 	}
 }
 
-function getLatestUserPrompt(activeSession: AcpSessionDetail | null) {
-	if (!activeSession) {
-		return null;
+function isApplePlatform() {
+	if (typeof navigator === "undefined") {
+		return false;
 	}
 
-	const latestUserMessage = [...activeSession.messages]
-		.reverse()
-		.find((message) => message.role === "user");
+	return /Mac|iPhone|iPad|iPod/.test(navigator.platform);
+}
 
-	if (!latestUserMessage) {
-		return null;
+function resolveLauncherOperationStatus(actionId: string): string | null {
+	switch (actionId) {
+		case "rag_answer":
+			return "模型请求中 · 正在生成文档回答";
+		case "translate_text":
+			return "模型请求中 · 正在翻译文本";
+		default:
+			return null;
+	}
+}
+
+function extractQaPrompt(rawText: string) {
+	const slashInput = parseSlashActionInput(rawText, ragAnswerActionDescriptor.aliases);
+	return (slashInput?.content ?? rawText).trim();
+}
+
+function describePrimaryActionDescriptor(descriptor: ActionDescriptor): {
+	label: string;
+	tone: PrimaryActionTone;
+} {
+	switch (descriptor.id) {
+		case "rag_answer":
+			return {
+				label: "问答",
+				tone: "qa",
+			};
+		case "translate_text":
+			return {
+				label: "翻译",
+				tone: "translate",
+			};
+		default:
+			return {
+				label: descriptor.title,
+				tone: "execute",
+			};
+	}
+}
+
+function buildQaAssistantMessageBlocks(
+	result: ExecutionResult,
+	payload: RagAnswerStructuredPayload | null,
+) {
+	const blocks: AcpSessionMessage["blocks"] = [];
+	const actions = payload?.actions ?? [];
+	if (actions.length > 0) {
+		blocks.push({
+			type: "actions",
+			items: actions,
+		});
+	}
+	if (result.primaryText) {
+		blocks.push({
+			type: "content",
+			text: result.primaryText,
+		});
 	}
 
-	const prompt = latestUserMessage.blocks
-		.filter((block): block is { type: "content"; text: string } => block.type === "content")
-		.map((block) => block.text)
-		.join("")
-		.trim();
+	return blocks;
+}
 
-	return prompt || null;
+function buildRagRuntimeStatusText(status: RagRuntimeStatus): {
+	text: string | null;
+	tone: "default" | "progress" | "error";
+} {
+	switch (status.phase) {
+		case "scanning":
+			return {
+				text:
+					status.totalFileCount > 0
+						? `索引构建中 · 已扫描 ${status.scannedFileCount} 个文件，当前进度 ${status.completedFileCount}/${status.totalFileCount}`
+						: status.scannedFileCount > 0
+							? `索引构建中 · 已扫描 ${status.scannedFileCount} 个文件`
+							: "索引构建中 · 正在扫描文档",
+				tone: "progress",
+			};
+		case "indexing":
+			return {
+				text:
+					status.totalFileCount > 0
+						? `索引构建中 · 当前进度 ${status.completedFileCount}/${status.totalFileCount}（剩余 ${status.pendingFileCount} 个文件）`
+						: status.pendingFileCount > 0
+							? `索引构建中 · 正在计算向量（剩余 ${status.pendingFileCount} 个文件）`
+							: "索引构建中 · 正在计算向量",
+				tone: "progress",
+			};
+		case "error":
+			return {
+				text: status.lastError
+					? `索引构建失败 · ${status.lastError}`
+					: "索引构建失败 · 请检查 RAG 配置和日志",
+				tone: "error",
+			};
+		default:
+			return { text: null, tone: "default" };
+	}
 }
 
 interface LauncherPageProps {
@@ -167,8 +284,17 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 	const [activeSlashAction, setActiveSlashAction] = useState<ActionDescriptor | null>(null);
 	const [selectedIndex, setSelectedIndex] = useState(0);
 	const [result, setResult] = useState<ExecutionResult | null>(null);
+	const [qaMessages, setQaMessages] = useState<AcpSessionMessage[]>([]);
+	const [qaConversationState, setQaConversationState] = useState<ExecutionConversationState | null>(
+		null,
+	);
+	const [ragConversation, setRagConversation] = useState<ExecutionConversationTurn[]>([]);
+	const [qaRetrieval, setQaRetrieval] = useState<RagRetrievalSummary | null>(null);
 	const [error, setError] = useState<string | null>(null);
-	const [loading, setLoading] = useState(false);
+	const [suggestionLoading, setSuggestionLoading] = useState(false);
+	const [operationPending, setOperationPending] = useState(false);
+	const [agentActionPending, setAgentActionPending] = useState(false);
+	const [shortcutTranslationPending, setShortcutTranslationPending] = useState(false);
 	const [frameWidth, setFrameWidth] = useState(launcherFrameMaxWidth);
 	const [caretIndex, setCaretIndex] = useState(0);
 	const [suggestionsHidden, setSuggestionsHidden] = useState(false);
@@ -177,27 +303,22 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		y: 0,
 		width: completionPanelMaxWidth,
 	});
-	const [workspacePickerOffset, setWorkspacePickerOffset] = useState<FloatingPanelOffset>({
-		x: 0,
-		y: 0,
-		width: 280,
-	});
-	const [agentPickerOffset, setAgentPickerOffset] = useState<FloatingPanelOffset>({
-		x: 0,
-		y: 0,
-		width: 220,
-	});
-	const [sessionPanelOffset, setSessionPanelOffset] = useState<FloatingPanelOffset>({
-		x: 0,
-		y: 0,
-		width: 360,
-	});
 	const [creatingSession, setCreatingSession] = useState(false);
 	const [sessionPanelOpen, setSessionPanelOpen] = useState(false);
 	const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
 	const [agentPickerOpen, setAgentPickerOpen] = useState(false);
 	const [restoreNotices, setRestoreNotices] = useState<AcpRestoreNotice[]>([]);
 	const [latestSubmittedText, setLatestSubmittedText] = useState<string | null>(null);
+	const [operationStatusText, setOperationStatusText] = useState<string | null>(null);
+	const [ragRuntimeStatus, setRagRuntimeStatus] = useState<RagRuntimeStatus>({
+		phase: "idle",
+		scannedFileCount: 0,
+		completedFileCount: 0,
+		totalFileCount: 0,
+		pendingFileCount: 0,
+		lastError: null,
+		updatedAtMs: 0,
+	});
 	const frameRef = useRef<HTMLElement | null>(null);
 	const shellRef = useRef<HTMLElement | null>(null);
 	const sessionPanelRef = useRef<HTMLElement | null>(null);
@@ -249,15 +370,17 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 	const currentFileNeedle = activeFileToken?.needle ?? "";
 	const suggestionMode: SuggestionMode = fileMode
 		? "file"
-		: !launcherMode
+		: shortcutTranslationPending
 			? "none"
-			: pendingSlashAction
+			: !launcherMode
 				? "none"
-				: isActionQuery(textBeforeCaret)
-					? "action"
-					: isAppSearchReady(textBeforeCaret)
-						? "app"
-						: "none";
+				: pendingSlashAction
+					? "none"
+					: isActionQuery(textBeforeCaret)
+						? "action"
+						: isAppSearchReady(textBeforeCaret)
+							? "app"
+							: "none";
 	const visibleActionMatches = useMemo(
 		() => (launcherMode ? actionMatches : []),
 		[actionMatches, launcherMode],
@@ -278,6 +401,9 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 	const canTextMatchCompletions =
 		suggestionMode === "file" ? isFileSearchReady(currentFileNeedle) : suggestionMode !== "none";
 	const hasSuggestions = !suggestionsHidden && suggestionCount > 0 && canTextMatchCompletions;
+	const activeCompletionOptionId = hasSuggestions
+		? `${launcherCompletionOptionIdPrefix}-${suggestionMode}-${selectedIndex}`
+		: undefined;
 	const visibleCount = hasSuggestions ? suggestionCount : 0;
 	const selectedActionMatch = visibleActionMatches[selectedIndex];
 	const selectedFileMatch = visibleFileMatches[selectedIndex];
@@ -290,9 +416,11 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 				: null;
 	const hasCompletion = completionText !== null && completionText !== textBeforeCaret;
 	const activeSession = activeSessionId ? (sessionDetails[activeSessionId] ?? null) : null;
-	const latestSessionPrompt = getLatestUserPrompt(activeSession);
 	const activeSessionStatus = activeSession?.session.status ?? null;
-	const activeSessionScrollAnchor = activeSession?.session.sessionId ?? null;
+	const activeSessionBusy =
+		Boolean(activeSessionId) && (activeSessionStatus === "running" || agentActionPending);
+	const activeSessionScrollAnchor =
+		activeSession?.session.sessionId ?? (qaMessages.length > 0 ? `qa:${qaMessages.length}` : null);
 	const activeSessionSummary =
 		sessionSummaries.find((session) => session.sessionId === activeSessionId) ??
 		activeSession?.session ??
@@ -316,38 +444,301 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		sessionAttentionCount,
 	);
 	const recentWorkspaceRoots = workspace.recentRoots.filter((path) => path !== workspace.rootPath);
+	const workspacePickerOffset = useFloatingPanelOffset({
+		open: workspacePickerOpen,
+		triggerRef: workspacePickerTriggerRef,
+		shellRef,
+		horizontalAlign: "left",
+		gap: 8,
+		minWidth: 240,
+		extraWidth: 148,
+		initialWidth: 280,
+		watchKey: `${frameWidth}:${recentWorkspaceRoots.length}`,
+	});
+	const agentPickerOffset = useFloatingPanelOffset({
+		open: agentPickerOpen,
+		triggerRef: agentPickerTriggerRef,
+		shellRef,
+		horizontalAlign: "left",
+		gap: 8,
+		minWidth: 220,
+		extraWidth: 36,
+		initialWidth: 220,
+		watchKey: `${agentCatalog.agents.length}:${frameWidth}:${selectedAgentId ?? ""}`,
+	});
+	const sessionPanelOffset = useFloatingPanelOffset({
+		open: sessionPanelOpen,
+		triggerRef: sessionPanelTriggerRef,
+		shellRef,
+		horizontalAlign: "right",
+		gap: 10,
+		minWidth: 320,
+		maxWidth: 420,
+		extraWidth: 136,
+		initialWidth: 360,
+		watchKey: `${frameWidth}:${sessionSummaries.length}:${activeSessionId ?? ""}`,
+	});
 	const sessionCanSend = activeSession ? activeSession.session.status === "idle" : false;
 	const agentConfigured = agentCatalog.agents.length > 0;
-	const primaryActionShortcutLabel = inputMode === "multiline" ? "Ctrl/Cmd+Enter" : "Enter";
+	const appSearchActive = suggestionMode === "app";
+	const appSearchPending =
+		appSearchActive &&
+		isAppSearchReady(textBeforeCaret) &&
+		visibleAppMatches.length === 0 &&
+		suggestionLoading;
+	const hasAppMatches = visibleAppMatches.length > 0;
+	const shouldFallbackToRagAnswer =
+		launcherMode &&
+		!fileMode &&
+		!activeSessionId &&
+		!pendingSlashAction &&
+		!textStartsWithSlash &&
+		!isActionQuery(textBeforeCaret) &&
+		rawText.trim().length > 0 &&
+		(!appSearchActive || (!appSearchPending && !hasAppMatches));
+	const primaryActionShortcutLabel =
+		inputMode === "multiline" ? (isApplePlatform() ? "Cmd+Enter" : "Ctrl+Enter") : "Enter";
 	const agentActionShortcutLabel = "Alt+Enter";
-	const primaryActionLabel = fileMode
-		? "插入路径"
-		: activeSessionId
-			? "发送"
-			: pendingSlashAction
-				? `执行 ${pendingSlashAction.aliases[0] ?? pendingSlashAction.title}`
-				: "执行";
-	const statusBarText = latestSessionPrompt ?? latestSubmittedText;
+	const primaryActionState: PrimaryActionState = useMemo(() => {
+		if (fileMode) {
+			return selectedFileMatch
+				? {
+						kind: "insert_path",
+						label: "插入路径",
+						tone: "path",
+						enabled: true,
+					}
+				: {
+						kind: "search_path",
+						label: "搜索路径",
+						tone: "path",
+						enabled: false,
+					};
+		}
+
+		if (activeSessionId) {
+			return {
+				kind: "send",
+				label: "发送",
+				tone: "send",
+				enabled: sessionCanSend && rawText.trim().length > 0,
+			};
+		}
+
+		if (pendingSlashAction) {
+			const actionView = describePrimaryActionDescriptor(pendingSlashAction);
+			return {
+				kind: "pending_action",
+				...actionView,
+				enabled: rawText.trim().length > 0,
+			};
+		}
+
+		if (shouldFallbackToRagAnswer) {
+			return {
+				kind: "rag_answer",
+				label: "问答",
+				tone: "qa",
+				enabled: true,
+			};
+		}
+
+		if (appSearchActive) {
+			return {
+				kind: "launch_app",
+				label: "执行",
+				tone: "execute",
+				enabled: Boolean(selectedAppMatch),
+			};
+		}
+
+		if (selectedActionMatch) {
+			const actionView = describePrimaryActionDescriptor(selectedActionMatch.descriptor);
+			return {
+				kind: "run_action",
+				...actionView,
+				enabled: true,
+			};
+		}
+
+		return {
+			kind: "idle",
+			label: "执行",
+			tone: "execute",
+			enabled: false,
+		};
+	}, [
+		activeSessionId,
+		appSearchActive,
+		fileMode,
+		pendingSlashAction,
+		rawText,
+		selectedActionMatch,
+		selectedAppMatch,
+		selectedFileMatch,
+		sessionCanSend,
+		shouldFallbackToRagAnswer,
+	]);
+	const ragRuntimeBar = useMemo(
+		() => buildRagRuntimeStatusText(ragRuntimeStatus),
+		[ragRuntimeStatus],
+	);
+	const visibleQaMessages = useMemo(
+		() => qaMessages.filter((message) => message.role !== "system"),
+		[qaMessages],
+	);
+	const shouldShowQaMessages =
+		!activeSession && !jsonPreview && !markdownPreview && !result && visibleQaMessages.length > 0;
+	const statusBarState = useMemo(() => {
+		const sessionInfoItems =
+			activeSession && activeSession.session.workspaceRoot
+				? [
+						`${activeSession.session.title} · ${activeSession.session.agentName}`,
+						formatWorkspacePath(activeSession.session.workspaceRoot, workspace),
+					]
+				: [];
+		const qaInfoItems = shouldShowQaMessages
+			? ["问答会话", formatWorkspacePath(workspace.rootPath, workspace)]
+			: [];
+
+		if (operationStatusText) {
+			const items = [operationStatusText, ...(activeSession ? sessionInfoItems : qaInfoItems)];
+			if (error) {
+				items.push(`错误 · ${error}`);
+			}
+
+			return {
+				label: "运行状态",
+				items,
+				tone: error ? ("error" as const) : ("progress" as const),
+			};
+		}
+
+		if (creatingSession) {
+			const items = ["正在创建 Agent 会话", ...sessionInfoItems];
+			if (error) {
+				items.push(`错误 · ${error}`);
+			}
+
+			return {
+				label: "运行状态",
+				items,
+				tone: error ? ("error" as const) : ("progress" as const),
+			};
+		}
+
+		if (activeSessionBusy) {
+			const items = [
+				activeSession?.session.agentName
+					? `Agent 执行中 · ${activeSession.session.agentName}`
+					: "Agent 执行中 · 正在等待响应",
+				...sessionInfoItems,
+			];
+			if (error) {
+				items.push(`错误 · ${error}`);
+			}
+
+			return {
+				label: "运行状态",
+				items,
+				tone: error ? ("error" as const) : ("progress" as const),
+			};
+		}
+
+		if (ragRuntimeBar.text) {
+			const items = [ragRuntimeBar.text];
+			if (error) {
+				items.push(`错误 · ${error}`);
+			}
+
+			return {
+				label: "运行状态",
+				items,
+				tone: error ? ("error" as const) : ragRuntimeBar.tone,
+			};
+		}
+
+		if (activeSession) {
+			const items = [...sessionInfoItems];
+			if (activeSession.session.lastError) {
+				items.push(`错误 · ${activeSession.session.lastError}`);
+			}
+			if (error && error !== activeSession.session.lastError) {
+				items.push(`错误 · ${error}`);
+			}
+
+			return {
+				label: "会话状态",
+				items,
+				tone: items.some((item) => item.startsWith("错误 ·"))
+					? ("error" as const)
+					: ("default" as const),
+			};
+		}
+
+		if (shouldShowQaMessages) {
+			const items = [...qaInfoItems];
+			if (error) {
+				items.push(`错误 · ${error}`);
+			}
+
+			return {
+				label: "会话状态",
+				items,
+				tone: error ? ("error" as const) : ("default" as const),
+			};
+		}
+
+		const items = latestSubmittedText ? [latestSubmittedText] : [];
+		if (error) {
+			items.push(`错误 · ${error}`);
+		}
+
+		return {
+			label: error ? "状态" : "最近输入",
+			items,
+			tone: error ? ("error" as const) : ("default" as const),
+		};
+	}, [
+		activeSession,
+		activeSessionBusy,
+		creatingSession,
+		error,
+		latestSubmittedText,
+		operationStatusText,
+		ragRuntimeBar,
+		shouldShowQaMessages,
+		workspace,
+	]);
 	const showAgentAction = agentConfigured && !activeSessionId;
-	const showCancelActiveSession = activeSessionStatus === "running";
+	const showTranslateAction = launcherMode;
+	const showCancelActiveSession = Boolean(activeSessionId) && activeSessionBusy;
+	const primaryActionDependsOnSuggestions =
+		primaryActionState.kind === "insert_path" ||
+		primaryActionState.kind === "search_path" ||
+		primaryActionState.kind === "run_action" ||
+		primaryActionState.kind === "launch_app";
 	const canTriggerAgentAction =
 		agentConfigured &&
 		!activeSessionId &&
-		!loading &&
+		!operationPending &&
+		!shortcutTranslationPending &&
 		!creatingSession &&
 		rawText.trim().length > 0;
 	const canRunPrimaryAction =
-		!loading &&
+		!operationPending &&
+		!shortcutTranslationPending &&
 		!creatingSession &&
-		(fileMode
-			? Boolean(selectedFileMatch)
-			: activeSessionId
-				? sessionCanSend && rawText.trim().length > 0
-				: suggestionMode === "app"
-					? Boolean(selectedAppMatch)
-					: pendingSlashAction
-						? rawText.trim().length > 0
-						: Boolean(selectedActionMatch));
+		!(suggestionLoading && primaryActionDependsOnSuggestions) &&
+		primaryActionState.enabled &&
+		!(primaryActionState.kind === "launch_app" && appSearchPending && !hasAppMatches);
+	const canRunTranslateAction =
+		launcherMode &&
+		!operationPending &&
+		!shortcutTranslationPending &&
+		!creatingSession &&
+		!fileMode &&
+		rawText.trim().length > 0;
 
 	const updateRawText = useCallback(
 		(nextValue: string, nextCaretIndex?: number) => {
@@ -498,7 +889,11 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		sessionDetails,
 		result,
 		error,
-		loading,
+		suggestionLoading,
+		operationPending,
+		agentActionPending,
+		creatingSession,
+		operationStatusText,
 		inputMode,
 	]);
 
@@ -578,108 +973,6 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		});
 	}, [boundedCaretIndex, frameWidth, rawText, inputMode]);
 
-	useLayoutEffect(() => {
-		if (!workspacePickerOpen) {
-			return;
-		}
-
-		const triggerElement = workspacePickerTriggerRef.current;
-		const shellElement = shellRef.current;
-		if (!triggerElement || !shellElement) {
-			return;
-		}
-
-		const triggerRect = triggerElement.getBoundingClientRect();
-		const shellRect = shellElement.getBoundingClientRect();
-		const nextX = Math.max(0, triggerRect.left - shellRect.left);
-		const nextY = Math.max(0, triggerRect.bottom - shellRect.top + 8);
-		const nextWidth = Math.max(240, Math.ceil(triggerRect.width + 148));
-
-		setWorkspacePickerOffset((currentOffset) => {
-			if (
-				currentOffset.x === nextX &&
-				currentOffset.y === nextY &&
-				currentOffset.width === nextWidth
-			) {
-				return currentOffset;
-			}
-
-			return {
-				x: nextX,
-				y: nextY,
-				width: nextWidth,
-			};
-		});
-	}, [frameWidth, recentWorkspaceRoots.length, workspacePickerOpen]);
-
-	useLayoutEffect(() => {
-		if (!agentPickerOpen) {
-			return;
-		}
-
-		const triggerElement = agentPickerTriggerRef.current;
-		const shellElement = shellRef.current;
-		if (!triggerElement || !shellElement) {
-			return;
-		}
-
-		const triggerRect = triggerElement.getBoundingClientRect();
-		const shellRect = shellElement.getBoundingClientRect();
-		const nextX = Math.max(0, triggerRect.left - shellRect.left);
-		const nextY = Math.max(0, triggerRect.bottom - shellRect.top + 8);
-		const nextWidth = Math.max(220, Math.ceil(triggerRect.width + 36));
-
-		setAgentPickerOffset((currentOffset) => {
-			if (
-				currentOffset.x === nextX &&
-				currentOffset.y === nextY &&
-				currentOffset.width === nextWidth
-			) {
-				return currentOffset;
-			}
-
-			return {
-				x: nextX,
-				y: nextY,
-				width: nextWidth,
-			};
-		});
-	}, [agentCatalog.agents.length, agentPickerOpen, frameWidth, selectedAgentId]);
-
-	useLayoutEffect(() => {
-		if (!sessionPanelOpen) {
-			return;
-		}
-
-		const triggerElement = sessionPanelTriggerRef.current;
-		const shellElement = shellRef.current;
-		if (!triggerElement || !shellElement) {
-			return;
-		}
-
-		const triggerRect = triggerElement.getBoundingClientRect();
-		const shellRect = shellElement.getBoundingClientRect();
-		const nextWidth = clamp(Math.ceil(triggerRect.width + 136), 320, 420);
-		const nextX = Math.max(0, triggerRect.right - shellRect.left - nextWidth);
-		const nextY = Math.max(0, triggerRect.bottom - shellRect.top + 10);
-
-		setSessionPanelOffset((currentOffset) => {
-			if (
-				currentOffset.x === nextX &&
-				currentOffset.y === nextY &&
-				currentOffset.width === nextWidth
-			) {
-				return currentOffset;
-			}
-
-			return {
-				x: nextX,
-				y: nextY,
-				width: nextWidth,
-			};
-		});
-	}, [frameWidth, sessionPanelOpen, sessionSummaries.length, activeSessionId]);
-
 	useEffect(() => {
 		setSuggestionsHidden(false);
 		setSelectedIndex(0);
@@ -729,7 +1022,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 
 		async function loadSuggestions() {
 			if (suggestionMode === "file") {
-				setLoading(true);
+				setSuggestionLoading(true);
 				try {
 					const nextMatches = await searchFiles(currentFileNeedle, 8);
 					if (!cancelled) {
@@ -742,7 +1035,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 					}
 				} finally {
 					if (!cancelled) {
-						setLoading(false);
+						setSuggestionLoading(false);
 					}
 				}
 
@@ -750,7 +1043,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			}
 
 			if (suggestionMode === "action") {
-				setLoading(true);
+				setSuggestionLoading(true);
 				try {
 					const nextMatches = await matchActions(suggestionQuery);
 					if (!cancelled) {
@@ -767,7 +1060,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 					}
 				} finally {
 					if (!cancelled) {
-						setLoading(false);
+						setSuggestionLoading(false);
 					}
 				}
 
@@ -775,7 +1068,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			}
 
 			if (suggestionMode === "app") {
-				setLoading(true);
+				setSuggestionLoading(true);
 				try {
 					const nextMatches = await searchApps(textBeforeCaret, 8);
 					if (!cancelled) {
@@ -788,7 +1081,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 					}
 				} finally {
 					if (!cancelled) {
-						setLoading(false);
+						setSuggestionLoading(false);
 					}
 				}
 
@@ -797,18 +1090,18 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 
 			if (!launcherMode) {
 				resetSuggestions();
-				setLoading(false);
+				setSuggestionLoading(false);
 				return;
 			}
 
 			resetSuggestions();
-			setLoading(false);
+			setSuggestionLoading(false);
 		}
 
 		if (suggestionMode === "file") {
 			if (!isFileSearchReady(currentFileNeedle)) {
 				resetSuggestions(true);
-				setLoading(false);
+				setSuggestionLoading(false);
 				return () => {
 					cancelled = true;
 				};
@@ -820,7 +1113,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		} else if (suggestionMode === "app") {
 			if (!isAppSearchReady(textBeforeCaret)) {
 				resetSuggestions(true);
-				setLoading(false);
+				setSuggestionLoading(false);
 				return () => {
 					cancelled = true;
 				};
@@ -833,7 +1126,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			void loadSuggestions();
 		} else {
 			resetSuggestions();
-			setLoading(false);
+			setSuggestionLoading(false);
 		}
 
 		return () => {
@@ -847,6 +1140,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 	useEffect(() => {
 		void getWorkspace().then((nextWorkspace) => {
 			setWorkspaceState(nextWorkspace);
+			resetQaConversation();
 		});
 		void getAcpAgents().then((catalog) => {
 			setAgentCatalog(catalog);
@@ -863,9 +1157,38 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 
 		const workspaceUnlistenPromise = onWorkspaceUpdated((nextWorkspace) => {
 			setWorkspaceState(nextWorkspace);
+			resetQaConversation();
 		});
 		const ocrErrorUnlistenPromise = onOcrError((message) => {
+			setShortcutTranslationPending(false);
+			setOperationStatusText(null);
 			setError(message);
+			scheduleLauncherInputFocus();
+		});
+		const ocrTranslationStartedUnlistenPromise = onOcrTranslationStarted((payload) => {
+			pendingSelectionRef.current = 0;
+			setShortcutTranslationPending(true);
+			setOperationStatusText("模型请求中 · 正在翻译文本");
+			setInputMode(payload.sourceMode);
+			updateRawText(payload.sourceText, 0);
+			setLatestSubmittedText(payload.sourceText.trim() || "快捷翻译");
+			setResult(null);
+			setError(null);
+			setActiveSlashAction(null);
+			resetQaConversation();
+			scheduleLauncherInputFocus();
+		});
+		const ocrTranslationUnlistenPromise = onOcrTranslationResult((payload) => {
+			pendingSelectionRef.current = 0;
+			setShortcutTranslationPending(false);
+			setOperationStatusText(null);
+			setInputMode(payload.sourceMode);
+			updateRawText(payload.sourceText, 0);
+			setLatestSubmittedText(payload.sourceText.trim() || "快捷翻译");
+			setResult(payload.result);
+			setError(null);
+			setActiveSlashAction(null);
+			resetQaConversation();
 			scheduleLauncherInputFocus();
 		});
 		void subscribeAcpSessionUpdates((detail) => {
@@ -888,8 +1211,37 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		return () => {
 			void workspaceUnlistenPromise.then((unlisten) => unlisten?.());
 			void ocrErrorUnlistenPromise.then((unlisten) => unlisten?.());
+			void ocrTranslationStartedUnlistenPromise.then((unlisten) => unlisten?.());
+			void ocrTranslationUnlistenPromise.then((unlisten) => unlisten?.());
 		};
-	}, [scheduleLauncherInputFocus]);
+	}, [scheduleLauncherInputFocus, updateRawText]);
+
+	useEffect(() => {
+		let cancelled = false;
+
+		async function refreshRagRuntimeStatus() {
+			try {
+				const nextStatus = await getRagRuntimeStatus();
+				if (!cancelled) {
+					setRagRuntimeStatus(nextStatus);
+				}
+			} catch {
+				if (!cancelled) {
+					setRagRuntimeStatus((current) => current);
+				}
+			}
+		}
+
+		void refreshRagRuntimeStatus();
+		const intervalId = window.setInterval(() => {
+			void refreshRagRuntimeStatus();
+		}, 1500);
+
+		return () => {
+			cancelled = true;
+			window.clearInterval(intervalId);
+		};
+	}, []);
 
 	useEffect(() => {
 		if (!desktopRuntimeAvailable) {
@@ -956,71 +1308,26 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		};
 	}, [clearScheduledLauncherInputFocus, desktopRuntimeAvailable, scheduleLauncherInputFocus]);
 
-	useEffect(() => {
-		if (!workspacePickerOpen) {
-			return;
-		}
+	useDismissOnPointerDownOutside({
+		open: workspacePickerOpen,
+		triggerRef: workspacePickerTriggerRef,
+		panelRef: workspacePickerPanelRef,
+		onDismiss: () => setWorkspacePickerOpen(false),
+	});
 
-		function handlePointerDown(event: MouseEvent) {
-			const targetNode = event.target as Node;
-			if (
-				workspacePickerTriggerRef.current?.contains(targetNode) ||
-				workspacePickerPanelRef.current?.contains(targetNode)
-			) {
-				return;
-			}
-			setWorkspacePickerOpen(false);
-		}
+	useDismissOnPointerDownOutside({
+		open: agentPickerOpen,
+		triggerRef: agentPickerTriggerRef,
+		panelRef: agentPickerPanelRef,
+		onDismiss: () => setAgentPickerOpen(false),
+	});
 
-		document.addEventListener("mousedown", handlePointerDown);
-		return () => {
-			document.removeEventListener("mousedown", handlePointerDown);
-		};
-	}, [workspacePickerOpen]);
-
-	useEffect(() => {
-		if (!agentPickerOpen) {
-			return;
-		}
-
-		function handlePointerDown(event: MouseEvent) {
-			const targetNode = event.target as Node;
-			if (
-				agentPickerTriggerRef.current?.contains(targetNode) ||
-				agentPickerPanelRef.current?.contains(targetNode)
-			) {
-				return;
-			}
-			setAgentPickerOpen(false);
-		}
-
-		document.addEventListener("mousedown", handlePointerDown);
-		return () => {
-			document.removeEventListener("mousedown", handlePointerDown);
-		};
-	}, [agentPickerOpen]);
-
-	useEffect(() => {
-		if (!sessionPanelOpen) {
-			return;
-		}
-
-		function handlePointerDown(event: MouseEvent) {
-			const targetNode = event.target as Node;
-			if (
-				sessionPanelTriggerRef.current?.contains(targetNode) ||
-				sessionPanelRef.current?.contains(targetNode)
-			) {
-				return;
-			}
-			setSessionPanelOpen(false);
-		}
-
-		document.addEventListener("mousedown", handlePointerDown);
-		return () => {
-			document.removeEventListener("mousedown", handlePointerDown);
-		};
-	}, [sessionPanelOpen]);
+	useDismissOnPointerDownOutside({
+		open: sessionPanelOpen,
+		triggerRef: sessionPanelTriggerRef,
+		panelRef: sessionPanelRef,
+		onDismiss: () => setSessionPanelOpen(false),
+	});
 
 	useLayoutEffect(() => {
 		const logElement = sessionLogRef.current;
@@ -1066,6 +1373,75 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		setActiveSlashAction(null);
 	}
 
+	function resetQaConversation() {
+		setQaMessages([]);
+		setQaConversationState(null);
+		setRagConversation([]);
+		setQaRetrieval(null);
+	}
+
+	function appendRagConversationTurn(question: string, answer: string) {
+		const normalizedQuestion = question.trim();
+		const normalizedAnswer = answer.trim();
+		if (!normalizedQuestion || !normalizedAnswer) {
+			return;
+		}
+
+		setRagConversation((current) =>
+			[
+				...current,
+				{ role: "user" as const, content: normalizedQuestion },
+				{ role: "assistant" as const, content: normalizedAnswer },
+			].slice(-12),
+		);
+	}
+
+	function applyQaResult(prompt: string, executionResult: ExecutionResult) {
+		if (executionResult.status !== "success" || !executionResult.primaryText) {
+			return false;
+		}
+		const payload = isRagAnswerStructuredPayload(executionResult.structuredPayload)
+			? executionResult.structuredPayload
+			: null;
+
+		const timestamp = Date.now();
+		const userMessage: AcpSessionMessage = {
+			id: `${timestamp}-user`,
+			role: "user",
+			blocks: [
+				{
+					type: "content",
+					text: prompt,
+				},
+			],
+			pending: false,
+		};
+		const assistantMessage: AcpSessionMessage = {
+			id: `${timestamp}-assistant`,
+			role: "assistant",
+			blocks: buildQaAssistantMessageBlocks(executionResult, payload),
+			pending: false,
+		};
+
+		setQaMessages((current) =>
+			current.length > 0
+				? [...current, userMessage, assistantMessage]
+				: [userMessage, assistantMessage],
+		);
+		setQaConversationState(
+			payload?.conversationState ?? {
+				previousResponseId: payload?.responseId ?? null,
+				continuationScope: null,
+				citations: payload?.citations ?? [],
+				actions: payload?.actions ?? [],
+				toolCalls: payload?.tools.calls ?? [],
+			},
+		);
+		setQaRetrieval(payload?.retrieval ?? null);
+		setResult(null);
+		return true;
+	}
+
 	function activatePendingSlashAction(descriptor: ActionDescriptor) {
 		flushSync(() => {
 			setActiveSlashAction(descriptor);
@@ -1082,17 +1458,33 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			onSuccess?: () => void;
 		},
 	) {
-		setLoading(true);
+		const nextOperationStatus = resolveLauncherOperationStatus(descriptor.id);
+		if (nextOperationStatus) {
+			setOperationStatusText(nextOperationStatus);
+		}
+		setOperationPending(true);
 		try {
 			const executionResult = await executeAction({
 				actionId: descriptor.id,
 				query,
+				conversation: descriptor.id === "rag_answer" ? ragConversation : undefined,
+				conversationState: descriptor.id === "rag_answer" ? qaConversationState : undefined,
 			});
 
 			setLatestSubmittedText(query.rawText.trim() || descriptor.title);
 			options?.onSuccess?.();
-			setResult(executionResult);
+			const appliedQaResult =
+				descriptor.id === "rag_answer" &&
+				applyQaResult(extractQaPrompt(query.rawText), executionResult);
+			if (!appliedQaResult) {
+				setResult(executionResult);
+			}
 			setError(null);
+			if (appliedQaResult && executionResult.primaryText) {
+				appendRagConversationTurn(extractQaPrompt(query.rawText), executionResult.primaryText);
+			} else if (descriptor.id !== "rag_answer") {
+				resetQaConversation();
+			}
 
 			// Hide the always-on-top launcher first so opener targets can take focus.
 			if (executionResult.shouldCloseLauncher) {
@@ -1105,7 +1497,10 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			setError(getErrorMessage(executionError, "动作执行失败"));
 			return false;
 		} finally {
-			setLoading(false);
+			if (nextOperationStatus) {
+				setOperationStatusText(null);
+			}
+			setOperationPending(false);
 		}
 	}
 
@@ -1115,6 +1510,26 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		}
 
 		await executeLauncherAction(pendingSlashAction, fullQuery, {
+			onSuccess: () => {
+				setActiveSlashAction(null);
+			},
+		});
+	}
+
+	async function runFallbackRagAnswer() {
+		if (!shouldFallbackToRagAnswer) {
+			return;
+		}
+
+		await executeLauncherAction(ragAnswerActionDescriptor, fullQuery);
+	}
+
+	async function handleTranslateAction() {
+		if (!canRunTranslateAction) {
+			return;
+		}
+
+		await executeLauncherAction(translateActionDescriptor, fullQuery, {
 			onSuccess: () => {
 				setActiveSlashAction(null);
 			},
@@ -1285,7 +1700,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			return;
 		}
 
-		setLoading(true);
+		setOperationPending(true);
 		try {
 			const executionResult = await launchApp(selected.path);
 			setLatestSubmittedText(rawText.trim() || selected.name);
@@ -1298,7 +1713,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		} catch (launchError) {
 			setError(getErrorMessage(launchError, "应用启动失败"));
 		} finally {
-			setLoading(false);
+			setOperationPending(false);
 		}
 	}
 
@@ -1312,7 +1727,9 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			return;
 		}
 
-		setLoading(true);
+		setOperationStatusText("Agent 执行中 · 正在等待响应");
+		setOperationPending(true);
+		setAgentActionPending(true);
 		try {
 			const detail = await sendAcpPrompt(activeSessionId, prompt);
 			setLatestSubmittedText(prompt);
@@ -1321,7 +1738,9 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		} catch (promptError) {
 			setError(getErrorMessage(promptError, "ACP prompt 发送失败"));
 		} finally {
-			setLoading(false);
+			setOperationStatusText(null);
+			setAgentActionPending(false);
+			setOperationPending(false);
 		}
 	}
 
@@ -1331,7 +1750,9 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			return;
 		}
 
-		setLoading(true);
+		setOperationStatusText("Agent 执行中 · 正在等待响应");
+		setOperationPending(true);
+		setAgentActionPending(true);
 		try {
 			let targetSessionId = activeSessionId;
 
@@ -1351,32 +1772,51 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		} catch (agentError) {
 			setError(getErrorMessage(agentError, "Agent 执行失败"));
 		} finally {
-			setLoading(false);
+			setOperationStatusText(null);
+			setAgentActionPending(false);
+			setOperationPending(false);
 		}
 	}
 
 	async function runPrimaryAction(index: number = selectedIndex) {
-		if (suggestionMode === "file") {
-			selectFile(index);
-			return;
+		switch (primaryActionState.kind) {
+			case "insert_path":
+			case "search_path":
+				selectFile(index);
+				return;
+			case "send":
+				await runSessionPrompt();
+				return;
+			case "rag_answer":
+				await runFallbackRagAnswer();
+				return;
+			case "launch_app":
+				await runSelectedApp(index);
+				return;
+			case "pending_action":
+				await runPendingSlashAction();
+				return;
+			case "run_action":
+				await runSelectedAction(index);
+				return;
+			case "idle":
+				return;
 		}
+	}
 
-		if (activeSessionId) {
-			await runSessionPrompt();
-			return;
+	async function handleOpenRagCitation(citation: RagCitation) {
+		try {
+			await hideLauncherWindow();
+			await openDocumentReference(citation.absolutePath);
+		} catch (openError) {
+			if (desktopRuntimeAvailable) {
+				void getCurrentWindow()
+					.show()
+					.catch(() => undefined);
+			}
+			setError(getErrorMessage(openError, "打开文档引用失败"));
+			scheduleLauncherInputFocus();
 		}
-
-		if (suggestionMode === "app") {
-			await runSelectedApp(index);
-			return;
-		}
-
-		if (pendingSlashAction) {
-			await runPendingSlashAction();
-			return;
-		}
-
-		await runSelectedAction(index);
 	}
 
 	async function handleKeyDown(
@@ -1497,6 +1937,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		try {
 			const nextWorkspace = await setWorkspace(path);
 			setWorkspaceState(nextWorkspace);
+			resetQaConversation();
 			setError(null);
 		} catch (workspaceError) {
 			setError(getErrorMessage(workspaceError, fallbackMessage));
@@ -1669,41 +2110,55 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 					inputRef={inputRef}
 					rawText={rawText}
 					inputPlaceholder={inputPlaceholder}
-					statusText={statusBarText}
+					inputLabel="输入动作、问题或文件路径"
+					inputDescriptionId="launcher-status-region"
+					statusLabel={statusBarState.label}
+					statusItems={statusBarState.items}
+					statusTone={statusBarState.tone}
 					onUpdateRawText={updateRawText}
 					onSyncCaretIndex={syncCaretIndex}
 					onKeyDown={handleKeyDown}
 					onOpenSettings={onOpenSettings}
 					hasCompletion={hasCompletion}
+					hasSuggestions={hasSuggestions}
+					completionPopupId={launcherCompletionPopupId}
+					activeCompletionOptionId={activeCompletionOptionId}
 					onAcceptCompletion={acceptCompletion}
-					loading={loading}
 					creatingSession={creatingSession}
+					agentActionPending={agentActionPending}
 					showAgentAction={showAgentAction}
+					showTranslateAction={showTranslateAction}
 					primaryActionShortcutLabel={primaryActionShortcutLabel}
-					primaryActionLabel={primaryActionLabel}
+					primaryActionLabel={primaryActionState.label}
+					primaryActionTone={primaryActionState.tone}
 					canRunPrimaryAction={canRunPrimaryAction}
+					canRunTranslateAction={canRunTranslateAction}
 					agentActionShortcutLabel={agentActionShortcutLabel}
 					onAgentExecute={() => void handleAgentExecute()}
+					onRunTranslateAction={() => void handleTranslateAction()}
 					showCancelActiveSession={showCancelActiveSession}
 					onCancelActiveSession={() => void handleCancelActiveSession()}
 					onRunPrimaryAction={() => void runPrimaryAction()}
-					onCloseLauncher={() => void hideLauncherWindow()}
 				/>
 
 				<LauncherFeedback
 					activeSession={activeSession}
+					qaCitations={qaConversationState?.citations ?? []}
+					qaRetrieval={qaRetrieval}
+					qaMessages={qaMessages}
 					sessionLogRef={sessionLogRef}
 					result={result}
 					jsonPreview={jsonPreview}
 					markdownPreview={markdownPreview}
-					workspace={workspace}
-					error={error}
+					onOpenRagCitation={(citation) => void handleOpenRagCitation(citation)}
 				/>
 			</section>
 
 			<CompletionPopup
 				hasSuggestions={hasSuggestions}
 				suggestionMode={suggestionMode}
+				popupId={launcherCompletionPopupId}
+				optionIdPrefix={launcherCompletionOptionIdPrefix}
 				completionOffset={completionOffset}
 				completionListRef={completionListRef}
 				selectedIndex={selectedIndex}

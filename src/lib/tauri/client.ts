@@ -18,9 +18,12 @@ import type {
 	AcpSessionDetail,
 	AcpSessionSummary,
 	AppSettings,
+	BuiltinRagMcpServerStatus,
 	LlmProviderConfig,
+	LlmProviderModelEntry,
 	LlmSettings,
 	PublicSkillCatalog,
+	RagRuntimeStatus,
 	RagScanResult,
 	RagSettings,
 	ShortcutConfig,
@@ -34,9 +37,40 @@ import {
 } from "../../features/launcher/fallback";
 
 const browserShortcutConfig: ShortcutConfig = {
-	toggle_launcher: "Cmd+Shift+Space",
-	ocr_capture: "Cmd+Shift+O",
+	toggle_launcher: "Alt+Space",
+	ocr_capture: "Alt+R",
+	ocr_translate: "Alt+D",
 };
+
+export const defaultRagIgnoreGlobs = [
+	"**/.git/**",
+	"**/node_modules/**",
+	"**/vendor/**",
+	"**/Pods/**",
+	"**/target/**",
+	"**/dist/**",
+	"**/build/**",
+	"**/out/**",
+	"**/.next/**",
+	"**/.nuxt/**",
+	"**/.svelte-kit/**",
+	"**/.turbo/**",
+	"**/.cache/**",
+	"**/coverage/**",
+	"**/.venv/**",
+	"**/venv/**",
+] as const;
+
+export interface OcrTranslationResultEvent {
+	sourceMode: "ocr" | "selection";
+	sourceText: string;
+	result: ExecutionResult;
+}
+
+export interface OcrTranslationStartedEvent {
+	sourceMode: "ocr" | "selection";
+	sourceText: string;
+}
 
 const browserAppSettings: AppSettings = {
 	general: {
@@ -48,9 +82,41 @@ const browserAppSettings: AppSettings = {
 		theme: "auto",
 		fontSize: "medium",
 	},
+	prompts: {
+		translationPrompt: [
+			"You are an expert translation engine specialized in English ↔ Simplified Chinese.",
+			"",
+			"Translate the following text accurately, naturally, and fluently.",
+			"",
+			"Rules:",
+			"- If the user specifies a target language, follow it exactly.",
+			"- If no target language is specified:",
+			"  - Primarily Simplified Chinese → English",
+			"  - Primarily English → Simplified Chinese",
+			"  - Other languages → Simplified Chinese",
+			"- Preserve original meaning, tone, style, and all formatting (Markdown, code blocks, URLs, proper nouns, etc.).",
+			"- Return ONLY the translation. No explanations, notes, or extra text.",
+		].join("\n"),
+		ragAnswerSystemPrompt: [
+			"You are a precise tool-augmented assistant. Answer questions using only the tools available.",
+			"",
+			"Core Rules:",
+			"- Always ground your answers in tool results. Never assert repository-specific, document-specific, or system-specific facts without first using RAG/search/file-reading/MCP tools to gather evidence.",
+			"- Use tools in multiple rounds if needed: start broad, then drill down to exact files and line ranges until evidence is sufficient.",
+			"- For exact file content, always call the file reading tool with the precise path and line window. Do not guess.",
+			"- For broader context, use RAG or MCP tools instead of assuming.",
+			"- In your final answer, cite concrete file paths and line numbers when tool results provide them.",
+			"- Clearly distinguish facts from inferences. Label any inference explicitly.",
+			"- You may add concise general background knowledge when helpful, but never fabricate file paths, APIs, behaviors, code, or configuration values.",
+			"- If tool results are conflicting, incomplete, or insufficient, state it clearly and explain what is missing.",
+			"",
+			"Return Markdown only.",
+		].join("\n"),
+	},
 	llm: {
 		providers: [],
-		defaultProviderId: null,
+		translationProviderId: null,
+		questionAnswerProviderId: null,
 	},
 	ocr: {
 		provider: "system",
@@ -58,7 +124,7 @@ const browserAppSettings: AppSettings = {
 	},
 	rag: {
 		sourceDirectories: [],
-		ignoreGlobs: [],
+		ignoreGlobs: [...defaultRagIgnoreGlobs],
 		embeddingProviderId: null,
 	},
 };
@@ -74,6 +140,27 @@ const browserWorkspaceState: WorkspaceState = {
 	recentRoots: ["/"],
 	homePath: null,
 	displayHomeAsTilde: false,
+};
+
+const browserRagRuntimeStatus: RagRuntimeStatus = {
+	phase: "idle",
+	scannedFileCount: 0,
+	completedFileCount: 0,
+	totalFileCount: 0,
+	pendingFileCount: 0,
+	lastError: null,
+	updatedAtMs: 0,
+};
+
+const browserBuiltinRagMcpServerStatus: BuiltinRagMcpServerStatus = {
+	server: {
+		transport: "http",
+		name: "Wabity RAG Query",
+		url: "http://127.0.0.1:43189/internal/mcp/rag",
+		headers: [],
+	},
+	running: false,
+	lastError: "仅桌面端运行时提供内置 MCP server。",
 };
 
 function canUseTauriInvoke() {
@@ -170,6 +257,10 @@ export async function launchApp(path: string): Promise<ExecutionResult> {
 	return invokeOrDefault("launch_app", () => launchAppFallback(path), { path });
 }
 
+export async function openDocumentReference(path: string): Promise<void> {
+	return invokeIfDesktop("open_document_reference", { path });
+}
+
 export async function hideLauncherWindow(): Promise<void> {
 	return invokeIfDesktop("hide_launcher_window");
 }
@@ -212,6 +303,18 @@ export async function onOcrError(callback: (message: string) => void): Promise<U
 	return listenIfDesktop("ocr-error", callback);
 }
 
+export async function onOcrTranslationResult(
+	callback: (payload: OcrTranslationResultEvent) => void,
+): Promise<UnlistenFn | null> {
+	return listenIfDesktop("ocr-translation-result", callback);
+}
+
+export async function onOcrTranslationStarted(
+	callback: (payload: OcrTranslationStartedEvent) => void,
+): Promise<UnlistenFn | null> {
+	return listenIfDesktop("ocr-translation-started", callback);
+}
+
 // Shortcut configuration
 export async function getShortcut(): Promise<ShortcutConfig> {
 	return invokeOrDefault("get_shortcut", browserShortcutConfig);
@@ -235,7 +338,13 @@ export async function setAppSettings(settings: AppSettings): Promise<AppSettings
 	return invokeOrDefault("set_app_settings", settings, { settings });
 }
 
-export async function listLlmProviderModels(provider: LlmProviderConfig): Promise<string[]> {
+export async function getBuiltinRagMcpServerStatus(): Promise<BuiltinRagMcpServerStatus> {
+	return invokeOrDefault("get_builtin_rag_mcp_server_status", browserBuiltinRagMcpServerStatus);
+}
+
+export async function listLlmProviderModels(
+	provider: LlmProviderConfig,
+): Promise<LlmProviderModelEntry[]> {
 	return invokeOrDefault("list_llm_provider_models", [], { provider });
 }
 
@@ -256,6 +365,10 @@ export async function scanRagSources(
 		},
 		{ ragSettings, llmSettings },
 	);
+}
+
+export async function getRagRuntimeStatus(): Promise<RagRuntimeStatus> {
+	return invokeOrDefault("get_rag_runtime_status", browserRagRuntimeStatus);
 }
 
 export async function getPublicSkillCatalog(): Promise<PublicSkillCatalog> {

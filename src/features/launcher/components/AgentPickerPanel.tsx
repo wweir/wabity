@@ -1,13 +1,10 @@
 import type { RefObject } from "react";
 import type { AcpAgentConfig } from "../../../lib/tauri/types";
+import type { FloatingPanelOffset } from "../types";
 
 interface AgentPickerPanelProps {
 	open: boolean;
-	offset: {
-		x: number;
-		y: number;
-		width: number;
-	};
+	offset: FloatingPanelOffset;
 	panelRef: RefObject<HTMLDivElement | null>;
 	agents: AcpAgentConfig[];
 	selectedAgentId: string | null;
@@ -29,8 +26,8 @@ export function AgentPickerPanel({
 	return (
 		<div
 			className="agent-picker-panel"
+			id="agent-picker-panel"
 			ref={panelRef}
-			role="menu"
 			aria-label="选择 ACP agent"
 			style={{
 				position: "absolute",

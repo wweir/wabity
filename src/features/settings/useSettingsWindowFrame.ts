@@ -2,77 +2,112 @@ import { currentMonitor } from "@tauri-apps/api/window";
 import { type RefObject, useEffect, useLayoutEffect, useState } from "react";
 import { isDesktopRuntimeAvailable, resizeLauncherWindow } from "../../lib/tauri/client";
 
+const preferredSettingsFrameWidth = 920;
 const preferredSettingsFrameHeight = 720;
+const minimumSettingsFrameWidth = 360;
 const minimumSettingsFrameHeight = 320;
 const monitorViewportMargin = 72;
 
-function measureRootSize(rootElement: HTMLElement) {
-	const rect = rootElement.getBoundingClientRect();
+interface ViewportSize {
+	width: number;
+	height: number;
+}
 
+interface SettingsFrameSize {
+	width: number;
+	height: number;
+}
+
+function clampSettingsFrameDimension(
+	viewportDimension: number,
+	minimumDimension: number,
+	preferredDimension: number,
+) {
+	const roundedViewportDimension = Math.max(1, Math.floor(viewportDimension));
+	const boundedDimension = Math.max(
+		minimumDimension,
+		roundedViewportDimension - monitorViewportMargin,
+	);
+
+	return Math.min(preferredDimension, boundedDimension, roundedViewportDimension);
+}
+
+function clampSettingsFrameSize(viewportSize: ViewportSize): SettingsFrameSize {
 	return {
-		width: Math.ceil(rect.width),
-		height: Math.ceil(rect.height),
+		width: clampSettingsFrameDimension(
+			viewportSize.width,
+			minimumSettingsFrameWidth,
+			preferredSettingsFrameWidth,
+		),
+		height: clampSettingsFrameDimension(
+			viewportSize.height,
+			minimumSettingsFrameHeight,
+			preferredSettingsFrameHeight,
+		),
 	};
 }
 
-function clampSettingsFrameHeight(viewportHeight: number) {
-	const roundedViewportHeight = Math.max(1, Math.floor(viewportHeight));
-	const boundedHeight = Math.max(
-		minimumSettingsFrameHeight,
-		roundedViewportHeight - monitorViewportMargin,
-	);
+async function resolveViewportSize(desktopRuntimeAvailable: boolean): Promise<ViewportSize> {
+	if (desktopRuntimeAvailable) {
+		const monitor = await currentMonitor();
+		if (monitor) {
+			const scaleFactor = monitor.scaleFactor;
 
-	return Math.min(preferredSettingsFrameHeight, boundedHeight, roundedViewportHeight);
-}
-
-async function resolveViewportHeight() {
-	const monitor = await currentMonitor();
-	if (monitor) {
-		return monitor.workArea.size.height / monitor.scaleFactor;
+			return {
+				width: monitor.workArea.size.width / scaleFactor,
+				height: monitor.workArea.size.height / scaleFactor,
+			};
+		}
 	}
 
-	return window.screen.availHeight || window.innerHeight;
+	return {
+		width: window.innerWidth || window.screen.availWidth || preferredSettingsFrameWidth,
+		height: window.innerHeight || window.screen.availHeight || preferredSettingsFrameHeight,
+	};
 }
 
 export function useSettingsWindowFrame(rootRef: RefObject<HTMLElement | null>) {
 	const desktopRuntimeAvailable = isDesktopRuntimeAvailable();
-	const [frameHeight, setFrameHeight] = useState(() => {
+	const [frameSize, setFrameSize] = useState<SettingsFrameSize>(() => {
 		if (typeof window === "undefined") {
-			return preferredSettingsFrameHeight;
+			return {
+				width: preferredSettingsFrameWidth,
+				height: preferredSettingsFrameHeight,
+			};
 		}
 
-		return clampSettingsFrameHeight(
-			window.screen.availHeight || window.innerHeight || preferredSettingsFrameHeight,
-		);
+		return clampSettingsFrameSize({
+			width: window.innerWidth || window.screen.availWidth || preferredSettingsFrameWidth,
+			height: window.innerHeight || window.screen.availHeight || preferredSettingsFrameHeight,
+		});
 	});
 
 	useEffect(() => {
-		if (!desktopRuntimeAvailable) {
-			return;
-		}
-
 		let cancelled = false;
 
-		const syncFrameHeight = async () => {
+		const syncFrameSize = async () => {
 			try {
-				const viewportHeight = await resolveViewportHeight();
+				const viewportSize = await resolveViewportSize(desktopRuntimeAvailable);
 				if (cancelled) {
 					return;
 				}
 
-				const nextFrameHeight = clampSettingsFrameHeight(viewportHeight);
-				setFrameHeight((currentHeight) =>
-					currentHeight === nextFrameHeight ? currentHeight : nextFrameHeight,
+				const nextFrameSize = clampSettingsFrameSize(viewportSize);
+				setFrameSize((currentFrameSize) =>
+					currentFrameSize.width === nextFrameSize.width &&
+					currentFrameSize.height === nextFrameSize.height
+						? currentFrameSize
+						: nextFrameSize,
 				);
 			} catch (error: unknown) {
-				console.warn("failed to resolve settings monitor height", error);
+				console.warn("failed to resolve settings monitor size", error);
 			}
 		};
 
-		void syncFrameHeight();
+		void syncFrameSize();
 
 		const handleResize = () => {
-			void syncFrameHeight();
+			void syncFrameSize();
 		};
 
 		window.addEventListener("resize", handleResize);
@@ -96,7 +131,7 @@ export function useSettingsWindowFrame(rootRef: RefObject<HTMLElement | null>) {
 		let animationFrameId = 0;
 
 		animationFrameId = requestAnimationFrame(() => {
-			void resizeLauncherWindow(measureRootSize(rootElement)).catch((resizeError: unknown) => {
+			void resizeLauncherWindow(frameSize).catch((resizeError: unknown) => {
 				console.warn("failed to resize settings window", resizeError);
 			});
 		});
@@ -104,7 +139,7 @@ export function useSettingsWindowFrame(rootRef: RefObject<HTMLElement | null>) {
 		return () => {
 			cancelAnimationFrame(animationFrameId);
 		};
-	}, [desktopRuntimeAvailable, frameHeight, rootRef]);
+	}, [desktopRuntimeAvailable, frameSize, rootRef]);
 
-	return frameHeight;
+	return frameSize;
 }
