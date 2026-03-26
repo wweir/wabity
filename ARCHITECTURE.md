@@ -75,9 +75,21 @@
 
 前端当前只有两个真正的产品视图：`launcher` 和 `settings`。`src/app/App.tsx` 只负责这两个视图的装配与切换。
 
+`launcher` 内部虽然同时承载本地执行结果、轻量 RAG 问答和 ACP session 时间线，但这些输出面都遵守同一个前端展示原则：主答案或主结果永远优先于调试性辅助信息。像 action trail、tool detail、thought 这类过程信息只能作为消息内部的次级 disclosure，不能和主答案并列成独立主面板，也不应占据答案的首个视觉落点。浅色/深色主题都必须复用同一套稳定 token 语义，feature CSS 不应继续保留只适用于单一主题的私有颜料。对于 `chat/completions` 返回的 reasoning，后端必须先把最终答案和 reasoning 分离；如果兼容层把 thinking 混进 `message.content`，后端也必须在归一化阶段拆出 `reasoning`。前端只能把 reasoning 当次级 thought 展示，不能再把它无差别塞进主答案文本。
+
+launcher 进入轻量 RAG 问答结果展示态后，前端会把原生窗口 resize 切到“只增不减”的受限模式，并只在结果落地与后续 resize 稳定期内临时关闭 blur auto-hide 与被动输入框 refocus 链；稳定期结束后会自动恢复正常 blur 行为，而显式退出 QA 展示态则会立即恢复 shrink 与 refocus。这条链路属于窗口稳定性约束，不是普通 UI 动画细节。
+
+macOS 下 launcher 不是普通文档窗口，而是服务于全屏覆盖场景的高层级 `NSPanel`。它会叠加 `nonactivating_panel`、全屏辅助 collection behavior 和 `Status` 窗口层级，以覆盖全屏 Space。这个约束直接服务于全局唤起和短时输入，不允许前端或业务流程把它当成长期主窗口去驱动。
+
 `settings` 里凡是显式提交的分组，都把保存、恢复已保存版本和定位问题动作放在主编辑区内的草稿操作卡，不再挂在页面头部。
 
 其中 `AI 功能` 分组按任务边界组织为“翻译配置”和“文档问答配置”两个编辑卡，每张卡同时维护任务级模型路由和系统提示词；`LLM` 分组只维护可复用条目本身，不承载任务默认选择。
+
+`LLM` 分组允许先创建普通 OpenAI-compatible 条目，再在同一张编辑卡里按需套用只读内置供应商模板。
+
+内置模板目录属于应用发布物，不写入用户配置；用户最终保存的仍然是普通 `LlmProviderConfig` 条目和本地 API Key。这样可以把“供应商引导元数据”和“用户私有密钥配置”分开，避免升级和持久化边界混淆。
+
+对于从内置模板创建的条目，模型选择不是开放输入，而是受模板白名单目录约束；白名单模型带一句话说明，帮助用户在不理解供应商全量产品线的前提下完成选择。
 
 ### 4.2 Rust 后端
 
@@ -132,6 +144,7 @@
 - `setup` 只做装配
 - 启动阶段需要等待的异步初始化统一通过 `tauri::async_runtime::block_on(...)` 接入
 - 开机自启动属于基础设施能力：保存设置时必须即时同步到系统登录项，启动时还要再做一次 best-effort 对账，避免配置与系统状态漂移
+- 透明 launcher 的圆角和外阴影都由前端 CSS 控制；内容根节点必须显式预留透明安全边，否则窗口内容区会把底角阴影裁成直角
 - `main.rs` 保持薄，业务逻辑下沉到模块
 
 ### 5.2 AppState
@@ -206,6 +219,7 @@
 - 前端不解释配置文件路径和落盘方式
 - 不同分组的草稿不要互相污染
 - 配置新增字段必须向后兼容
+- 内置 LLM 供应商模板是只读目录数据，不直接替代用户已保存的 LLM 条目；模板更新随应用版本走，真实调用配置仍由用户保存和选择
 - `general.autoStart` 不是“只落盘不生效”的静态字段；Rust 侧保存成功后必须继续同步系统登录启动项
 - 内置 RAG MCP server 的运行状态和是否写入全局 MCP 清单必须分离：前者来自运行时状态投影，后者仍由设置页草稿显式控制
 
@@ -224,12 +238,24 @@
 - 读取选中文本、截图、窗口恢复都属于平台能力
 - OCR provider 和翻译 provider 都依赖运行时配置
 - 失败时需要统一把错误投影回 launcher
+- 当 OCR provider 选中远程多模态模型时，截图文件会在 Rust 侧编码成 data URL，并通过内置 OCR prompt 作为 `responses` 的 `input_text + input_image` 组合发给模型；这条提示词不下放到前端临时拼装
+- 翻译链路严格按所选 LLM 条目声明的协议请求对应 endpoint，不再跨协议兜底；运行时会把翻译请求统一视为低复杂度任务，对所有翻译模型都显式注入 `thinking: { type: "disabled" }`，并优先以流式响应消费 SSE，避免兼容层把短文本翻译拖进高延迟路径或整包缓冲
 
 约束：
 
+- `launcher 唤起` 这条热路径现在只负责显隐窗口，不再同步尝试读取外部应用选中文本；读取选区会触发模拟复制与剪贴板变更确认，把它塞进 toggle 会直接拉高快捷键感知延迟
 - 截图流程当前只有 macOS 可用
 - 选中文本读取必须留在快捷键处理线程，不可随意丢到 Tokio worker
+- macOS 下 launcher 不能只依赖 `Focused(false)` 自动隐藏；`NSPanel` 的焦点语义在回答渲染、窗口重排和空闲阶段仍可能出现无用户操作的抖动，继续把 `blur` 当关闭信号只会制造误隐藏。当前实现已放弃 `nonactivating panel`，改为可激活的 borderless `NSPanel` 来保证问答结果落地后的稳定输入，但窗口层仍必须继续用“显示后短暂抑制 + 失焦延迟确认 + 重新获焦取消”的状态机过滤假离焦，而不是继续深入探测 AppKit 当前事件这类高风险运行时细节
+- macOS 下 launcher 的 toggle 语义也必须区分“已聚焦可见”和“仅运行时状态仍标记可见但窗口已经掉出前台”；后者再次触发快捷键时应重新置前，不应先走一次无感知的隐藏
+- 全局快捷键门闩不能假设 `Released` 一定可靠到达；macOS 在抢焦点或激活 panel 的阶段可能丢失 release。运行时可以继续防抖同一轮按键，但若 release 长时间缺失，必须自动解锁，否则 launcher、OCR 和翻译快捷键都会被永久卡死
+- 其他平台若保留失焦自动隐藏，同样必须区分“用户明确切走焦点”和“窗口刚显示时的瞬时焦点抖动”；显示后的短暂稳定窗口内，首个 `blur` 必须直接忽略，稳定窗口结束后的后续 `blur` 也要经过很短的确认延迟，若期间重新获焦则取消隐藏
+- 前端自动测量并回写窗口尺寸不属于“用户交互”，这类内部 resize 必须显式标记为 transient window interaction；否则问答结果、OCR 回填或长输出渲染阶段产生的焦点抖动会被窗口层错误收敛成自动隐藏
+- 问答结果展示期的原生窗口 auto-resize 不能简单停掉，也不能继续允许自由 shrink；当前做法是保留持续观察，但把窗口同步切到“只增不减”的受限模式。这样回答首屏和后续异步内容仍能把窗口继续撑开，而短时测量回退不会把 `NSPanel` 又缩回去截断内容；离开结果展示态后才恢复正常 shrink
+- `transient window interaction` 不是万能兜底；当问答结果真正落地并开始重排消息流时，前端必须额外通过 IPC 重置一小段 launcher blur suppression，并在结果落地与 resize 稳定期内暂停 `window focus`、`visibilitychange`、`onFocusChanged` 这类被动输入框 refocus 链。稳定期结束后，blur auto-hide 与被动 refocus 都要自动恢复；显式退出结果展示态时也要立即恢复。否则窗口层刚把 `NSPanel` 拉回 key，前端又会立刻重新触发 DOM focus，形成新的 `blur/focus` 自激震荡。当前实现不再把 launcher 设成 `nonactivating panel`，因为它会在问答结果展示后持续掉 key 并直接打断输入；同时，结果展示期一旦前端显式关闭 blur auto-hide，窗口层默认不再自动重建 key 焦点或重复抢焦点，只保留 suppression 并等待稳定期结束或用户显式重新聚焦，避免把原生失焦打成反复 `blur/focus` 循环
+- 但如果 macOS 原生 panel 在 blur-disabled 阶段已经自己掉出可见层，窗口层仍不能继续假设“没有 `hide()` 日志就代表用户还能看到它”；运行时必须补采 `NSPanel.isVisible / isKeyWindow / occlusionState / NSApp.isActive` 这组原生状态，并只允许做一次无焦点的可见性补偿（例如 `show + orderFrontRegardless`），禁止顺手重新 `activate` 或 `makeKey`
 - 远程 OCR 当前只替换识别器，不代表截图能力已经跨平台
+- OCR 纯回填和快捷翻译回填都必须把来源模式显式投影回前端：`ocr` 保留 OCR 语义，`selection` 保留外部选中文本语义，不能再一律退化成模糊的 `multiline`
 
 ### 6.4 RAG 索引与问答链路
 
@@ -241,19 +267,25 @@ RAG 分成两块：
 索引侧：
 
 - 输入来自设置页里的 source directories、ignore globs 和 embedding provider
-- ignore globs 默认预置常见第三方依赖目录和编译产物目录，降低把 `node_modules`、`target`、`dist` 一类噪音文档误入索引的概率；用户仍可在设置页显式覆盖
+- ignore globs 分成“固定内置规则 + 用户追加规则”两层：固定规则默认覆盖 `.git`、`node_modules`、`vendor`、`Pods`、`target`、`dist`、`build`、`out`、`.next`、`.nuxt`、`.svelte-kit`、`.turbo`、`.cache`、`coverage`、`.venv`、`venv`，后端归一化时会强制补回，前端不提供取消入口；用户只能在此基础上继续追加
 - `RagIndexService` 维护 LanceDB 向量索引和 SQLite 元数据；文件级索引目标以 embedding fingerprint 表达，而不是只记模型名。fingerprint 先尝试从模型自身的稳定身份推导，例如显式 digest、`/models` 返回项里的 digest/fingerprint hint，或官方托管模型 ID；只有无法稳定确认模型空间时才回退到 endpoint 绑定
-- watcher 只监听显式配置目录
+- Markdown 文档切块不是简单按固定字符窗口切。索引侧会先按标题、列表项、代码块和普通段落做语义预切，再在同一标题路径内按字符预算打包；只有单个语义块本身过大时，才回退到通用 splitter 在块内继续拆分
+- watcher 只监听显式配置目录；纯 metadata 噪音不会升级成整文件重读或重分片
+- 手动全量重建和后台 watcher 增量维护共享同一套存储互斥，避免并发改写同一份 LanceDB / SQLite
 - schema 或 embedding fingerprint 变化会触发重建语义
 - 运行态单独暴露 `phase/scanned/completed/total/pending` 这组结构化计数，launcher 状态栏直接消费，不靠字符串猜重建进度
 
 问答侧：
 
 - launcher 触发 `rag_answer`
-- 服务按 AI 功能页里显式选择的问答 LLM 协议分流到 `responses` 或 `chat/completions`
+- `AppState` 只负责装配运行时依赖并转调独立的问答后端模块；问答核心通过库导出的稳定函数接口暴露，允许在不启动 Tauri UI 和 `AppState` 的前提下单独做集成测试
+- 服务按 AI 功能页里显式选择的问答 LLM 协议分流到 `responses` 或 `chat/completions`，不做跨协议 fallback
 - 内置工具至少包括 `wabity.rag.query` 和 `wabity.read_file_lines`
+- `responses` 链路会优先注入全局 HTTP/SSE MCP server；若某个兼容层对工具支持不完整，在带 `type=mcp` 或普通 `function` tools 时首轮返回 5xx，或请求长时间挂起后超时/取消，后端会逐级收缩到“仅内置 function tools”，必要时再收缩到“无工具请求”重试当前轮，并把这次兼容结果缓存在当前进程里，后续同一 provider/model 直接使用已知可用级别
 - 前端只消费结构化结果、citation 和 action 轨迹
-- OpenAI-compatible 的 URL 归一化、错误体提取、`responses`/`chat` 文本提取、SSE 兜底解析和 `/models` 提取统一收口到基础设施层适配模块，避免问答、翻译、OCR、模型列表各自复制一份脆弱解析逻辑
+- RAG 索引构建与检索同样通过库导出的稳定函数接口暴露最小测试入口，允许集成测试直接验证“建库 -> query embedding -> LanceDB 检索 -> 命中裁剪”的端到端行为，而不需要先启动 `AppState`
+- RAG 检索不会为了凑满 `top_k` 把弱相关尾部一起返回；运行时会先扩大候选窗口，再做轻量 rerank，并结合显式 `min_score`、默认高置信门槛、相对首命中的尾部截断、强实体 query 的锚点词硬过滤，以及标题-only / base64 类低质量 chunk 剔除，只保留高关联候选
+- OpenAI-compatible 的 URL 归一化、鉴权注入、请求发送、错误体提取、`responses`/`chat` 文本提取、SSE 流式消费与归并、`/models` 提取统一收口到基础设施层薄 client，避免问答、翻译、OCR、embedding、模型列表各自复制一份脆弱传输逻辑
 
 关键设计：
 
@@ -262,6 +294,7 @@ RAG 分成两块：
 - 续链状态由显式 `conversation_state` 承载，而不是靠前端猜测
 - 只有当前 provider + workspace scope 匹配时才允许续链
 - `responses stateful` 的继续追问如果因为 provider 预算或累计上下文过大被拒绝，后端会丢弃旧 `response_id`，改用最近历史重试一次，避免长 response chain 直接把问答链路打死
+- launcher 对这份轻量问答上下文的退出语义必须和窗口显隐解耦：`Esc` 显式收起 launcher 时前端会清空当前问答续链状态，表示“结束这一轮轻量问答”；而 blur auto-hide、打开引用前的临时隐藏、执行结果要求关闭 launcher 或全局快捷键 toggle 隐藏只改变窗口可见性，不得顺手销毁问答上下文，更不能波及 ACP session
 
 ### 6.5 ACP Session 链路
 

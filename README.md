@@ -10,7 +10,7 @@
 - OCR provider 现已支持本地 macOS Vision 和远程 OpenAI 兼容多模态模型
 - 设置页已把快捷键、外观和 OCR 配置并入“通用”；“AI 功能”页按“翻译配置 / 文档问答配置”两个任务卡片维护各自的模型和系统提示词；LLM 页面统一维护 OpenAI 风格接入点下的单模型条目：配置类型直接区分 `LLM · responses stateless`、`LLM · responses stateful`、`LLM · chat/completions` 和 `Embedding`，其中 `responses` 页面仍可额外声明多模态；RAG 配置页支持用这些 embedding 模型为选中目录中的 `.md`、`.mdx`、`.txt`、`.markdown`、`.rst`、`.adoc` 文件构建并持续维护本地 LanceDB 向量索引，配套 SQLite 元数据缓存、watcher 增量维护、`staged/active` 版本切换，以及基于 `原文文本 + embedding fingerprint` 的全局向量复用以减少重复 embedding
 - 透明窗口 + 圆角 launcher 外观
-- 默认单行输入框，可按 `Cmd/Ctrl+Enter` 切到多行模式
+- 默认单行输入框，可按 `Cmd/Ctrl+Enter` 插入换行并切到多行模式；单行和多行都用 `Enter` 执行
 - 普通动作补全不再对任意非空输入立刻弹出；只有显式 `/` 命令、`http`/`{` 这类强信号输入，或满足 2 个英文字符 / 1 个非英文字符后才显示候选
 - `/` 候选只保留真实可执行命令，并以“主命令 + 简短说明”展示，不暴露内部匹配评分
 - JSON 格式化命令以 `/format` 为主，支持 `/fmt` 与兼容别名 `/json`；输入合法 JSON 载荷时会在输入框下方直接显示 pretty format 预览

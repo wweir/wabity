@@ -11,8 +11,10 @@
 - 点击引用会通过 `open_document_reference(path)` 打开本地文件
 - v2 起，问答不再自动预注入 RAG 命中片段，而是给模型注入内置 `wabity.rag.query` / `wabity.read_file_lines` 和全局 HTTP/SSE MCP server，由模型自己发起工具调用；其中 `wabity.read_file_lines` 只允许读取当前 workspace 和显式配置的 RAG source roots
 - v2 起，launcher 会把最近几轮问答的 user/assistant 文本显式回传给后端，形成轻量多轮上下文；这仍然不是 ACP session
+- `Esc` 显式隐藏 launcher 时会重置这份轻量多轮上下文；其它隐藏路径只隐藏窗口，继续保留上下文
 - v2 起，问答请求会显式打开 `parallel_tool_calls`，并在模型返回多个本地 function call 时并发执行，再把 tool output 回填给下一轮 `responses`
 - v2.1 起，问答同时支持 `chat/completions`、`responses stateless` 和 `responses stateful`；只有 `responses` 会继续注入 HTTP/SSE MCP server
+- v2.2 起，问答后端新增独立模块 `question_answer_backend` 作为稳定函数入口；`AppState` 只负责装配依赖，`src-tauri/tests/` 可直接用该模块做集成测试
 
 ## 目标
 
@@ -98,6 +100,7 @@
 {
 	"kind": "rag_answer",
 	"render": "markdown",
+	"reasoning": "可选的次级思考内容",
 	"conversationState": {
 		"previousResponseId": "resp_123",
 		"continuationScope": "scope_hash",
@@ -127,6 +130,7 @@
 补充约束：
 
 - `conversationState` 不是裸 `response_id`；它必须同时带续链 scope 和累计证据链，避免继续追问后 citation / tool trace 丢失
+- `reasoning` 是可选次级字段，只在 provider 能同时给出明确正文和 reasoning 时回传；前端只能把它渲染成折叠的 thought disclosure，不能再把它直接当正文兜底展示
 - 后端只会在 scope 与当前 provider + workspace 一致时沿用这份状态；scope 不匹配时必须把旧状态和旧历史一起丢弃，避免跨模型或跨 workspace 误续链
 - 如果 `responses stateful` 的首轮续问因为 provider 预算或累计上下文过大被拒绝，后端应丢弃旧 `response_id`，回退到显式最近历史再重试一次；否则长 response chain 会把后续问答直接锁死
 
@@ -165,13 +169,14 @@
 所以它应和翻译一样，走 `AppState::execute_action` 的专门分支：
 
 - `translate_text` 已经是现成模式
-- `rag_answer` 应复用同类调度方式
+- `rag_answer` 应复用同类调度方式，但运行时分支只做依赖装配，真实问答入口下沉到独立模块 `question_answer_backend`
 
 推荐新增服务：
 
+- `src-tauri/src/services/question_answer_backend.rs`
 - `src-tauri/src/services/rag_answer.rs`
 
-不要继续把问答逻辑堆进现在已经很重的 `rag.rs`。
+不要继续把问答逻辑堆进现在已经很重的 `rag.rs`，也不要让 `AppState` 直接成为唯一可调用入口；否则集成测试只能依赖 UI/Tauri 运行时。
 
 ### 3. 查询检索
 
@@ -182,7 +187,7 @@
 3. 用 RAG 的 embedding 模型对用户问题生成 query embedding
 4. 在 LanceDB 对 `vector` 列做 top-k 相似搜索
 5. 读取候选 chunk 的 `absolute_path`、对外展示用 `path`、`chunk_index`、`line_start`、`line_end`、`paragraph_line_start`、`heading_path`、`text`
-6. 做一次轻量重排和裁剪，再送给 LLM
+6. 做一次轻量重排和裁剪，再送给 LLM；裁剪不只看固定 `top_k`，还要同时过滤低于默认高置信阈值、明显落后于首个命中的弱相关尾部、以及不满足强实体锚点词约束或命中标题-only / base64 低质量 chunk 的结果
 
 建议的 v1 参数：
 
@@ -203,6 +208,9 @@
 
 - 检索结果为空：直接返回 warning
 - 最高分低于阈值：返回“未找到足够相关文档”
+- 即使 `top_k` 还有空位，也不要为了凑数把低相关尾部带进来；需要有相对首命中的尾部截断
+- 当 query 本身包含明确实体锚点时，候选至少要满足路径/标题锚点命中，或正文命中足够多的 query term；不能让纯向量相近但完全不含锚点的文档混进来
+- 标题-only、base64/密钥块这类低质量 chunk 不应以普通正文证据同权参与最终返回
 - 阈值不要写死在 UI，放在后端常量
 
 v1 阈值可以先做静态配置，后续再按模型/距离度量调参。
@@ -347,7 +355,8 @@ v1 阈值可以先做静态配置，后续再按模型/距离度量调参。
 
 - 不把它做成 ACP session 替代品
 - 不在第一版加 reranker
-- 不在第一版支持 PDF/Office 抽取
+- 不在第一版支持 PDF 抽取
+- 不在第一版支持旧二进制 `.doc` 抽取
 - 不把所有普通文本无条件改成文档问答；只有应用搜索无补全框时才默认回退
 - 不在第一版把引用打开逻辑埋进 Markdown 渲染器
 
@@ -359,3 +368,5 @@ v1 阈值可以先做静态配置，后续再按模型/距离度量调参。
 - 2026-03-18：收敛默认问答系统提示词，核心只保留“工具结果优先、多轮查证、禁止编造、证据不足直说”，减少和运行时规则的重复
 - 2026-03-18：问答协议扩成 `chat/completions`、`responses stateless` 和 `responses stateful` 三条链路；`chat/completions` 继续支持内置工具，但不再注入 MCP server
 - 2026-03-21：`responses stateful` 在首轮续问遇到 provider budget/context 限制时，会自动丢弃旧 `response_id`，回退到显式最近历史重试一次，降低长链续问失败概率
+- 2026-03-25：新增 `question_answer_backend` 公开入口；当前已用本地 mock `chat/completions` server 补上脱离 `AppState` 的问答后端集成测试，验证 builtin `wabity.read_file_lines` 工具回路
+- 2026-03-26：RAG 建索引已先支持 `.docx`；索引侧会把 `docx` 规范化成 Markdown 风格文本后再分块，问答里的 `wabity.read_file_lines` 也同步复用这条抽取逻辑回读规范化文本

@@ -20,6 +20,7 @@ Use Simplified Chinese to answer my questions.
 7. 代码简洁，避免过早设计和不必要抽象
 8. 英文注释，仅注释复杂逻辑
 9. git 使用 commitizen 规范，英文提交信息
+10. 按需构建单元测试、集成测试
 
 ## Rust Principles
 

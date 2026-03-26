@@ -31,9 +31,11 @@
 - 将 AI 功能配置以独立分组写回后端 `config.toml`，覆盖翻译提示词、RAG 问答系统提示词、翻译 LLM 和问答 LLM 选择
 - 将 LLM 条目目录、OCR provider、OCR 引用的 LLM 条目、RAG 扫描目录、忽略 glob 和 Embedding 条目写回后端配置
 - LLM 页面允许维护多个条目；每个条目显式保存 Base URL、API key、`modelType`、`protocol`、`model`、`supportsMultimodal` 和 `supportsStateful`
+- LLM 页面在手工新增之外，还要提供“从内置供应商模板创建”入口；模板目录只负责注册入口、API key 页面、官方文档、默认 Base URL 和白名单模型目录，不直接保存用户密钥
 - LLM 页面条目选择区使用卡片网格，而不是普通列表；每张卡片直接展示用途标签、Base URL、合并后的“配置类型 + 模型名”标签和校验问题数，并按类型给 `LLM` / `Embedding` 不同背景色，减少多条目切换时的扫读成本
 - LLM 条目卡片只负责展示条目本身和当前用途标签；翻译 / 问答模型选择统一移到 AI 功能页，LLM 页不再承载“默认 LLM”逻辑
 - 单个 LLM 条目的编辑区改成“先选配置类型，再填基础信息和模型名”；配置类型把 `modelType + protocol + supportsStateful` 合并成单个选择器，直接区分 `LLM · responses stateless`、`LLM · responses stateful`、`LLM · chat/completions` 和 `Embedding` 四种页面。用途说明收敛到单个摘要区：`responses` 页面仍可配置多模态，`chat/completions` 页面可进入翻译和 RAG 问答但不进入 OCR；Embedding 类型只在必要时提示 RAG 重建影响
+- 从内置模板创建条目时，模型选择区必须只允许选择模板目录里显式提供且当前应用支持的白名单模型；下拉项要同时展示模型名和一句话说明。远端 `/models` 只能用于后台核对，不再扩展用户可选范围
 - LLM、OCR、RAG 页面各自维护草稿；保存某个分组时不会把其他分组的未保存草稿偷偷带进 `config.toml`
 - RAG 页面使用和 LLM 页一致的双栏信息架构：左侧摘要当前 Embedding、目录数、忽略规则数和支持后缀，右侧用 hero、主编辑器和辅助说明卡分别承载索引流程、配置输入、数据边界和最近一次手动重建结果
 - RAG 页面允许选择 Embedding 条目、维护多个扫描目录、配置忽略 glob，并手动触发一次全量重建；保存后后端会按配置重启目录监听
@@ -48,6 +50,7 @@
 接口：
 
 - `getAppSettings` / `setAppSettings`：读取和写入通用/外观/AI 功能/LLM/OCR/RAG 配置
+- `listBuiltinLlmProviderTemplates`：返回只读内置 LLM 供应商模板目录，供设置页展示注册引导、默认接入点、白名单模型和模型一句话说明
 - `scanRagSources`：用当前草稿立即触发一次 RAG 全量扫描，返回 LanceDB 路径和统计结果
 - `getShortcut` / `setShortcut`：读取和更新快捷键
 - `getAcpAgents` / `setAcpAgents`：读取和更新 ACP agent 列表；接口仍透出 `defaultAgentId`，但前端只把它当兼容/兜底字段保存，设置页不提供修改入口
@@ -63,7 +66,9 @@
 - 默认快捷键当前为 launcher=`Alt+Space`、截图 OCR=`Alt+R`、优先翻译选中文本否则截图 OCR 并翻译=`Alt+D`
 - 后端加载配置时会把历史默认 OCR 快捷键自动迁移到新默认值，但不会覆盖用户自定义快捷键
 - LLM 条目当前支持多条目录项；`Base URL` 由用户显式填写到 API 根路径，通常包含 `/v1`，`API key` 字段会在模型选择前展示，便于先完成连接信息
-- LLM 条目的 `API key` 允许为空，兼容本地或内网 OpenAI 兼容网关；每个条目必须先选“配置类型”，再填写唯一的 `model`。设置页会根据当前 `baseUrl + apiKey` 调 `/models` 拉模型列表；模型输入区收敛为“可手填输入框 + 右侧下拉按钮 + 浮层列表”，用户既可以直接从列表回填，也可以手动填写列表里没有的模型
+- LLM 条目统一先通过“新增”进入左侧列表，再在右侧编辑卡顶部用“使用模板”下拉决定是否套用内置供应商模板；套用后自动填入 `Base URL`、协议、能力标签和白名单模型
+- 从内置模板创建的条目默认自动填入 `Base URL`、协议、能力标签和目录白名单模型，并保留切换到“自定义接入点”的显式动作，避免把企业代理或内网兼容层用户锁死在模板默认值上；但模型字段本身仍然受模板白名单限制，不能手填目录外模型
+- LLM 条目的 `API key` 允许为空，兼容本地或内网 OpenAI 兼容网关；每个条目必须先选“配置类型”，再填写唯一的 `model`。手工条目仍可根据当前 `baseUrl + apiKey` 调 `/models` 拉模型列表，并保留手填能力；内置模板条目则改为只允许从模板白名单下拉框中选择模型
 - `supportsMultimodal` 当前只对 `responses` 页面有意义；切到 `chat/completions` 或 Embedding 页面时会固定关闭
 - `supportsStateful` 不再通过独立开关暴露，而是直接折叠进“配置类型”选择器；它仍只控制 launcher 文档问答继续追问时是否复用上一轮 `response_id`
 - OCR provider 当前支持 `system`、`llm_ocr` 和 `disabled`；`llm_ocr` 不再直接保存 URL/API key，而是引用某个已配置的 LLM 条目
@@ -78,7 +83,7 @@
 - RAG 扫描目录使用“每行一个目录”的 textarea，并提供“选择目录追加”按钮；保存后 watcher 只监听这些显式选中的目录
 - RAG 当前只向量化后缀为 `.md`、`.mdx`、`.txt`、`.markdown`、`.rst`、`.adoc` 的文件；除此之外还要求文件可读、是 UTF-8 文本、大小不超过 50 MB，且不命中忽略 glob。`.gitignore` / `.ignore` / 全局 git ignore 不会被当成额外隐式过滤条件
 - `.md`、`.mdx`、`.markdown` 会按文档结构切分，其余文本后缀走通用语义切分
-- RAG 忽略规则使用“每行一个 glob”的 textarea；默认草稿会预填常见第三方依赖目录和编译产物目录，例如 `node_modules`、`target`、`dist`、`.next`，命中后文件不会被切分、向量化或写入 LanceDB
+- RAG 忽略规则拆成“内置忽略目录说明 + 额外忽略通配符”两层：设置页直接用文案说明固定规则，不再为它们渲染输入框；内置规则固定包含常见第三方依赖目录和编译产物目录，例如 `node_modules`、`target`、`dist`、`.next`、`.git`、`coverage`，始终生效且不支持取消；textarea 只允许追加额外 glob，命中后文件不会被切分、向量化或写入 LanceDB
 - 翻译 LLM 和问答 LLM 只影响 launcher 的翻译 / RAG 问答链路，不直接决定 ACP session 该用哪个 agent
 - 可以同时配置多个 ACP agent，但每个 session 仍然只绑定其中一个
 - 所有 ACP agent 共用同一份全局 MCP 清单；设置页不再支持按 agent 分别挂 MCP

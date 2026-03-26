@@ -4,6 +4,7 @@
 
 - 上一版设置页允许单个条目同时保存 `responsesModel` 和 `embeddingModel`
 - 这让“一个条目到底代表接入点，还是代表具体模型”变得模糊；前端编辑流程和后端消费链路都需要额外猜用途
+- 当前条目模型已经按“一个条目只绑定一个模型”收敛，但用户首次接入仍然需要自己研究供应商注册入口、API key 页面、默认 `Base URL` 和推荐模型，见 [内置供应商模板方案](./llm-builtin-provider-catalog.md)
 
 ## 决策
 
@@ -27,8 +28,8 @@
   - `translationProviderId`
   - `questionAnswerProviderId`
 - OCR 读取“普通 LLM + protocol=responses + supportsMultimodal = true”
-- 翻译直接读取 `translationProviderId`；所选条目若是 `responses` 则走 `/responses`，若是 `chat/completions` 则走 `/chat/completions`
-- RAG 问答读取 `questionAnswerProviderId`；`responses` 支持 stateful/stateless 两条链路，`chat/completions` 固定走 stateless
+- 翻译直接读取 `translationProviderId`；所选条目若是 `responses` 则走 `/responses`，若是 `chat/completions` 则走 `/chat/completions`，运行时不再跨协议兜底
+- RAG 问答读取 `questionAnswerProviderId`；`responses` 支持 stateful/stateless 两条链路，`chat/completions` 固定走 stateless，运行时不再跨协议兜底
 - RAG 建索引和检索读取 Embedding 条目
 
 ## 兼容

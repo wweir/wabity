@@ -107,6 +107,16 @@
 
 ## Chunk 复用与 Embedding 节流
 
+### Markdown 切块
+
+- Markdown 不再直接按统一字符窗口切整篇文本
+- 索引前会先按标题、列表项、fenced code block 和普通段落做语义预切
+- 之后只在同一 `heading_path` 内按目标字符预算打包多个语义块
+- 当前打包目标是 `350 chars`，硬上限是 `550 chars`，相邻 chunk 之间保留约 `80 chars` 重叠
+- 如果单个语义块本身已经超过硬上限，才回退到 `MarkdownSplitter` 在块内继续拆分
+
+这样做的目的不是追求“块越小越好”，而是避免读书摘记、列表式笔记这类 Markdown 被整篇并成一个 chunk，同时又不把技术文档和代码块切得过碎
+
 ### Chunk 复用
 
 - 文件重建前，先读取该文件当前 `active` 版本的 chunk 向量
@@ -132,6 +142,9 @@
 - watcher 批次内复用 LanceDB / SQLite 连接，不再按文件反复开关
 - 文件读取路径减少不必要的字节复制
 - 元数据批量查询使用分批 `IN (...)`，避免逐路径单查
+- 纯 metadata watcher 事件在进入索引规划前直接过滤，避免把 write-time / xattr 噪音升级成整文件读取、`md5` 和分片
+- 手动全量重建与后台 watcher 增量维护通过同一把存储锁串行化，避免两条链路并发改写同一份 LanceDB / SQLite
+- LanceDB 向量索引改成“新建表立即建、小批量增量延迟建”，按累计 chunk / delete 阈值触发重建，避免每个小批次保存都反复 `create_index`
 
 ## 状态
 
@@ -142,3 +155,5 @@
 - 2026-03-17：索引语义从单版本 `pending/indexed` 升级为 `staged/active` 版本切换；新版本写成功后再切换并清理旧版本，同时接入 watcher 批处理、连接复用、chunk 指纹复用和低风险内存优化
 - 2026-03-17：全量重建改成流式并行流水线；扫描过程中一旦发现待重建文件就立即进入读取、分片、embedding 和落盘，stale 清理延后到所有新向量落盘完成后统一执行
 - 2026-03-21：文件级索引目标从 `embedding_model` 升级为 `embedding_fingerprint`，冷启动也会对账当前 embedding 目标身份；fingerprint 优先使用模型自身稳定身份（显式 digest、`/models` 返回项里的 digest/fingerprint hint、官方 OpenAI 托管 model ID），无法稳定确认时才回退到 `endpoint + model`。chunk 行新增 `embedding_fingerprint` / `text_fingerprint`，会在调用 embedding 前先按 `原文文本 + embedding_fingerprint` 查找全局已算好的向量再决定是否远程计算
+- 2026-03-23：watcher 现在会直接忽略纯 metadata 事件，手动全量重建与后台增量维护共享存储互斥；LanceDB 向量索引改成阈值触发，避免每轮小批次更新都重建索引
+- 2026-03-25：Markdown 切块升级为“两阶段切块”：先按标题 / 列表项 / 代码块 / 段落做语义预切，再按目标字符预算在同一标题路径下打包；单个语义块超限时才回退到 `MarkdownSplitter`，以改善读书摘记和列表式笔记的检索粒度

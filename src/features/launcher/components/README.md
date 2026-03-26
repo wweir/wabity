@@ -12,7 +12,7 @@
 - `RestoreNoticeList.tsx`：渲染 session 恢复失败提示列表
 - `LauncherFeedback.tsx`：渲染带复制按钮的内联执行结果卡片、`/format` JSON 高亮预览、`/md` Markdown 预览、ACP session 时间线和状态栏
 - `MarkdownRenderer.tsx`：统一承接 launcher 内的 Markdown 渲染，补 GFM、Mermaid、MDX 安全兼容和 Obsidian 风格 wiki link / callout / highlight
-- `SessionTimeline.tsx`：渲染 ACP 会话消息流与 launcher 轻量问答历史；对 assistant message 会先把同一 turn 内零散的 `thought` / `actions` / `content` block 归并成三条规范化流，再承接 thought 折叠、action pill 详情和 Markdown 内容，避免工具事件把同一轮输出切成两段
+- `SessionTimeline.tsx`：渲染 ACP 会话消息流与 launcher 轻量问答历史；对 assistant message 会先把同一 turn 内零散的 `thought` / `actions` / `content` block 归并成稳定结构，但阅读顺序必须保持 answer-first：正文先于 action trail，thought 继续作为更次级的折叠信息；thought 入口位于正文后的消息元信息区，只提供简短预览，展开内容使用普通阅读排版而不是日志式 `pre`
 - `CompletionPopup.tsx`：渲染文件、动作、应用建议列表
 - `SessionPanel.tsx`：渲染全部 session 浮层
 - `WorkspacePickerPanel.tsx`：渲染 workspace 选择浮层
