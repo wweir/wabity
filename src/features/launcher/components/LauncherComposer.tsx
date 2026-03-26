@@ -10,6 +10,7 @@ import {
 	type SyntheticEvent,
 } from "react";
 import type { InputMode } from "../types";
+import { usesInlineInputControl } from "../inputMode";
 
 interface LauncherComposerProps {
 	inputMode: InputMode;
@@ -233,7 +234,7 @@ export function LauncherComposer({
 			<label className="sr-only" htmlFor={inputId}>
 				{inputLabel}
 			</label>
-			{inputMode === "inline" ? (
+			{usesInlineInputControl(inputMode) ? (
 				<input
 					{...inputProps}
 					{...sharedAccessibilityProps}

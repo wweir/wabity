@@ -25,6 +25,10 @@ interface ActionPill {
 	outputDetail: string | null;
 }
 
+function isStepMarkerPill(pill: ActionPill) {
+	return pill.kind === "info" && /^第\s*\d+\s*步$/u.test(pill.title.trim());
+}
+
 function getActionIcon(kind: ActionKind): string {
 	switch (kind) {
 		case "tool":
@@ -138,6 +142,46 @@ function formatActionDetailForDisplay(detail: string | null) {
 	return decodeEscapedSequences(detail);
 }
 
+function summarizeThoughtPreview(content: string) {
+	const singleLine = content.replace(/\s+/g, " ").trim();
+	if (singleLine.length <= 36) {
+		return singleLine;
+	}
+
+	const preferred = singleLine.slice(0, 36);
+	const hardStopIndex = Math.max(
+		preferred.lastIndexOf("。"),
+		preferred.lastIndexOf("！"),
+		preferred.lastIndexOf("？"),
+		preferred.lastIndexOf(". "),
+		preferred.lastIndexOf("!"),
+		preferred.lastIndexOf("?"),
+	);
+	if (hardStopIndex >= 18) {
+		return preferred.slice(0, hardStopIndex + 1).trim();
+	}
+
+	const softStopIndex = Math.max(
+		preferred.lastIndexOf("，"),
+		preferred.lastIndexOf("、"),
+		preferred.lastIndexOf(","),
+		preferred.lastIndexOf(" "),
+	);
+	if (softStopIndex >= 18) {
+		return `${preferred.slice(0, softStopIndex).trim()}…`;
+	}
+
+	return `${preferred.trimEnd()}…`;
+}
+
+function splitThoughtParagraphs(content: string) {
+	return content
+		.replace(/\r\n?/g, "\n")
+		.split(/\n{2,}/)
+		.map((paragraph) => paragraph.trim())
+		.filter((paragraph) => paragraph.length > 0);
+}
+
 function createToolPill(action: AcpActionEvent, index: number): ActionPill {
 	const correlationId = action.correlationId ?? null;
 	const inputDetail = action.kind === "tool-call" ? action.detail : null;
@@ -227,13 +271,11 @@ function mergeActions(actions: AcpActionEvent[]): ActionPill[] {
 
 function ActionBar({ actions }: { actions: AcpActionEvent[] }) {
 	const [expandedPill, setExpandedPill] = useState<string | null>(null);
-	const [hoveredPill, setHoveredPill] = useState<string | null>(null);
 	const pills = useMemo(() => mergeActions(actions), [actions]);
-	const activeDetailPillId = expandedPill ?? hoveredPill;
-	const activeDetailPill = activeDetailPillId
-		? (pills.find((pill) => pill.id === activeDetailPillId) ?? null)
+	const visibleDetailPill = expandedPill
+		? (pills.find((pill) => pill.id === expandedPill && !isStepMarkerPill(pill)) ?? null)
 		: null;
-	const detailPanelId = activeDetailPill ? `action-detail-${activeDetailPill.id}` : null;
+	const detailPanelId = visibleDetailPill ? `action-detail-${visibleDetailPill.id}` : null;
 
 	useEffect(() => {
 		if (expandedPill && !pills.some((pill) => pill.id === expandedPill)) {
@@ -241,38 +283,26 @@ function ActionBar({ actions }: { actions: AcpActionEvent[] }) {
 		}
 	}, [expandedPill, pills]);
 
-	useEffect(() => {
-		if (hoveredPill && !pills.some((pill) => pill.id === hoveredPill)) {
-			setHoveredPill(null);
-		}
-	}, [hoveredPill, pills]);
-
 	if (pills.length === 0) {
 		return null;
 	}
 
 	return (
-		<div className="action-bar">
-			<div className="action-bar-header">
-				<span className="action-bar-kicker">操作轨迹</span>
-				<span className="action-bar-summary">{pills.length} 项</span>
-			</div>
+		<div className="action-bar" role="group" aria-label="操作轨迹">
 			<div className="action-bar-content">
 				{pills.map((pill) =>
-					pill.detail ? (
+					isStepMarkerPill(pill) ? (
+						<span key={pill.id} className="action-step-marker">
+							{pill.title}
+						</span>
+					) : pill.detail ? (
 						<button
 							key={pill.id}
 							type="button"
 							className={`action-pill ${pill.kind} interactive${expandedPill === pill.id ? " detail-open" : ""}`}
 							aria-expanded={expandedPill === pill.id}
 							aria-controls={expandedPill === pill.id && detailPanelId ? detailPanelId : undefined}
-							aria-label={`查看 ${pill.title} 详情`}
-							onMouseEnter={() => setHoveredPill(pill.id)}
-							onMouseLeave={() =>
-								setHoveredPill((current) => (current === pill.id ? null : current))
-							}
-							onFocus={() => setHoveredPill(pill.id)}
-							onBlur={() => setHoveredPill((current) => (current === pill.id ? null : current))}
+							aria-label={`${expandedPill === pill.id ? "收起" : "查看"} ${pill.title} 详情`}
 							onClick={() => setExpandedPill(expandedPill === pill.id ? null : pill.id)}
 						>
 							<span className="action-pill-icon">{getActionIcon(pill.kind)}</span>
@@ -288,17 +318,17 @@ function ActionBar({ actions }: { actions: AcpActionEvent[] }) {
 					),
 				)}
 			</div>
-			{activeDetailPill?.detail ? (
+			{visibleDetailPill?.detail ? (
 				<div
 					className="action-bar-detail"
 					id={detailPanelId ?? undefined}
 					role="region"
-					aria-label={`${activeDetailPill.title} 详情`}
+					aria-label={`${visibleDetailPill.title} 详情`}
 				>
 					<span className="action-bar-detail-label">
-						{activeDetailPill.kind === "tool" ? "调用细节" : "详情"}
+						{visibleDetailPill.kind === "tool" ? "调用细节" : "详情"}
 					</span>
-					<pre>{formatActionDetailForDisplay(activeDetailPill.detail)}</pre>
+					<pre>{formatActionDetailForDisplay(visibleDetailPill.detail)}</pre>
 				</div>
 			) : null}
 		</div>
@@ -309,24 +339,61 @@ function ThoughtToggle({
 	contentId,
 	collapsed,
 	onToggle,
+	preview,
 	className,
 }: {
 	contentId: string;
 	collapsed: boolean;
 	onToggle: () => void;
+	preview?: string;
 	className?: string;
 }) {
+	const summary = collapsed ? preview?.trim() : null;
+
 	return (
 		<button
 			aria-controls={contentId}
 			aria-expanded={!collapsed}
+			aria-label={collapsed ? "展开辅助思路" : "隐藏辅助思路"}
 			className={className ? `thought-toggle ${className}` : "thought-toggle"}
 			onClick={onToggle}
 			type="button"
 		>
-			<span className="thought-label">思考</span>
-			<span className="thought-caret">{collapsed ? "▶" : "▼"}</span>
+			<span className="thought-toggle-copy">
+				<span className="thought-label">思路</span>
+				{summary ? <span className="thought-preview">{summary}</span> : null}
+			</span>
+			<span aria-hidden="true" className="thought-caret">
+				{collapsed ? "展开" : "隐藏"}
+			</span>
 		</button>
+	);
+}
+
+function ThoughtContent({
+	content,
+	contentId,
+	className,
+}: {
+	content: string;
+	contentId: string;
+	className?: string;
+}) {
+	const paragraphs = splitThoughtParagraphs(content);
+
+	return (
+		<div
+			className={className ? `thought-content ${className}` : "thought-content"}
+			id={contentId}
+			role="region"
+			aria-label="思路详情"
+		>
+			{paragraphs.map((paragraph, index) => (
+				<p key={`${contentId}-paragraph-${index}`} className="thought-paragraph">
+					{paragraph}
+				</p>
+			))}
+		</div>
 	);
 }
 
@@ -345,12 +412,13 @@ function ThoughtBlock({
 
 	return (
 		<div className="message-block thought-block">
-			<ThoughtToggle contentId={contentId} collapsed={collapsed} onToggle={onToggle} />
-			{!collapsed ? (
-				<pre className="thought-content" id={contentId}>
-					{content}
-				</pre>
-			) : null}
+			<ThoughtToggle
+				contentId={contentId}
+				collapsed={collapsed}
+				onToggle={onToggle}
+				preview={summarizeThoughtPreview(content)}
+			/>
+			{!collapsed ? <ThoughtContent content={content} contentId={contentId} /> : null}
 		</div>
 	);
 }
@@ -385,14 +453,14 @@ function normalizeAssistantBlocks(blocks: AcpMessageBlock[]) {
 	}
 
 	const normalizedBlocks: AcpMessageBlock[] = [];
-	if (thoughtParts.length > 0) {
-		normalizedBlocks.push({ type: "thought", content: thoughtParts.join("") });
+	if (contentParts.length > 0) {
+		normalizedBlocks.push({ type: "content", text: contentParts.join("") });
 	}
 	if (actionItems.length > 0) {
 		normalizedBlocks.push({ type: "actions", items: actionItems });
 	}
-	if (contentParts.length > 0) {
-		normalizedBlocks.push({ type: "content", text: contentParts.join("") });
+	if (thoughtParts.length > 0) {
+		normalizedBlocks.push({ type: "thought", content: thoughtParts.join("") });
 	}
 
 	return normalizedBlocks;
@@ -475,45 +543,16 @@ export function SessionTimeline({ messages }: { messages: AcpSessionMessage[] })
 				}
 
 				const mergedBlocks = normalizeAssistantBlocks(message.blocks);
-				const firstBlock = mergedBlocks[0] ?? null;
-				const inlineThought =
-					firstBlock?.type === "thought"
-						? {
-								block: firstBlock,
-								id: `${message.id}-thought-0`,
-								contentId: `${message.id}-thought-0-content`,
-							}
-						: null;
 				return (
 					<article key={message.id} className="session-message assistant">
 						<header className="session-message-role">
 							<span className="session-message-role-badge">Agent</span>
-							{inlineThought ? (
-								<ThoughtToggle
-									contentId={inlineThought.contentId}
-									collapsed={collapsedThoughts.has(inlineThought.id)}
-									onToggle={() => handleToggleThought(inlineThought.id)}
-									className="thought-toggle-inline"
-								/>
-							) : null}
 						</header>
 						<div className="session-message-stack">
-							{inlineThought && !collapsedThoughts.has(inlineThought.id) ? (
-								<pre
-									className="thought-content thought-content-inline"
-									id={inlineThought.contentId}
-								>
-									{inlineThought.block.content}
-								</pre>
-							) : null}
 							{mergedBlocks.length === 0 ? (
 								<p className="session-message-content pending">…</p>
 							) : (
 								mergedBlocks.map((block, index) => {
-									if (inlineThought && index === 0) {
-										return null;
-									}
-
 									const blockId = `${message.id}-${block.type}-${index}`;
 									switch (block.type) {
 										case "thought":

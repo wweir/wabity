@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use tauri::{
     ipc::{Invoke, InvokeError},
@@ -8,8 +10,9 @@ use tauri_plugin_opener::OpenerExt;
 
 use crate::{
     domain::{
-        actions::ActionMatch, application::InstalledAppMatch, execution::ExecutionRequest,
-        execution::ExecutionResult, file_search::FileSearchMatch, query::QueryPayload,
+        actions::ActionMatch, application::InstalledAppMatch, execution::ExecutionProgressEvent,
+        execution::ExecutionRequest, execution::ExecutionResult, file_search::FileSearchMatch,
+        query::QueryPayload,
     },
     infrastructure::{
         config::{normalize_workspace_root, ShortcutKey},
@@ -18,6 +21,9 @@ use crate::{
     services::rag,
     state::{AppState, ShortcutRuntimeState},
 };
+
+const EXECUTION_PROGRESS_EVENT: &str = "execution-progress";
+const MAX_LAUNCHER_BLUR_AUTO_HIDE_SUPPRESSION_MS: u64 = 5_000;
 
 pub fn match_actions(
     state: State<'_, AppState>,
@@ -56,11 +62,17 @@ pub fn search_apps(
 }
 
 pub async fn execute_action(
+    app: AppHandle,
     state: State<'_, AppState>,
     request: ExecutionRequest,
 ) -> Result<ExecutionResult, String> {
     state
-        .execute_action(request)
+        .execute_action_with_progress(
+            request,
+            Some(Arc::new(move |progress: ExecutionProgressEvent| {
+                let _ = app.emit(EXECUTION_PROGRESS_EVENT, progress);
+            })),
+        )
         .await
         .map_err(|error| error.to_string())
 }
@@ -130,6 +142,32 @@ pub fn end_transient_window_interaction(
     shortcut_state: State<'_, ShortcutRuntimeState>,
 ) -> Result<(), String> {
     shortcut_state.end_transient_window_interaction();
+    Ok(())
+}
+
+pub fn arm_launcher_blur_auto_hide_suppression(
+    shortcut_state: State<'_, ShortcutRuntimeState>,
+    duration_ms: u64,
+) -> Result<(), String> {
+    let applied_duration =
+        Duration::from_millis(duration_ms.clamp(1, MAX_LAUNCHER_BLUR_AUTO_HIDE_SUPPRESSION_MS));
+    let sequence = shortcut_state.cancel_launcher_blur_auto_hide_confirmation();
+    shortcut_state.arm_launcher_blur_auto_hide_suppression(applied_duration);
+    tracing::info!(
+        suppression_ms = applied_duration.as_millis(),
+        blur_auto_hide_sequence = sequence,
+        "armed launcher blur auto-hide suppression via IPC"
+    );
+    Ok(())
+}
+
+pub fn set_launcher_blur_auto_hide_enabled(
+    shortcut_state: State<'_, ShortcutRuntimeState>,
+    enabled: bool,
+) -> Result<(), String> {
+    shortcut_state.cancel_launcher_blur_auto_hide_confirmation();
+    shortcut_state.set_launcher_blur_auto_hide_enabled(enabled);
+    tracing::info!(enabled, "set launcher blur auto-hide enabled via IPC");
     Ok(())
 }
 
@@ -228,10 +266,11 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
         "execute_action" => {
             let resolver = invoke.resolver.clone();
             resolver.respond_async(async move {
+                let app = super::parse_arg(&invoke, "execute_action", "app")?;
                 let state = super::parse_arg(&invoke, "execute_action", "state")?;
                 let request = super::parse_arg(&invoke, "execute_action", "request")?;
 
-                execute_action(state, request)
+                execute_action(app, state, request)
                     .await
                     .map_err(InvokeError::from)
             });
@@ -321,6 +360,52 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
 
             resolver.respond(
                 end_transient_window_interaction(shortcut_state).map_err(InvokeError::from),
+            );
+            true
+        }
+        "arm_launcher_blur_auto_hide_suppression" => {
+            let resolver = invoke.resolver.clone();
+            let Some(shortcut_state) = super::parse_or_invoke_error(
+                &invoke,
+                "arm_launcher_blur_auto_hide_suppression",
+                "shortcutState",
+            ) else {
+                return true;
+            };
+            let Some(duration_ms) = super::parse_or_invoke_error(
+                &invoke,
+                "arm_launcher_blur_auto_hide_suppression",
+                "durationMs",
+            ) else {
+                return true;
+            };
+
+            resolver.respond(
+                arm_launcher_blur_auto_hide_suppression(shortcut_state, duration_ms)
+                    .map_err(InvokeError::from),
+            );
+            true
+        }
+        "set_launcher_blur_auto_hide_enabled" => {
+            let resolver = invoke.resolver.clone();
+            let Some(shortcut_state) = super::parse_or_invoke_error(
+                &invoke,
+                "set_launcher_blur_auto_hide_enabled",
+                "shortcutState",
+            ) else {
+                return true;
+            };
+            let Some(enabled) = super::parse_or_invoke_error(
+                &invoke,
+                "set_launcher_blur_auto_hide_enabled",
+                "enabled",
+            ) else {
+                return true;
+            };
+
+            resolver.respond(
+                set_launcher_blur_auto_hide_enabled(shortcut_state, enabled)
+                    .map_err(InvokeError::from),
             );
             true
         }

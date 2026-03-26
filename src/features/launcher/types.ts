@@ -115,6 +115,7 @@ export interface RagAnswerStructuredPayload {
 	render: "markdown";
 	responseId: string | null;
 	conversationState?: ExecutionConversationState | null;
+	reasoning?: string | null;
 	citations: RagCitation[];
 	retrieval: RagRetrievalSummary;
 	actions: AcpActionEvent[];
@@ -213,6 +214,15 @@ export function isRagAnswerStructuredPayload(
 		candidate.conversationState !== undefined &&
 		candidate.conversationState !== null &&
 		!isExecutionConversationState(candidate.conversationState)
+	) {
+		return false;
+	}
+	if (
+		!(
+			candidate.reasoning === undefined ||
+			candidate.reasoning === null ||
+			typeof candidate.reasoning === "string"
+		)
 	) {
 		return false;
 	}

@@ -1,9 +1,14 @@
-import { type RefObject, useLayoutEffect } from "react";
-import { isDesktopRuntimeAvailable, resizeLauncherWindow } from "./client";
+import { type RefObject, useLayoutEffect, useRef } from "react";
+import {
+	beginTransientWindowInteraction,
+	endTransientWindowInteraction,
+	isDesktopRuntimeAvailable,
+	resizeLauncherWindow,
+} from "./client";
 
 const WINDOW_RESIZE_SETTLE_MS = 80;
 
-function measureContentSize(rootElement: HTMLElement) {
+export function measureContentSize(rootElement: HTMLElement) {
 	const rootRect = rootElement.getBoundingClientRect();
 	let minLeft = 0;
 	let minTop = 0;
@@ -44,11 +49,37 @@ function sameMeasuredSize(
 	return left?.width === right.width && left.height === right.height;
 }
 
-export function useAutoResizeWindow(rootRef: RefObject<HTMLElement | null>) {
+function normalizeMeasuredSize(
+	lastMeasuredSize: { width: number; height: number } | null,
+	nextMeasuredSize: { width: number; height: number },
+	allowShrink: boolean,
+) {
+	if (allowShrink || !lastMeasuredSize) {
+		return nextMeasuredSize;
+	}
+
+	return {
+		width: Math.max(lastMeasuredSize.width, nextMeasuredSize.width),
+		height: Math.max(lastMeasuredSize.height, nextMeasuredSize.height),
+	};
+}
+
+interface UseAutoResizeWindowOptions {
+	enabled?: boolean;
+	allowShrink?: boolean;
+	onResizeSettled?: () => void;
+}
+
+export function useAutoResizeWindow(
+	rootRef: RefObject<HTMLElement | null>,
+	options: UseAutoResizeWindowOptions = {},
+) {
 	const desktopRuntimeAvailable = isDesktopRuntimeAvailable();
+	const { enabled = true, allowShrink = true, onResizeSettled } = options;
+	const lastMeasuredSizeRef = useRef<{ width: number; height: number } | null>(null);
 
 	useLayoutEffect(() => {
-		if (!desktopRuntimeAvailable) {
+		if (!desktopRuntimeAvailable || !enabled) {
 			return;
 		}
 
@@ -59,9 +90,32 @@ export function useAutoResizeWindow(rootRef: RefObject<HTMLElement | null>) {
 
 		let animationFrameId = 0;
 		let settleTimeoutId: number | null = null;
-		let lastMeasuredSize: { width: number; height: number } | null = null;
+		let lastMeasuredSize = lastMeasuredSizeRef.current;
 		let resizeInFlight = false;
 		let pendingSync = false;
+		let transientInteractionActive = false;
+
+		const beginResizeInteraction = () => {
+			if (transientInteractionActive) {
+				return;
+			}
+
+			transientInteractionActive = true;
+			void beginTransientWindowInteraction().catch((error: unknown) => {
+				console.warn("failed to begin transient interaction for auto resize", error);
+			});
+		};
+
+		const endResizeInteraction = () => {
+			if (!transientInteractionActive) {
+				return;
+			}
+
+			transientInteractionActive = false;
+			void endTransientWindowInteraction().catch((error: unknown) => {
+				console.warn("failed to end transient interaction for auto resize", error);
+			});
+		};
 
 		// Tauri window resizing feeds back into DOM/layout observers. Coalescing that loop
 		// avoids hot resize churn when large translate/QA results land at once.
@@ -73,10 +127,14 @@ export function useAutoResizeWindow(rootRef: RefObject<HTMLElement | null>) {
 			settleTimeoutId = window.setTimeout(() => {
 				resizeInFlight = false;
 				settleTimeoutId = null;
+				endResizeInteraction();
 				if (pendingSync) {
 					pendingSync = false;
 					syncWindowSize();
+					return;
 				}
+
+				onResizeSettled?.();
 			}, WINDOW_RESIZE_SETTLE_MS);
 		};
 
@@ -88,12 +146,15 @@ export function useAutoResizeWindow(rootRef: RefObject<HTMLElement | null>) {
 					return;
 				}
 
-				const nextSize = measureContentSize(rootElement);
+				const measuredSize = measureContentSize(rootElement);
+				const nextSize = normalizeMeasuredSize(lastMeasuredSize, measuredSize, allowShrink);
 				if (sameMeasuredSize(lastMeasuredSize, nextSize)) {
 					return;
 				}
 
 				lastMeasuredSize = nextSize;
+				lastMeasuredSizeRef.current = nextSize;
+				beginResizeInteraction();
 				resizeInFlight = true;
 				void resizeLauncherWindow(nextSize)
 					.catch((resizeError: unknown) => {
@@ -139,9 +200,10 @@ export function useAutoResizeWindow(rootRef: RefObject<HTMLElement | null>) {
 			if (settleTimeoutId !== null) {
 				window.clearTimeout(settleTimeoutId);
 			}
+			endResizeInteraction();
 			resizeObserver?.disconnect();
 			mutationObserver?.disconnect();
 			window.removeEventListener("resize", syncWindowSize);
 		};
-	}, [desktopRuntimeAvailable, rootRef]);
+	}, [allowShrink, desktopRuntimeAvailable, enabled, onResizeSettled, rootRef]);
 }

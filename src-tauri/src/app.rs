@@ -63,21 +63,21 @@ pub fn run() -> Result<()> {
                     match event.state() {
                         ShortcutState::Pressed => {
                             if !shortcut_for_handler.begin_shortcut_press(action) {
+                                tracing::info!(
+                                    action = shortcut_action_name(action),
+                                    "ignoring shortcut press because action is still marked as pressed"
+                                );
                                 return;
                             }
 
+                            tracing::info!(
+                                action = shortcut_action_name(action),
+                                "accepted global shortcut press"
+                            );
+
                             match action {
                                 ShortcutAction::ToggleLauncher => {
-                                    let selected_text = selection::get_selected_text()
-                                        .inspect_err(|error| {
-                                            tracing::warn!(?error, "failed to get selected text")
-                                        })
-                                        .ok()
-                                        .flatten();
-
-                                    if let Err(error) =
-                                        window::toggle_main_window(_app, selected_text)
-                                    {
+                                    if let Err(error) = window::toggle_main_window(_app) {
                                         tracing::error!(
                                             ?error,
                                             "failed to toggle main window from shortcut"
@@ -164,6 +164,10 @@ pub fn run() -> Result<()> {
                             }
                         }
                         ShortcutState::Released => {
+                            tracing::debug!(
+                                action = shortcut_action_name(action),
+                                "received global shortcut release"
+                            );
                             shortcut_for_handler.end_shortcut_press(action);
                         }
                     }
@@ -250,6 +254,14 @@ fn init_tracing() {
         .with_env_filter(filter)
         .with_timer(timer)
         .try_init();
+}
+
+fn shortcut_action_name(action: ShortcutAction) -> &'static str {
+    match action {
+        ShortcutAction::ToggleLauncher => "toggle_launcher",
+        ShortcutAction::OcrCapture => "ocr_capture",
+        ShortcutAction::OcrTranslate => "ocr_translate",
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -362,7 +374,7 @@ async fn handle_ocr_shortcut(app: tauri::AppHandle) -> Result<()> {
         return Ok(());
     };
 
-    window::show_main_window_with_text(&app, ocr_text)?;
+    window::show_main_window_with_ocr_text(&app, ocr_text)?;
     Ok(())
 }
 

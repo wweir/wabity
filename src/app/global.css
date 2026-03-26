@@ -58,15 +58,15 @@
 	--success-strong: oklch(46% 0.057 166);
 	--warn-strong: oklch(56.5% 0.102 72);
 	--error-strong: oklch(52.8% 0.097 28);
-	--surface-code: color-mix(in srgb, var(--surface-panel-strong) 90%, black);
+	--surface-code: color-mix(in srgb, var(--surface-panel-strong) 72%, var(--surface-frame));
 	--surface-highlight-soft: color-mix(in srgb, white 72%, transparent);
-	--code-text: oklch(88.2% 0.01 84);
-	--code-accent: oklch(76.5% 0.098 72);
-	--code-string: oklch(79.4% 0.09 145);
-	--code-comment: oklch(70.4% 0.014 232);
-	--code-meta: oklch(74.1% 0.013 232);
-	--code-entity: oklch(81.2% 0.063 170);
-	--code-danger: oklch(72.8% 0.082 28);
+	--code-text: oklch(28.4% 0.02 236);
+	--code-accent: oklch(47.6% 0.105 255);
+	--code-string: oklch(49.8% 0.089 152);
+	--code-comment: oklch(55.8% 0.015 232);
+	--code-meta: oklch(49.6% 0.019 234);
+	--code-entity: oklch(42.8% 0.081 204);
+	--code-danger: oklch(49.4% 0.103 28);
 	--border-frame: oklch(86.8% 0.01 226);
 	--border-regular: oklch(89.8% 0.009 226);
 	--border-soft: oklch(93.2% 0.008 226);
@@ -430,8 +430,6 @@ body {
 	.settings-inline-code,
 	.settings-install-guide-command,
 	.settings-mcp-badge,
-	.thought-content,
-	.session-thought-content,
 	.session-message-content,
 	.action-bar-detail pre
 ) {

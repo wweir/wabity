@@ -763,11 +763,50 @@
 	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
 }
 
+.settings-llm-model-card-selectable {
+	width: 100%;
+	color: inherit;
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+	transition:
+		border-color 180ms ease,
+		box-shadow 180ms ease,
+		transform 180ms ease,
+		background 180ms ease;
+}
+
+.settings-llm-model-card-selectable:hover {
+	transform: translateY(-1px);
+	border-color: rgba(188, 197, 179, 0.96);
+	box-shadow:
+		inset 0 1px 0 rgba(255, 255, 255, 0.72),
+		0 12px 22px rgba(34, 39, 31, 0.08);
+}
+
+.settings-llm-model-card-selectable:focus-visible {
+	outline: 2px solid rgba(42, 92, 150, 0.45);
+	outline-offset: 2px;
+}
+
+.settings-llm-model-card-selected {
+	border-color: rgba(136, 155, 120, 0.92);
+	background:
+		radial-gradient(circle at top right, rgba(203, 220, 188, 0.26), transparent 36%),
+		linear-gradient(180deg, rgba(248, 250, 244, 0.98), rgba(236, 240, 230, 0.94));
+}
+
 .settings-llm-model-card-header {
 	display: flex;
 	align-items: flex-start;
 	justify-content: space-between;
 	gap: 12px;
+}
+
+.settings-llm-model-card-badges {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
 }
 
 .settings-llm-model-card-title {

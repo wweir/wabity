@@ -36,14 +36,18 @@ function resolveAnchoredOffset({
 	maxWidth?: number;
 }): FloatingPanelOffset {
 	const unconstrainedWidth = Math.ceil(triggerRect.width + extraWidth);
-	const width =
+	const desiredWidth =
 		typeof maxWidth === "number"
 			? clamp(unconstrainedWidth, minWidth, maxWidth)
 			: Math.max(minWidth, unconstrainedWidth);
+	const shellWidth = Math.floor(shellRect.width);
+	const width =
+		shellWidth > 0 ? clamp(desiredWidth, Math.min(minWidth, shellWidth), shellWidth) : desiredWidth;
+	const maxX = Math.max(0, shellRect.width - width);
 	const x =
 		horizontalAlign === "right"
-			? Math.max(0, triggerRect.right - shellRect.left - width)
-			: Math.max(0, triggerRect.left - shellRect.left);
+			? clamp(triggerRect.right - shellRect.left - width, 0, maxX)
+			: clamp(triggerRect.left - shellRect.left, 0, maxX);
 
 	return {
 		x,

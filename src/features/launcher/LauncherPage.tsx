@@ -5,6 +5,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
 	activateAcpSession,
+	armLauncherBlurAutoHideSuppression,
 	cancelAcpSession,
 	chooseWorkspaceDirectory,
 	closeAcpSession,
@@ -17,6 +18,8 @@ import {
 	hideLauncherWindow,
 	isDesktopRuntimeAvailable,
 	launchApp,
+	onExecutionProgress,
+	onOcrCapturedText,
 	listAcpSessions,
 	matchActions,
 	onOcrError,
@@ -24,12 +27,12 @@ import {
 	onOcrTranslationResult,
 	subscribeAcpSessionRemovals,
 	subscribeAcpSessionUpdates,
-	onSelectedText,
 	openDocumentReference,
 	onWorkspaceUpdated,
 	searchApps,
 	searchFiles,
 	sendAcpPrompt,
+	setLauncherBlurAutoHideEnabled,
 	setWorkspace,
 	takeAcpRestoreNotices,
 } from "../../lib/tauri/client";
@@ -79,6 +82,7 @@ import {
 	type SuggestionMode,
 	replaceTextRange,
 } from "./query";
+import { usesInlineInputControl, usesTextareaInputControl } from "./inputMode";
 import {
 	clamp,
 	clampCaretIndex,
@@ -115,6 +119,8 @@ import { isRagAnswerStructuredPayload } from "./types";
 const defaultInputMode: InputMode = "inline";
 const launcherCompletionPopupId = "launcher-completion-popup";
 const launcherCompletionOptionIdPrefix = "launcher-completion-option";
+const QA_RESULT_BLUR_AUTO_HIDE_SUPPRESSION_MS = 1_500;
+const QA_RESULT_BLUR_AUTO_HIDE_RESTORE_AFTER_SETTLE_MS = 900;
 
 type PrimaryActionTone = "qa" | "execute" | "send" | "path" | "translate";
 
@@ -149,14 +155,6 @@ async function applyClientEffect(result: ExecutionResult) {
 			await openUrl(url);
 		}
 	}
-}
-
-function isApplePlatform() {
-	if (typeof navigator === "undefined") {
-		return false;
-	}
-
-	return /Mac|iPhone|iPad|iPod/.test(navigator.platform);
 }
 
 function resolveLauncherOperationStatus(actionId: string): string | null {
@@ -203,6 +201,13 @@ function buildQaAssistantMessageBlocks(
 	payload: RagAnswerStructuredPayload | null,
 ) {
 	const blocks: AcpSessionMessage["blocks"] = [];
+	const reasoning = payload?.reasoning?.trim();
+	if (result.primaryText) {
+		blocks.push({
+			type: "content",
+			text: result.primaryText,
+		});
+	}
 	const actions = payload?.actions ?? [];
 	if (actions.length > 0) {
 		blocks.push({
@@ -210,10 +215,10 @@ function buildQaAssistantMessageBlocks(
 			items: actions,
 		});
 	}
-	if (result.primaryText) {
+	if (reasoning) {
 		blocks.push({
-			type: "content",
-			text: result.primaryText,
+			type: "thought",
+			content: reasoning,
 		});
 	}
 
@@ -285,6 +290,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 	const [selectedIndex, setSelectedIndex] = useState(0);
 	const [result, setResult] = useState<ExecutionResult | null>(null);
 	const [qaMessages, setQaMessages] = useState<AcpSessionMessage[]>([]);
+	const [qaAutoResizeFrozen, setQaAutoResizeFrozen] = useState(false);
 	const [qaConversationState, setQaConversationState] = useState<ExecutionConversationState | null>(
 		null,
 	);
@@ -330,6 +336,9 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 	const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
 	const pendingFocusAnimationFrameRef = useRef<number | null>(null);
 	const pendingFocusTimeoutRef = useRef<number | null>(null);
+	const qaBlurAutoHideRestoreTimeoutRef = useRef<number | null>(null);
+	const launcherBlurAutoHideEnabledRef = useRef(true);
+	const suspendReactiveLauncherInputFocusRef = useRef(false);
 	const completionListRef = useRef<HTMLUListElement | null>(null);
 	const sessionLogRef = useRef<HTMLDivElement | null>(null);
 	const pendingSelectionRef = useRef<number | null>(null);
@@ -472,10 +481,10 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		shellRef,
 		horizontalAlign: "right",
 		gap: 10,
-		minWidth: 320,
-		maxWidth: 420,
-		extraWidth: 136,
-		initialWidth: 360,
+		minWidth: 400,
+		maxWidth: 480,
+		extraWidth: 176,
+		initialWidth: 400,
 		watchKey: `${frameWidth}:${sessionSummaries.length}:${activeSessionId ?? ""}`,
 	});
 	const sessionCanSend = activeSession ? activeSession.session.status === "idle" : false;
@@ -496,8 +505,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		!isActionQuery(textBeforeCaret) &&
 		rawText.trim().length > 0 &&
 		(!appSearchActive || (!appSearchPending && !hasAppMatches));
-	const primaryActionShortcutLabel =
-		inputMode === "multiline" ? (isApplePlatform() ? "Cmd+Enter" : "Ctrl+Enter") : "Enter";
+	const primaryActionShortcutLabel = "Enter";
 	const agentActionShortcutLabel = "Alt+Enter";
 	const primaryActionState: PrimaryActionState = useMemo(() => {
 		if (fileMode) {
@@ -740,21 +748,6 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		!fileMode &&
 		rawText.trim().length > 0;
 
-	const updateRawText = useCallback(
-		(nextValue: string, nextCaretIndex?: number) => {
-			setRawText(nextValue);
-			setSuggestionsHidden(false);
-			if (typeof nextCaretIndex === "number") {
-				setCaretIndex(nextCaretIndex);
-			}
-			setError(null);
-			if (!activeSessionId) {
-				setResult(null);
-			}
-		},
-		[activeSessionId],
-	);
-
 	const clearScheduledLauncherInputFocus = useCallback(() => {
 		if (typeof window !== "undefined" && pendingFocusAnimationFrameRef.current !== null) {
 			window.cancelAnimationFrame(pendingFocusAnimationFrameRef.current);
@@ -766,6 +759,87 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			pendingFocusTimeoutRef.current = null;
 		}
 	}, []);
+
+	const clearScheduledQaBlurAutoHideRestore = useCallback(() => {
+		if (typeof window === "undefined" || qaBlurAutoHideRestoreTimeoutRef.current === null) {
+			return;
+		}
+
+		window.clearTimeout(qaBlurAutoHideRestoreTimeoutRef.current);
+		qaBlurAutoHideRestoreTimeoutRef.current = null;
+	}, []);
+
+	const restoreLauncherBlurAutoHide = useCallback(
+		(errorMessage: string) => {
+			clearScheduledQaBlurAutoHideRestore();
+			if (!desktopRuntimeAvailable || launcherBlurAutoHideEnabledRef.current) {
+				suspendReactiveLauncherInputFocusRef.current = false;
+				return;
+			}
+
+			suspendReactiveLauncherInputFocusRef.current = false;
+			launcherBlurAutoHideEnabledRef.current = true;
+			void setLauncherBlurAutoHideEnabled(true).catch((error: unknown) => {
+				console.warn(errorMessage, error);
+			});
+		},
+		[clearScheduledQaBlurAutoHideRestore, desktopRuntimeAvailable],
+	);
+
+	const scheduleLauncherBlurAutoHideRestore = useCallback(
+		(delayMs: number) => {
+			if (
+				typeof window === "undefined" ||
+				!desktopRuntimeAvailable ||
+				launcherBlurAutoHideEnabledRef.current
+			) {
+				return;
+			}
+
+			clearScheduledQaBlurAutoHideRestore();
+			qaBlurAutoHideRestoreTimeoutRef.current = window.setTimeout(
+				() => {
+					qaBlurAutoHideRestoreTimeoutRef.current = null;
+					restoreLauncherBlurAutoHide(
+						"failed to re-enable launcher blur auto-hide after QA result settled",
+					);
+				},
+				Math.max(1, Math.ceil(delayMs)),
+			);
+		},
+		[clearScheduledQaBlurAutoHideRestore, desktopRuntimeAvailable, restoreLauncherBlurAutoHide],
+	);
+
+	const updateRawText = useCallback(
+		(
+			nextValue: string,
+			nextCaretIndex?: number,
+			options?: {
+				preserveQaPresentation?: boolean;
+				resumeReactiveLauncherInputFocus?: boolean;
+			},
+		) => {
+			const preserveQaPresentation = options?.preserveQaPresentation ?? false;
+			const resumeReactiveLauncherInputFocus = options?.resumeReactiveLauncherInputFocus ?? true;
+			if (resumeReactiveLauncherInputFocus) {
+				suspendReactiveLauncherInputFocusRef.current = false;
+			}
+			if (!preserveQaPresentation) {
+				setQaAutoResizeFrozen(false);
+				restoreLauncherBlurAutoHide("failed to re-enable launcher blur auto-hide");
+			}
+			setRawText(nextValue);
+			setSuggestionsHidden(false);
+			if (typeof nextCaretIndex === "number") {
+				setCaretIndex(nextCaretIndex);
+			}
+			setError(null);
+			if (!activeSessionId) {
+				setResult(null);
+			}
+		},
+		[activeSessionId, restoreLauncherBlurAutoHide],
+	);
 
 	const focusLauncherInput = useCallback(() => {
 		const inputElement = inputRef.current;
@@ -799,6 +873,46 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		});
 	}, [clearScheduledLauncherInputFocus, focusLauncherInput]);
 
+	const resetQaConversation = useCallback(() => {
+		setQaAutoResizeFrozen(false);
+		restoreLauncherBlurAutoHide(
+			"failed to re-enable launcher blur auto-hide while resetting QA state",
+		);
+		setQaMessages([]);
+		setQaConversationState(null);
+		setRagConversation([]);
+		setQaRetrieval(null);
+	}, [restoreLauncherBlurAutoHide]);
+
+	const dismissLauncher = useCallback(
+		async (options?: { resetQaConversation?: boolean }) => {
+			if (options?.resetQaConversation) {
+				resetQaConversation();
+			}
+			await hideLauncherWindow();
+		},
+		[resetQaConversation],
+	);
+
+	const applyInjectedSourceText = useCallback(
+		(nextInputMode: Extract<InputMode, "ocr" | "selection">, sourceText: string) => {
+			setQaAutoResizeFrozen(false);
+			pendingSelectionRef.current = 0;
+			setInputMode(nextInputMode);
+			updateRawText(sourceText, 0, {
+				preserveQaPresentation: false,
+				resumeReactiveLauncherInputFocus: false,
+			});
+			setLatestSubmittedText(sourceText.trim() || "快捷输入");
+			setResult(null);
+			setError(null);
+			setActiveSlashAction(null);
+			resetQaConversation();
+			scheduleLauncherInputFocus();
+		},
+		[resetQaConversation, scheduleLauncherInputFocus, updateRawText],
+	);
+
 	const syncScrollableLayoutCaps = useCallback(() => {
 		const shellElement = shellRef.current;
 		const inputElement = inputRef.current;
@@ -807,7 +921,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		shellElement?.style.setProperty("--launcher-input-max-height", `${inputMaxHeight}px`);
 		shellElement?.style.setProperty("--launcher-output-max-height", `${outputMaxHeight}px`);
 
-		if (!(inputElement instanceof HTMLTextAreaElement) || inputMode !== "multiline") {
+		if (!(inputElement instanceof HTMLTextAreaElement) || !usesTextareaInputControl(inputMode)) {
 			return;
 		}
 
@@ -834,7 +948,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 
 	useLayoutEffect(() => {
 		const inputElement = inputRef.current;
-		if (!(inputElement instanceof HTMLTextAreaElement) || inputMode !== "multiline") {
+		if (!(inputElement instanceof HTMLTextAreaElement) || !usesTextareaInputControl(inputMode)) {
 			return;
 		}
 
@@ -937,7 +1051,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		let nextY: number;
 		const nextWidth = Math.min(completionPanelMaxWidth, inputElement.clientWidth);
 
-		if (inputElement instanceof HTMLTextAreaElement && inputMode === "multiline") {
+		if (inputElement instanceof HTMLTextAreaElement && usesTextareaInputControl(inputMode)) {
 			const caretPosition = measureCaretPosition(inputElement, boundedCaretIndex);
 			nextX = clamp(caretPosition.left, 0, Math.max(0, inputElement.clientWidth - nextWidth));
 			const frameTop = frameElement.offsetTop;
@@ -1014,7 +1128,23 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		listElement.scrollTop = clamp(nextScrollTop, 0, maxScrollTop);
 	}, [hasSuggestions, selectedIndex, visibleActionMatches, visibleFileMatches, visibleAppMatches]);
 
-	useAutoResizeWindow(shellRef);
+	const handleQaResultResizeSettled = useCallback(() => {
+		if (!qaAutoResizeFrozen || launcherBlurAutoHideEnabledRef.current) {
+			return;
+		}
+
+		scheduleLauncherBlurAutoHideRestore(QA_RESULT_BLUR_AUTO_HIDE_RESTORE_AFTER_SETTLE_MS);
+	}, [qaAutoResizeFrozen, scheduleLauncherBlurAutoHideRestore]);
+
+	useAutoResizeWindow(shellRef, {
+		allowShrink: !qaAutoResizeFrozen,
+		onResizeSettled: handleQaResultResizeSettled,
+	});
+
+	useEffect(
+		() => () => clearScheduledQaBlurAutoHideRestore(),
+		[clearScheduledQaBlurAutoHideRestore],
+	);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -1159,6 +1289,9 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			setWorkspaceState(nextWorkspace);
 			resetQaConversation();
 		});
+		const ocrCapturedTextUnlistenPromise = onOcrCapturedText((payload) => {
+			applyInjectedSourceText(payload.sourceMode, payload.sourceText);
+		});
 		const ocrErrorUnlistenPromise = onOcrError((message) => {
 			setShortcutTranslationPending(false);
 			setOperationStatusText(null);
@@ -1166,30 +1299,20 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			scheduleLauncherInputFocus();
 		});
 		const ocrTranslationStartedUnlistenPromise = onOcrTranslationStarted((payload) => {
-			pendingSelectionRef.current = 0;
 			setShortcutTranslationPending(true);
 			setOperationStatusText("模型请求中 · 正在翻译文本");
-			setInputMode(payload.sourceMode);
-			updateRawText(payload.sourceText, 0);
+			applyInjectedSourceText(payload.sourceMode, payload.sourceText);
 			setLatestSubmittedText(payload.sourceText.trim() || "快捷翻译");
-			setResult(null);
-			setError(null);
-			setActiveSlashAction(null);
-			resetQaConversation();
-			scheduleLauncherInputFocus();
 		});
 		const ocrTranslationUnlistenPromise = onOcrTranslationResult((payload) => {
-			pendingSelectionRef.current = 0;
 			setShortcutTranslationPending(false);
 			setOperationStatusText(null);
-			setInputMode(payload.sourceMode);
-			updateRawText(payload.sourceText, 0);
+			applyInjectedSourceText(payload.sourceMode, payload.sourceText);
 			setLatestSubmittedText(payload.sourceText.trim() || "快捷翻译");
 			setResult(payload.result);
-			setError(null);
-			setActiveSlashAction(null);
-			resetQaConversation();
-			scheduleLauncherInputFocus();
+		});
+		const executionProgressUnlistenPromise = onExecutionProgress((payload) => {
+			setOperationStatusText(payload.statusText);
 		});
 		void subscribeAcpSessionUpdates((detail) => {
 			setSessionDetails((current) => upsertSessionDetailRecord(current, detail));
@@ -1210,11 +1333,13 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 
 		return () => {
 			void workspaceUnlistenPromise.then((unlisten) => unlisten?.());
+			void ocrCapturedTextUnlistenPromise.then((unlisten) => unlisten?.());
 			void ocrErrorUnlistenPromise.then((unlisten) => unlisten?.());
 			void ocrTranslationStartedUnlistenPromise.then((unlisten) => unlisten?.());
 			void ocrTranslationUnlistenPromise.then((unlisten) => unlisten?.());
+			void executionProgressUnlistenPromise.then((unlisten) => unlisten?.());
 		};
-	}, [scheduleLauncherInputFocus, updateRawText]);
+	}, [applyInjectedSourceText, resetQaConversation, scheduleLauncherInputFocus, updateRawText]);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -1244,44 +1369,24 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 	}, []);
 
 	useEffect(() => {
-		if (!desktopRuntimeAvailable) {
-			return;
-		}
-
-		let unlisten: (() => void) | null = null;
-
-		void onSelectedText((text) => {
-			if (text && text.trim().length > 0) {
-				pendingSelectionRef.current = 0;
-				setInputMode("multiline");
-				updateRawText(text, 0);
-				scheduleLauncherInputFocus();
-			}
-		}).then((unlistenFn) => {
-			unlisten = unlistenFn ?? null;
-		});
-
-		return () => {
-			if (unlisten) {
-				unlisten();
-			}
-		};
-	}, [desktopRuntimeAvailable, scheduleLauncherInputFocus, updateRawText]);
-
-	useEffect(() => {
 		if (typeof window === "undefined" || typeof document === "undefined") {
 			return;
 		}
 
 		let unlistenFocusChanged: (() => void) | null = null;
+		const shouldSkipReactiveLauncherInputFocus = () =>
+			desktopRuntimeAvailable && suspendReactiveLauncherInputFocusRef.current;
 
 		function handleDocumentVisibilityChange() {
-			if (document.visibilityState === "visible") {
+			if (document.visibilityState === "visible" && !shouldSkipReactiveLauncherInputFocus()) {
 				scheduleLauncherInputFocus();
 			}
 		}
 
 		function handleWindowFocus() {
+			if (shouldSkipReactiveLauncherInputFocus()) {
+				return;
+			}
 			scheduleLauncherInputFocus();
 		}
 
@@ -1291,7 +1396,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		if (desktopRuntimeAvailable) {
 			void getCurrentWindow()
 				.onFocusChanged(({ payload: focused }) => {
-					if (focused) {
+					if (focused && !shouldSkipReactiveLauncherInputFocus()) {
 						scheduleLauncherInputFocus();
 					}
 				})
@@ -1373,13 +1478,6 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		setActiveSlashAction(null);
 	}
 
-	function resetQaConversation() {
-		setQaMessages([]);
-		setQaConversationState(null);
-		setRagConversation([]);
-		setQaRetrieval(null);
-	}
-
 	function appendRagConversationTurn(question: string, answer: string) {
 		const normalizedQuestion = question.trim();
 		const normalizedAnswer = answer.trim();
@@ -1403,6 +1501,22 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		const payload = isRagAnswerStructuredPayload(executionResult.structuredPayload)
 			? executionResult.structuredPayload
 			: null;
+
+		setQaAutoResizeFrozen(true);
+		void armLauncherBlurAutoHideSuppression(QA_RESULT_BLUR_AUTO_HIDE_SUPPRESSION_MS).catch(
+			(error: unknown) => {
+				console.warn("failed to arm launcher blur suppression for QA result", error);
+			},
+		);
+		if (desktopRuntimeAvailable && launcherBlurAutoHideEnabledRef.current) {
+			suspendReactiveLauncherInputFocusRef.current = true;
+			clearScheduledLauncherInputFocus();
+			launcherBlurAutoHideEnabledRef.current = false;
+			void setLauncherBlurAutoHideEnabled(false).catch((error: unknown) => {
+				console.warn("failed to disable launcher blur auto-hide for QA result", error);
+			});
+		}
+		scheduleLauncherBlurAutoHideRestore(QA_RESULT_BLUR_AUTO_HIDE_SUPPRESSION_MS);
 
 		const timestamp = Date.now();
 		const userMessage: AcpSessionMessage = {
@@ -1488,7 +1602,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 
 			// Hide the always-on-top launcher first so opener targets can take focus.
 			if (executionResult.shouldCloseLauncher) {
-				await hideLauncherWindow();
+				await dismissLauncher();
 			}
 			await applyClientEffect(executionResult);
 
@@ -1708,7 +1822,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			setError(null);
 
 			if (executionResult.shouldCloseLauncher) {
-				await hideLauncherWindow();
+				await dismissLauncher();
 			}
 		} catch (launchError) {
 			setError(getErrorMessage(launchError, "应用启动失败"));
@@ -1806,7 +1920,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 
 	async function handleOpenRagCitation(citation: RagCitation) {
 		try {
-			await hideLauncherWindow();
+			await dismissLauncher();
 			await openDocumentReference(citation.absolutePath);
 		} catch (openError) {
 			if (desktopRuntimeAvailable) {
@@ -1878,7 +1992,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 				return;
 			}
 
-			await hideLauncherWindow();
+			await dismissLauncher({ resetQaConversation: true });
 			return;
 		}
 
@@ -1892,7 +2006,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			return;
 		}
 
-		if ((event.metaKey || event.ctrlKey) && inputMode === "inline") {
+		if ((event.metaKey || event.ctrlKey) && usesInlineInputControl(inputMode)) {
 			event.preventDefault();
 			setInputMode("multiline");
 			const newText = rawText.slice(0, boundedCaretIndex) + "\n" + rawText.slice(boundedCaretIndex);
@@ -1901,31 +2015,32 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			return;
 		}
 
-		if ((event.metaKey || event.ctrlKey) && inputMode === "multiline") {
+		if ((event.metaKey || event.ctrlKey) && usesTextareaInputControl(inputMode)) {
+			return;
+		}
+
+		if (usesInlineInputControl(inputMode) && !event.shiftKey) {
 			event.preventDefault();
 			await runPrimaryAction();
 			return;
 		}
 
-		if (inputMode === "inline" && !event.shiftKey) {
+		if (usesTextareaInputControl(inputMode)) {
 			event.preventDefault();
+			if (hasSuggestions) {
+				if (suggestionMode === "action") {
+					await runSelectedAction();
+					return;
+				}
+
+				if (suggestionMode === "file") {
+					acceptSelectedSuggestion();
+					return;
+				}
+			}
+
 			await runPrimaryAction();
 			return;
-		}
-
-		if (inputMode === "multiline" && hasSuggestions) {
-			event.preventDefault();
-			if (suggestionMode === "action") {
-				await runSelectedAction();
-				return;
-			}
-
-			if (suggestionMode === "file") {
-				acceptSelectedSuggestion();
-				return;
-			}
-
-			await runPrimaryAction();
 		}
 	}
 
