@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use reqwest::blocking::Client as BlockingHttpClient;
 use tauri_plugin_global_shortcut::Shortcut;
 use tokio::sync::RwLock as AsyncRwLock;
 
@@ -19,8 +20,8 @@ use crate::services::{
     file_search::FileSearchService,
     matcher::MatcherService,
     ocr::{OcrProvider, OpenAiCompatibleOcrProvider, UnavailableOcrProvider},
-    rag::{self, RagIndexService},
-    rag_answer,
+    question_answer_backend,
+    rag::RagIndexService,
     rag_mcp::RagMcpServerService,
     translate,
 };
@@ -30,11 +31,13 @@ use crate::{
             AcpAgentCatalog, AcpAgentConfig, AcpMcpServerCatalog, AcpMcpServerConfig,
             AcpNameValuePair, AcpRestoreNotice, AcpSessionDetail, AcpSessionSummary,
         },
-        execution::{ExecutionRequest, ExecutionResult},
+        execution::{ExecutionProgressEvent, ExecutionRequest, ExecutionResult},
         rag::{BuiltinRagMcpServerStatus, RagRuntimeStatus, RagScanResult},
         settings::{
-            AppSettings, LlmProviderConfig, LlmProviderModelEntry, LlmSettings, OcrProviderKind,
-            OcrSettings, RagSettings,
+            builtin_llm_provider_templates, find_builtin_llm_provider_template, AppSettings,
+            BuiltinLlmProviderTemplate, BuiltinLlmTemplateModelProtocol,
+            BuiltinLlmTemplateModelType, LlmProviderConfig, LlmProviderModelEntry, LlmSettings,
+            OcrProviderKind, OcrSettings, RagSettings,
         },
         skills::PublicSkillCatalog,
         workspace::WorkspaceState,
@@ -44,12 +47,17 @@ use crate::{
         normalize_workspace_root, AppConfig, ConfigStore, SavedAcpSession, ShortcutConfig,
         ShortcutKey, WorkspaceHistory, RECENT_WORKSPACE_LIMIT,
     },
-    infrastructure::openai_compatible::{
-        extract_model_entries, extract_provider_error_message, normalize_base_url,
-        parse_json_payload,
-    },
+    infrastructure::openai_compatible::{extract_model_entries, OpenAiCompatibleClient},
     services::public_skills::PublicSkillService,
 };
+
+const SHORTCUT_PRESS_STALE_AFTER: Duration = Duration::from_millis(750);
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ShortcutPressGate {
+    pressed: bool,
+    pressed_at: Option<Instant>,
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -111,7 +119,11 @@ impl AppState {
         &self.matcher
     }
 
-    pub async fn execute_action(&self, request: ExecutionRequest) -> Result<ExecutionResult> {
+    pub async fn execute_action_with_progress(
+        &self,
+        request: ExecutionRequest,
+        progress_event_tx: Option<Arc<dyn Fn(ExecutionProgressEvent) + Send + Sync>>,
+    ) -> Result<ExecutionResult> {
         if request.action_id == "translate_text" {
             let settings = self.app_settings().await?;
             return tokio::task::spawn_blocking(move || {
@@ -131,17 +143,20 @@ impl AppState {
             let workspace = self.workspace().await?;
             let workspace_root = normalize_workspace_root(&workspace.root_path)?;
             let mcp_servers = self.acp_mcp_servers().await?.servers;
-            return rag_answer::answer_question(rag_answer::QuestionAnswerRequest {
-                data_dir: &data_dir,
-                workspace_root: &workspace_root,
-                raw_text: &request.query.raw_text,
-                conversation: &request.conversation,
-                conversation_state: request.conversation_state.as_ref(),
-                prompts_settings: &settings.prompts,
-                rag_settings: &settings.rag,
-                llm_settings: &settings.llm,
-                mcp_servers: &mcp_servers,
-            })
+            return question_answer_backend::answer_question(
+                question_answer_backend::QuestionAnswerBackendRequest {
+                    data_dir: &data_dir,
+                    workspace_root: &workspace_root,
+                    raw_text: &request.query.raw_text,
+                    conversation: &request.conversation,
+                    conversation_state: request.conversation_state.as_ref(),
+                    prompts_settings: &settings.prompts,
+                    rag_settings: &settings.rag,
+                    llm_settings: &settings.llm,
+                    mcp_servers: &mcp_servers,
+                    progress_event_tx,
+                },
+            )
             .await;
         }
 
@@ -211,6 +226,10 @@ impl AppState {
         tokio::task::spawn_blocking(move || fetch_llm_provider_models(&provider))
             .await
             .context("failed to join LLM model list task")?
+    }
+
+    pub async fn builtin_llm_provider_templates(&self) -> Vec<BuiltinLlmProviderTemplate> {
+        builtin_llm_provider_templates()
     }
 
     pub async fn public_skill_catalog(&self) -> Result<PublicSkillCatalog> {
@@ -314,8 +333,9 @@ impl AppState {
         llm_settings: LlmSettings,
     ) -> Result<RagScanResult> {
         validate_rag_settings(&rag_settings, &llm_settings)?;
-        let data_dir = ConfigStore::data_dir()?;
-        rag::scan_rag_sources(&data_dir, &rag_settings, &llm_settings).await
+        self.rag_index
+            .scan_sources(&rag_settings, &llm_settings)
+            .await
     }
 
     pub async fn rag_runtime_status(&self) -> RagRuntimeStatus {
@@ -647,36 +667,98 @@ fn validate_llm_provider_config(provider: &LlmProviderConfig) -> Result<()> {
     if provider.supports_stateful && !provider.has_responses_model() {
         anyhow::bail!("stateful 开关只能和 responses 协议一起使用");
     }
+    validate_builtin_llm_provider_binding(provider)?;
+
+    Ok(())
+}
+
+fn validate_builtin_llm_provider_binding(provider: &LlmProviderConfig) -> Result<()> {
+    let Some(template_id) = provider.builtin_preset_id.as_deref() else {
+        return Ok(());
+    };
+    let template = find_builtin_llm_provider_template(template_id)
+        .with_context(|| format!("未知内置 LLM 模板: {template_id}"))?;
+
+    if provider.managed_base_url && provider.base_url.trim() != template.default_base_url {
+        anyhow::bail!("内置模板条目的 Base URL 必须与模板默认值一致，或先关闭模板管理");
+    }
+
+    let model_id = provider
+        .builtin_preset_model_id
+        .as_deref()
+        .context("内置模板条目缺少模型目录绑定")?;
+    let template_model = template
+        .models
+        .iter()
+        .find(|candidate| candidate.id == model_id)
+        .with_context(|| format!("内置模板模型不存在: {model_id}"))?;
+
+    if !template_model.selectable_in_current_app {
+        anyhow::bail!("内置模板模型当前不可在 Wabity 中使用: {model_id}");
+    }
+    if provider.model.trim() != template_model.model {
+        anyhow::bail!("内置模板条目的模型必须来自模板白名单");
+    }
+
+    match template_model.model_type {
+        BuiltinLlmTemplateModelType::Llm => {
+            if !provider.is_llm_model() {
+                anyhow::bail!("内置模板模型类型与 provider 类型不一致");
+            }
+        }
+        BuiltinLlmTemplateModelType::Embedding => {
+            if !provider.is_embedding_model() {
+                anyhow::bail!("内置模板模型类型与 provider 类型不一致");
+            }
+        }
+        BuiltinLlmTemplateModelType::ImageGeneration
+        | BuiltinLlmTemplateModelType::VideoGeneration => {
+            anyhow::bail!("当前不支持把图像或视频生成模型保存为 LLM provider");
+        }
+    }
+
+    let expected_protocol = match template_model.protocol {
+        BuiltinLlmTemplateModelProtocol::Responses => {
+            crate::domain::settings::LlmProviderProtocol::Responses
+        }
+        BuiltinLlmTemplateModelProtocol::ChatCompletions => {
+            crate::domain::settings::LlmProviderProtocol::ChatCompletions
+        }
+        BuiltinLlmTemplateModelProtocol::Unsupported => {
+            anyhow::bail!("当前内置模板模型没有可用的 LLM 协议");
+        }
+    };
+    if provider.protocol != expected_protocol {
+        anyhow::bail!("内置模板条目的协议与模板目录不一致");
+    }
+
+    let expected_multimodal = template_model.supports_multimodal
+        && expected_protocol == crate::domain::settings::LlmProviderProtocol::Responses;
+    if provider.supports_multimodal != expected_multimodal {
+        anyhow::bail!("内置模板条目的多模态能力与模板目录不一致");
+    }
+
+    let expected_stateful = template_model.supports_stateful
+        && expected_protocol == crate::domain::settings::LlmProviderProtocol::Responses;
+    if provider.supports_stateful != expected_stateful {
+        anyhow::bail!("内置模板条目的 stateful 能力与模板目录不一致");
+    }
 
     Ok(())
 }
 
 fn fetch_llm_provider_models(provider: &LlmProviderConfig) -> Result<Vec<LlmProviderModelEntry>> {
-    let base_url = normalize_base_url(&provider.base_url, "LLM provider base URL")?;
-    let client = reqwest::blocking::Client::builder()
+    let http_client = BlockingHttpClient::builder()
         .timeout(Duration::from_secs(15))
         .build()
         .context("failed to build HTTP client for LLM model listing")?;
-    let mut request = client.get(format!("{base_url}/models"));
-    let api_key = provider.api_key.trim();
-    if !api_key.is_empty() {
-        request = request.bearer_auth(api_key);
-    }
-
-    let response = request
-        .send()
-        .context("failed to request LLM model list from provider")?;
-    let status = response.status();
-    let body = response
-        .text()
-        .context("failed to read LLM model list response body")?;
-
-    if !status.is_success() {
-        let message = extract_provider_error_message(&body);
-        anyhow::bail!("LLM provider /models 请求失败 ({status}): {message}");
-    }
-
-    let parsed = parse_json_payload(&body, "LLM model list response JSON")?;
+    let client = OpenAiCompatibleClient::new_blocking(
+        &http_client,
+        &provider.base_url,
+        &provider.api_key,
+        "LLM provider base URL",
+    )?;
+    let parsed: serde_json::Value = client.get_json("/models", "LLM model list from provider")?;
     let models = extract_model_entries(&parsed);
     if models.is_empty() {
         anyhow::bail!("LLM provider /models 未返回可识别的模型列表");
@@ -894,18 +976,41 @@ fn normalize_name_value_pairs(
     Ok(normalized)
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct ShortcutRuntimeState {
     launcher_shortcut: Arc<StdRwLock<Option<Shortcut>>>,
     ocr_shortcut: Arc<StdRwLock<Option<Shortcut>>>,
     ocr_translate_shortcut: Arc<StdRwLock<Option<Shortcut>>>,
     launcher_visible: Arc<AtomicBool>,
+    launcher_blur_auto_hide_enabled: Arc<AtomicBool>,
     launcher_resize_reposition_until: Arc<StdRwLock<Option<Instant>>>,
-    launcher_shortcut_pressed: Arc<AtomicBool>,
-    ocr_shortcut_pressed: Arc<AtomicBool>,
-    ocr_translate_shortcut_pressed: Arc<AtomicBool>,
+    launcher_blur_auto_hide_suppressed_until: Arc<StdRwLock<Option<Instant>>>,
+    launcher_blur_auto_hide_sequence: Arc<AtomicUsize>,
+    launcher_shortcut_pressed: Arc<StdRwLock<ShortcutPressGate>>,
+    ocr_shortcut_pressed: Arc<StdRwLock<ShortcutPressGate>>,
+    ocr_translate_shortcut_pressed: Arc<StdRwLock<ShortcutPressGate>>,
     ocr_capture_active: Arc<AtomicBool>,
     transient_window_interactions: Arc<AtomicUsize>,
+}
+
+impl Default for ShortcutRuntimeState {
+    fn default() -> Self {
+        Self {
+            launcher_shortcut: Arc::new(StdRwLock::new(None)),
+            ocr_shortcut: Arc::new(StdRwLock::new(None)),
+            ocr_translate_shortcut: Arc::new(StdRwLock::new(None)),
+            launcher_visible: Arc::new(AtomicBool::new(false)),
+            launcher_blur_auto_hide_enabled: Arc::new(AtomicBool::new(true)),
+            launcher_resize_reposition_until: Arc::new(StdRwLock::new(None)),
+            launcher_blur_auto_hide_suppressed_until: Arc::new(StdRwLock::new(None)),
+            launcher_blur_auto_hide_sequence: Arc::new(AtomicUsize::new(0)),
+            launcher_shortcut_pressed: Arc::new(StdRwLock::new(ShortcutPressGate::default())),
+            ocr_shortcut_pressed: Arc::new(StdRwLock::new(ShortcutPressGate::default())),
+            ocr_translate_shortcut_pressed: Arc::new(StdRwLock::new(ShortcutPressGate::default())),
+            ocr_capture_active: Arc::new(AtomicBool::new(false)),
+            transient_window_interactions: Arc::new(AtomicUsize::new(0)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -956,12 +1061,60 @@ impl ShortcutRuntimeState {
         self.launcher_visible.store(visible, Ordering::SeqCst);
     }
 
+    pub fn is_launcher_blur_auto_hide_enabled(&self) -> bool {
+        self.launcher_blur_auto_hide_enabled.load(Ordering::SeqCst)
+    }
+
+    pub fn set_launcher_blur_auto_hide_enabled(&self, enabled: bool) {
+        self.launcher_blur_auto_hide_enabled
+            .store(enabled, Ordering::SeqCst);
+    }
+
     pub fn arm_launcher_resize_reposition(&self, duration: Duration) {
         *self.launcher_resize_reposition_until.write().unwrap() = Some(Instant::now() + duration);
     }
 
     pub fn clear_launcher_resize_reposition(&self) {
         *self.launcher_resize_reposition_until.write().unwrap() = None;
+    }
+
+    pub fn arm_launcher_blur_auto_hide_suppression(&self, duration: Duration) -> Instant {
+        let deadline = Instant::now() + duration;
+        *self
+            .launcher_blur_auto_hide_suppressed_until
+            .write()
+            .unwrap() = Some(deadline);
+        deadline
+    }
+
+    pub fn clear_launcher_blur_auto_hide_suppression(&self) {
+        *self
+            .launcher_blur_auto_hide_suppressed_until
+            .write()
+            .unwrap() = None;
+    }
+
+    pub fn launcher_blur_auto_hide_delay(&self) -> Option<Duration> {
+        self.launcher_blur_auto_hide_suppressed_until
+            .read()
+            .unwrap()
+            .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
+    }
+
+    pub fn arm_launcher_blur_auto_hide_confirmation(&self) -> usize {
+        self.launcher_blur_auto_hide_sequence
+            .fetch_add(1, Ordering::SeqCst)
+            + 1
+    }
+
+    pub fn cancel_launcher_blur_auto_hide_confirmation(&self) -> usize {
+        self.launcher_blur_auto_hide_sequence
+            .fetch_add(1, Ordering::SeqCst)
+            + 1
+    }
+
+    pub fn should_execute_launcher_blur_auto_hide(&self, sequence: usize) -> bool {
+        self.launcher_blur_auto_hide_sequence.load(Ordering::SeqCst) == sequence
     }
 
     pub fn should_reposition_launcher_on_resize(&self) -> bool {
@@ -976,31 +1129,19 @@ impl ShortcutRuntimeState {
     }
 
     pub fn begin_shortcut_press(&self, action: ShortcutAction) -> bool {
-        match action {
-            ShortcutAction::ToggleLauncher => {
-                !self.launcher_shortcut_pressed.swap(true, Ordering::SeqCst)
-            }
-            ShortcutAction::OcrCapture => !self.ocr_shortcut_pressed.swap(true, Ordering::SeqCst),
-            ShortcutAction::OcrTranslate => !self
-                .ocr_translate_shortcut_pressed
-                .swap(true, Ordering::SeqCst),
-        }
+        Self::begin_shortcut_press_gate(match action {
+            ShortcutAction::ToggleLauncher => &self.launcher_shortcut_pressed,
+            ShortcutAction::OcrCapture => &self.ocr_shortcut_pressed,
+            ShortcutAction::OcrTranslate => &self.ocr_translate_shortcut_pressed,
+        })
     }
 
     pub fn end_shortcut_press(&self, action: ShortcutAction) {
-        match action {
-            ShortcutAction::ToggleLauncher => {
-                self.launcher_shortcut_pressed
-                    .store(false, Ordering::SeqCst);
-            }
-            ShortcutAction::OcrCapture => {
-                self.ocr_shortcut_pressed.store(false, Ordering::SeqCst);
-            }
-            ShortcutAction::OcrTranslate => {
-                self.ocr_translate_shortcut_pressed
-                    .store(false, Ordering::SeqCst);
-            }
-        }
+        Self::end_shortcut_press_gate(match action {
+            ShortcutAction::ToggleLauncher => &self.launcher_shortcut_pressed,
+            ShortcutAction::OcrCapture => &self.ocr_shortcut_pressed,
+            ShortcutAction::OcrTranslate => &self.ocr_translate_shortcut_pressed,
+        });
     }
 
     pub fn begin_ocr_capture(&self) -> bool {
@@ -1027,6 +1168,29 @@ impl ShortcutRuntimeState {
     pub fn is_transient_window_interaction_active(&self) -> bool {
         self.transient_window_interactions.load(Ordering::SeqCst) > 0
     }
+
+    fn begin_shortcut_press_gate(gate: &StdRwLock<ShortcutPressGate>) -> bool {
+        let mut gate = gate.write().unwrap();
+        let now = Instant::now();
+
+        if gate.pressed
+            && gate.pressed_at.is_some_and(|pressed_at| {
+                now.duration_since(pressed_at) < SHORTCUT_PRESS_STALE_AFTER
+            })
+        {
+            return false;
+        }
+
+        gate.pressed = true;
+        gate.pressed_at = Some(now);
+        true
+    }
+
+    fn end_shortcut_press_gate(gate: &StdRwLock<ShortcutPressGate>) {
+        let mut gate = gate.write().unwrap();
+        gate.pressed = false;
+        gate.pressed_at = None;
+    }
 }
 
 #[cfg(test)]
@@ -1035,7 +1199,7 @@ mod tests {
 
     use super::{
         normalize_mcp_remote_url, validate_llm_provider_config, validate_rag_settings,
-        ShortcutAction, ShortcutRuntimeState,
+        ShortcutAction, ShortcutRuntimeState, SHORTCUT_PRESS_STALE_AFTER,
     };
     use crate::domain::settings::{
         LlmProviderConfig, LlmProviderModelEntry, LlmSettings, RagSettings,
@@ -1068,6 +1232,18 @@ mod tests {
     }
 
     #[test]
+    fn shortcut_press_recovers_after_missing_release() {
+        let state = ShortcutRuntimeState::default();
+
+        assert!(state.begin_shortcut_press(ShortcutAction::ToggleLauncher));
+        assert!(!state.begin_shortcut_press(ShortcutAction::ToggleLauncher));
+
+        std::thread::sleep(SHORTCUT_PRESS_STALE_AFTER + Duration::from_millis(50));
+
+        assert!(state.begin_shortcut_press(ShortcutAction::ToggleLauncher));
+    }
+
+    #[test]
     fn hidden_launcher_always_repositions_on_resize() {
         let state = ShortcutRuntimeState::default();
 
@@ -1086,6 +1262,46 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(30));
         assert!(!state.should_reposition_launcher_on_resize());
+    }
+
+    #[test]
+    fn launcher_blur_auto_hide_suppression_expires() {
+        let state = ShortcutRuntimeState::default();
+
+        state.arm_launcher_blur_auto_hide_suppression(Duration::from_millis(20));
+        assert!(state.launcher_blur_auto_hide_delay().is_some());
+
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(state.launcher_blur_auto_hide_delay().is_none());
+
+        state.clear_launcher_blur_auto_hide_suppression();
+        assert!(state.launcher_blur_auto_hide_delay().is_none());
+    }
+
+    #[test]
+    fn launcher_blur_auto_hide_enable_flag_round_trips() {
+        let state = ShortcutRuntimeState::default();
+
+        assert!(state.is_launcher_blur_auto_hide_enabled());
+        state.set_launcher_blur_auto_hide_enabled(false);
+        assert!(!state.is_launcher_blur_auto_hide_enabled());
+        state.set_launcher_blur_auto_hide_enabled(true);
+        assert!(state.is_launcher_blur_auto_hide_enabled());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn newer_blur_auto_hide_confirmation_cancels_older_one() {
+        let state = ShortcutRuntimeState::default();
+
+        let first = state.arm_launcher_blur_auto_hide_confirmation();
+        let second = state.arm_launcher_blur_auto_hide_confirmation();
+
+        assert!(!state.should_execute_launcher_blur_auto_hide(first));
+        assert!(state.should_execute_launcher_blur_auto_hide(second));
+
+        state.cancel_launcher_blur_auto_hide_confirmation();
+        assert!(!state.should_execute_launcher_blur_auto_hide(second));
     }
 
     #[test]
@@ -1198,6 +1414,46 @@ mod tests {
         let error =
             validate_llm_provider_config(&provider).expect_err("stateful requires responses");
         assert!(error.to_string().contains("responses 协议"));
+    }
+
+    #[test]
+    fn builtin_provider_rejects_models_outside_whitelist() {
+        let provider = LlmProviderConfig {
+            id: "zhipu".to_string(),
+            name: "智谱 AI".to_string(),
+            base_url: "https://open.bigmodel.cn/api/paas/v4".to_string(),
+            api_key: "key".to_string(),
+            model: "glm-4.9".to_string(),
+            protocol: crate::domain::settings::LlmProviderProtocol::ChatCompletions,
+            builtin_preset_id: Some("zhipu".to_string()),
+            builtin_preset_model_id: Some("glm-4.7-flash".to_string()),
+            managed_base_url: true,
+            ..LlmProviderConfig::default()
+        };
+
+        let error = validate_llm_provider_config(&provider)
+            .expect_err("builtin provider must stay inside whitelist");
+        assert!(error.to_string().contains("白名单"));
+    }
+
+    #[test]
+    fn builtin_provider_rejects_unselectable_catalog_model() {
+        let provider = LlmProviderConfig {
+            id: "zhipu".to_string(),
+            name: "智谱 AI".to_string(),
+            base_url: "https://open.bigmodel.cn/api/paas/v4".to_string(),
+            api_key: "key".to_string(),
+            model: "cogview-3-flash".to_string(),
+            protocol: crate::domain::settings::LlmProviderProtocol::ChatCompletions,
+            builtin_preset_id: Some("zhipu".to_string()),
+            builtin_preset_model_id: Some("cogview-3-flash".to_string()),
+            managed_base_url: true,
+            ..LlmProviderConfig::default()
+        };
+
+        let error = validate_llm_provider_config(&provider)
+            .expect_err("unsupported builtin model must not be selectable");
+        assert!(error.to_string().contains("当前不可在 Wabity 中使用"));
     }
 
     #[test]

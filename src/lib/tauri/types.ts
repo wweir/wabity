@@ -21,6 +21,13 @@ export interface PromptsSettings {
 }
 
 export type LlmProviderProtocol = "responses" | "chat_completions";
+export type BuiltinLlmTemplateModelType =
+	| "llm"
+	| "embedding"
+	| "image_generation"
+	| "video_generation";
+export type BuiltinLlmTemplateModelProtocol = "responses" | "chat_completions" | "unsupported";
+export type BuiltinLlmTemplateUseCase = "translation" | "rag_answer" | "ocr" | "embedding";
 
 export interface LlmProviderConfig {
 	id: string;
@@ -31,6 +38,9 @@ export interface LlmProviderConfig {
 	protocol: LlmProviderProtocol;
 	model: string;
 	modelIdentityHint: string | null;
+	builtinPresetId: string | null;
+	builtinPresetModelId: string | null;
+	managedBaseUrl: boolean;
 	supportsMultimodal: boolean;
 	supportsStateful: boolean;
 }
@@ -38,6 +48,32 @@ export interface LlmProviderConfig {
 export interface LlmProviderModelEntry {
 	id: string;
 	identityHint: string | null;
+}
+
+export interface BuiltinLlmProviderTemplateModel {
+	id: string;
+	displayName: string;
+	model: string;
+	modelType: BuiltinLlmTemplateModelType;
+	protocol: BuiltinLlmTemplateModelProtocol;
+	supportsMultimodal: boolean;
+	supportsStateful: boolean;
+	recommendedFor: BuiltinLlmTemplateUseCase[];
+	summary: string;
+	selectableInCurrentApp: boolean;
+	disabledReason: string | null;
+}
+
+export interface BuiltinLlmProviderTemplate {
+	id: string;
+	displayName: string;
+	description: string;
+	registrationUrl: string;
+	apiKeyUrl: string;
+	docsUrl: string;
+	defaultBaseUrl: string;
+	supportsModelListing: boolean;
+	models: BuiltinLlmProviderTemplateModel[];
 }
 
 export interface LlmSettings {

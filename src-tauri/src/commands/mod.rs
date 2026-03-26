@@ -25,11 +25,14 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
         | "resize_launcher_window"
         | "begin_transient_window_interaction"
         | "end_transient_window_interaction"
+        | "arm_launcher_blur_auto_hide_suppression"
+        | "set_launcher_blur_auto_hide_enabled"
         | "get_shortcut"
         | "set_shortcut" => launcher::handle_invoke(invoke),
-        "get_app_settings" | "set_app_settings" | "list_llm_provider_models" => {
-            settings::handle_invoke(invoke)
-        }
+        "get_app_settings"
+        | "set_app_settings"
+        | "list_llm_provider_models"
+        | "list_builtin_llm_provider_templates" => settings::handle_invoke(invoke),
         "scan_rag_sources" | "get_rag_runtime_status" | "get_builtin_rag_mcp_server_status" => {
             rag::handle_invoke(invoke)
         }

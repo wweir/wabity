@@ -143,6 +143,63 @@ pub enum LlmModelType {
     Embedding,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuiltinLlmTemplateModelType {
+    Llm,
+    Embedding,
+    ImageGeneration,
+    VideoGeneration,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuiltinLlmTemplateModelProtocol {
+    Responses,
+    ChatCompletions,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuiltinLlmTemplateUseCase {
+    Translation,
+    RagAnswer,
+    Ocr,
+    Embedding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuiltinLlmProviderTemplateModel {
+    pub id: String,
+    pub display_name: String,
+    pub model: String,
+    pub model_type: BuiltinLlmTemplateModelType,
+    pub protocol: BuiltinLlmTemplateModelProtocol,
+    pub supports_multimodal: bool,
+    pub supports_stateful: bool,
+    pub recommended_for: Vec<BuiltinLlmTemplateUseCase>,
+    pub summary: String,
+    pub selectable_in_current_app: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuiltinLlmProviderTemplate {
+    pub id: String,
+    pub display_name: String,
+    pub description: String,
+    pub registration_url: String,
+    pub api_key_url: String,
+    pub docs_url: String,
+    pub default_base_url: String,
+    pub supports_model_listing: bool,
+    pub models: Vec<BuiltinLlmProviderTemplateModel>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmProviderConfig {
@@ -160,6 +217,12 @@ pub struct LlmProviderConfig {
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_identity_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin_preset_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin_preset_model_id: Option<String>,
+    #[serde(default)]
+    pub managed_base_url: bool,
     #[serde(default)]
     pub supports_multimodal: bool,
     #[serde(default)]
@@ -193,6 +256,12 @@ struct RawLlmProviderConfig {
     model: String,
     #[serde(default)]
     model_identity_hint: Option<String>,
+    #[serde(default)]
+    builtin_preset_id: Option<String>,
+    #[serde(default)]
+    builtin_preset_model_id: Option<String>,
+    #[serde(default)]
+    managed_base_url: bool,
     #[serde(default)]
     supports_multimodal: bool,
     #[serde(default)]
@@ -317,6 +386,9 @@ impl<'de> Deserialize<'de> for LlmProviderConfig {
             protocol,
             model: raw.model,
             model_identity_hint: raw.model_identity_hint,
+            builtin_preset_id: raw.builtin_preset_id,
+            builtin_preset_model_id: raw.builtin_preset_model_id,
+            managed_base_url: raw.managed_base_url,
             supports_multimodal: raw.supports_multimodal,
             supports_stateful: raw.supports_stateful,
             legacy_protocol,
@@ -338,6 +410,9 @@ impl Default for LlmProviderConfig {
             protocol: LlmProviderProtocol::Responses,
             model: String::new(),
             model_identity_hint: None,
+            builtin_preset_id: None,
+            builtin_preset_model_id: None,
+            managed_base_url: false,
             supports_multimodal: false,
             supports_stateful: false,
             legacy_protocol: None,
@@ -367,6 +442,347 @@ pub struct LlmProviderModelEntry {
     pub id: String,
     #[serde(default)]
     pub identity_hint: Option<String>,
+}
+
+pub fn builtin_llm_provider_templates() -> Vec<BuiltinLlmProviderTemplate> {
+    vec![
+        BuiltinLlmProviderTemplate {
+            id: "zhipu".to_string(),
+            display_name: "智谱 AI".to_string(),
+            description:
+                "官方免费模型目录模板。先注册智谱开放平台、创建 API Key，再从白名单里选择模型。"
+                    .to_string(),
+            registration_url:
+                "https://bigmodel.cn/login?redirect=%2Fusercenter%2Fproj-mgmt%2Fapikeys".to_string(),
+            api_key_url: "https://bigmodel.cn/login?redirect=%2Fusercenter%2Fproj-mgmt%2Fapikeys"
+                .to_string(),
+            docs_url: "https://docs.bigmodel.cn/cn/guide/start/quick-start".to_string(),
+            default_base_url: "https://open.bigmodel.cn/api/paas/v4".to_string(),
+            supports_model_listing: true,
+            models: vec![
+                BuiltinLlmProviderTemplateModel {
+                    id: "glm-4.7-flash".to_string(),
+                    display_name: "GLM-4.7-Flash".to_string(),
+                    model: "glm-4.7-flash".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: vec![
+                        BuiltinLlmTemplateUseCase::Translation,
+                        BuiltinLlmTemplateUseCase::RagAnswer,
+                    ],
+                    summary: "免费文本模型，适合翻译、问答和通用长文本任务。".to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "glm-4.6v-flash".to_string(),
+                    display_name: "GLM-4.6V-Flash".to_string(),
+                    model: "glm-4.6v-flash".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: true,
+                    supports_stateful: false,
+                    recommended_for: vec![
+                        BuiltinLlmTemplateUseCase::Translation,
+                        BuiltinLlmTemplateUseCase::RagAnswer,
+                    ],
+                    summary: "免费视觉理解模型，擅长图像、视频和文件理解。".to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "glm-4.1v-thinking-flash".to_string(),
+                    display_name: "GLM-4.1V-Thinking-Flash".to_string(),
+                    model: "glm-4.1v-thinking-flash".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: true,
+                    supports_stateful: false,
+                    recommended_for: vec![
+                        BuiltinLlmTemplateUseCase::Translation,
+                        BuiltinLlmTemplateUseCase::RagAnswer,
+                    ],
+                    summary: "免费视觉推理模型，适合图表、GUI 和网页理解场景。".to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "glm-4-flash-250414".to_string(),
+                    display_name: "GLM-4-Flash-250414".to_string(),
+                    model: "glm-4-flash-250414".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: vec![
+                        BuiltinLlmTemplateUseCase::Translation,
+                        BuiltinLlmTemplateUseCase::RagAnswer,
+                    ],
+                    summary: "免费轻量文本模型，适合通用对话、翻译和基础问答。".to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "glm-4v-flash".to_string(),
+                    display_name: "GLM-4V-Flash".to_string(),
+                    model: "glm-4v-flash".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: true,
+                    supports_stateful: false,
+                    recommended_for: vec![
+                        BuiltinLlmTemplateUseCase::Translation,
+                        BuiltinLlmTemplateUseCase::RagAnswer,
+                    ],
+                    summary: "免费图像理解模型，适合图像识别、问答和视觉推理。".to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "cogview-3-flash".to_string(),
+                    display_name: "CogView-3-Flash".to_string(),
+                    model: "cogview-3-flash".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::ImageGeneration,
+                    protocol: BuiltinLlmTemplateModelProtocol::Unsupported,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: Vec::new(),
+                    summary: "免费图像生成模型，适合根据文本快速生成图片。".to_string(),
+                    selectable_in_current_app: false,
+                    disabled_reason: Some(
+                        "当前 Wabity 没有图像生成链路，不能当普通 LLM 使用。".to_string(),
+                    ),
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "cogvideox-flash".to_string(),
+                    display_name: "CogVideoX-Flash".to_string(),
+                    model: "cogvideox-flash".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::VideoGeneration,
+                    protocol: BuiltinLlmTemplateModelProtocol::Unsupported,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: Vec::new(),
+                    summary: "免费视频生成模型，适合根据文本指令生成短视频。".to_string(),
+                    selectable_in_current_app: false,
+                    disabled_reason: Some(
+                        "当前 Wabity 没有视频生成链路，不能当普通 LLM 使用。".to_string(),
+                    ),
+                },
+            ],
+        },
+        BuiltinLlmProviderTemplate {
+            id: "siliconflow".to_string(),
+            display_name: "SiliconFlow".to_string(),
+            description:
+                "官方免费语言模型目录模板。先注册 SiliconFlow、创建 API Key，再从白名单里选择模型。"
+                    .to_string(),
+            registration_url: "https://account.siliconflow.cn".to_string(),
+            api_key_url: "https://cloud.siliconflow.cn/account/ak".to_string(),
+            docs_url:
+                "https://docs.siliconflow.cn/cn/api-reference/chat-completions/chat-completions"
+                    .to_string(),
+            default_base_url: "https://api.siliconflow.cn/v1".to_string(),
+            supports_model_listing: true,
+            models: vec![
+                BuiltinLlmProviderTemplateModel {
+                    id: "qwen3.5-4b-instruct-2507".to_string(),
+                    display_name: "Qwen3.5-4B-Instruct-2507".to_string(),
+                    model: "Qwen/Qwen3.5-4B-Instruct-2507".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: vec![
+                        BuiltinLlmTemplateUseCase::Translation,
+                        BuiltinLlmTemplateUseCase::RagAnswer,
+                    ],
+                    summary: "免费轻量指令模型，适合低成本翻译、问答和日常文本任务。".to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "paddleocr-vl-1.5".to_string(),
+                    display_name: "PaddleOCR-VL-1.5".to_string(),
+                    model: "PaddlePaddle/PaddleOCR-VL-1.5".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: true,
+                    supports_stateful: false,
+                    recommended_for: vec![BuiltinLlmTemplateUseCase::RagAnswer],
+                    summary: "免费文档理解模型，适合票据、表格和复杂版面 OCR 识别。".to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "deepseek-r1-distill-qwen-7b".to_string(),
+                    display_name: "DeepSeek-R1-Distill-Qwen-7B".to_string(),
+                    model: "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: vec![
+                        BuiltinLlmTemplateUseCase::Translation,
+                        BuiltinLlmTemplateUseCase::RagAnswer,
+                    ],
+                    summary: "免费轻量推理模型，适合分析、问答和需要推理的文本任务。".to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "glm-4.1v-9b-thinking".to_string(),
+                    display_name: "GLM-4.1V-9B-Thinking".to_string(),
+                    model: "THUDM/GLM-4.1V-9B-Thinking".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: true,
+                    supports_stateful: false,
+                    recommended_for: vec![BuiltinLlmTemplateUseCase::RagAnswer],
+                    summary: "免费视觉推理模型，适合图表、截图和复杂图像理解。".to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "paddleocr-vl".to_string(),
+                    display_name: "PaddleOCR-VL".to_string(),
+                    model: "PaddlePaddle/PaddleOCR-VL".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: true,
+                    supports_stateful: false,
+                    recommended_for: vec![BuiltinLlmTemplateUseCase::RagAnswer],
+                    summary: "免费 OCR / 文档解析模型，适合表格、票据和富版面内容提取。"
+                        .to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "deepseek-ocr".to_string(),
+                    display_name: "DeepSeek-OCR".to_string(),
+                    model: "deepseek-ai/DeepSeek-OCR".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: true,
+                    supports_stateful: false,
+                    recommended_for: vec![BuiltinLlmTemplateUseCase::RagAnswer],
+                    summary: "免费 OCR 模型，适合截图、扫描件和文档文字提取。".to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "qwen3-8b".to_string(),
+                    display_name: "Qwen3-8B".to_string(),
+                    model: "Qwen/Qwen3-8B".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: vec![
+                        BuiltinLlmTemplateUseCase::Translation,
+                        BuiltinLlmTemplateUseCase::RagAnswer,
+                    ],
+                    summary: "免费通用文本模型，适合对话、翻译和基础问答。".to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "hunyuan-mt-7b".to_string(),
+                    display_name: "Hunyuan-MT-7B".to_string(),
+                    model: "tencent/Hunyuan-MT-7B".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: vec![BuiltinLlmTemplateUseCase::Translation],
+                    summary: "免费机器翻译模型，适合中英文和多语种翻译场景。".to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "deepseek-r1-0528-qwen3-8b".to_string(),
+                    display_name: "DeepSeek-R1-0528-Qwen3-8B".to_string(),
+                    model: "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: vec![BuiltinLlmTemplateUseCase::RagAnswer],
+                    summary: "免费推理模型，适合复杂问答和需要多步分析的任务。".to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "glm-z1-9b-0414".to_string(),
+                    display_name: "GLM-Z1-9B-0414".to_string(),
+                    model: "THUDM/GLM-Z1-9B-0414".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: vec![BuiltinLlmTemplateUseCase::RagAnswer],
+                    summary: "免费推理模型，适合代码解释、复杂问答和长链思考。".to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "qwen2.5-7b-instruct".to_string(),
+                    display_name: "Qwen2.5-7B-Instruct".to_string(),
+                    model: "Qwen/Qwen2.5-7B-Instruct".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: vec![
+                        BuiltinLlmTemplateUseCase::Translation,
+                        BuiltinLlmTemplateUseCase::RagAnswer,
+                    ],
+                    summary: "免费通用指令模型，适合日常问答、改写和轻量生成。".to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "glm-4-9b-0414".to_string(),
+                    display_name: "GLM-4-9B-0414".to_string(),
+                    model: "THUDM/GLM-4-9B-0414".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: vec![
+                        BuiltinLlmTemplateUseCase::Translation,
+                        BuiltinLlmTemplateUseCase::RagAnswer,
+                    ],
+                    summary: "免费通用文本模型，适合对话、翻译和基础知识问答。".to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "internlm2-5-7b-chat".to_string(),
+                    display_name: "internlm2_5-7b-chat".to_string(),
+                    model: "internlm/internlm2_5-7b-chat".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: vec![
+                        BuiltinLlmTemplateUseCase::Translation,
+                        BuiltinLlmTemplateUseCase::RagAnswer,
+                    ],
+                    summary: "免费聊天模型，适合日常问答和轻量文本生成。".to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+            ],
+        },
+    ]
+}
+
+pub fn find_builtin_llm_provider_template(template_id: &str) -> Option<BuiltinLlmProviderTemplate> {
+    builtin_llm_provider_templates()
+        .into_iter()
+        .find(|template| template.id == template_id)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -441,7 +857,15 @@ pub fn default_rag_answer_system_prompt() -> String {
 }
 
 pub fn default_rag_ignore_globs() -> Vec<String> {
-    [
+    fixed_rag_ignore_globs()
+        .iter()
+        .copied()
+        .map(str::to_string)
+        .collect()
+}
+
+pub const fn fixed_rag_ignore_globs() -> &'static [&'static str] {
+    &[
         "**/.git/**",
         "**/node_modules/**",
         "**/vendor/**",
@@ -459,9 +883,6 @@ pub fn default_rag_ignore_globs() -> Vec<String> {
         "**/.venv/**",
         "**/venv/**",
     ]
-    .into_iter()
-    .map(str::to_string)
-    .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

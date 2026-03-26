@@ -35,6 +35,7 @@ pub const RAG_MCP_SERVER_NAME: &str = "Wabity RAG Query";
 const RAG_MCP_TOOL_NAME: &str = "wabity.rag.search";
 const MAX_HTTP_BODY_BYTES: usize = 512 * 1024;
 const DEFAULT_TOOL_TOP_K: usize = 8;
+const DEFAULT_TOOL_MIN_SCORE: f32 = 0.35;
 const MAX_TOOL_TOP_K: usize = 20;
 
 type HttpResponseResult<T> = std::result::Result<T, Box<Response<Body>>>;
@@ -341,8 +342,8 @@ async fn handle_post(
                                         "type": "number",
                                         "minimum": 0.0,
                                         "maximum": 1.0,
-                                        "default": 0.0,
-                                        "description": "Discard hits whose normalized similarity score is below this threshold."
+                                        "default": DEFAULT_TOOL_MIN_SCORE,
+                                        "description": "Discard hits whose normalized similarity score is below this threshold. The default keeps only relatively high-confidence matches."
                                     }
                                 },
                                 "required": ["query"],
@@ -599,7 +600,7 @@ fn parse_rag_search_tool_input(
             }
             parsed
         }
-        None => 0.0,
+        None => DEFAULT_TOOL_MIN_SCORE,
     };
 
     Ok(RagSearchToolInput {

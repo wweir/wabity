@@ -25,12 +25,12 @@ use lancedb::{
     Connection as LanceConnection,
 };
 use notify::{event::ModifyKind, Event, EventKind, RecursiveMode, Watcher};
-use reqwest::Client;
+use reqwest::Client as HttpClient;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use text_splitter::{Characters, ChunkCharIndex, ChunkConfig, MarkdownSplitter, TextSplitter};
 use tokio::{
-    sync::{mpsc, RwLock as AsyncRwLock, Semaphore},
+    sync::{mpsc, Mutex as AsyncMutex, RwLock as AsyncRwLock, Semaphore},
     task::{JoinHandle, JoinSet},
 };
 
@@ -38,8 +38,9 @@ use crate::domain::{
     rag::{RagRuntimePhase, RagRuntimeStatus, RagScanResult},
     settings::{LlmProviderConfig, LlmSettings, RagSettings},
 };
-use crate::infrastructure::openai_compatible::{
-    extract_provider_error_message, normalize_base_url, parse_json_payload,
+use crate::infrastructure::openai_compatible::{normalize_base_url, OpenAiCompatibleClient};
+use crate::services::document_extract::{
+    extract_document_text_from_bytes, is_supported_document_file, uses_markdown_chunking,
 };
 
 pub(crate) const RAG_DB_DIR_NAME: &str = "rag-lancedb";
@@ -48,6 +49,9 @@ pub(crate) const RAG_TABLE_NAME: &str = "chunks";
 const MAX_TEXT_FILE_BYTES: u64 = 50 * 1024 * 1024;
 const CHUNK_MAX_CHARS: usize = 1_200;
 const CHUNK_OVERLAP_CHARS: usize = 200;
+const MARKDOWN_CHUNK_TARGET_CHARS: usize = 350;
+const MARKDOWN_CHUNK_HARD_MAX_CHARS: usize = 550;
+const MARKDOWN_CHUNK_OVERLAP_CHARS: usize = 80;
 const EMBEDDING_BATCH_SIZE_MIN: usize = 1;
 const EMBEDDING_BATCH_SIZE_DEFAULT: usize = 8;
 const EMBEDDING_BATCH_SIZE_MAX: usize = 128;
@@ -61,8 +65,8 @@ const MAX_DELETE_FILTER_PATHS: usize = 128;
 const MAX_METADATA_BATCH_PATHS: usize = 256;
 const MAX_TEXT_FINGERPRINT_FILTERS: usize = 256;
 const MAX_STREAMING_REINDEX_CONCURRENCY: usize = 4;
-const SUPPORTED_TEXT_FILE_EXTENSIONS: &[&str] = &["md", "mdx", "txt", "markdown", "rst", "adoc"];
-const MARKDOWN_TEXT_FILE_EXTENSIONS: &[&str] = &["md", "mdx", "markdown"];
+const VECTOR_INDEX_REBUILD_MIN_DIRTY_CHUNKS: usize = 256;
+const VECTOR_INDEX_REBUILD_MIN_DIRTY_DELETES: usize = 8;
 
 #[derive(Clone)]
 pub struct RagIndexService {
@@ -71,6 +75,7 @@ pub struct RagIndexService {
     runtime_inputs: Arc<AsyncRwLock<Option<RagRuntimeInputs>>>,
     runtime_status: Arc<AsyncRwLock<RagRuntimeStatus>>,
     runtime_generation: Arc<AtomicU64>,
+    storage_lock: Arc<AsyncMutex<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +108,14 @@ struct ResolvedRagConfig {
 struct RagRuntimeInputs {
     settings: RagSettings,
     embedding_provider: Option<LlmProviderConfig>,
+}
+
+#[derive(Clone)]
+struct RagRuntimeContext {
+    runtime_status: Arc<AsyncRwLock<RagRuntimeStatus>>,
+    runtime_generation: Arc<AtomicU64>,
+    storage_lock: Arc<AsyncMutex<()>>,
+    generation: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,11 +232,14 @@ struct CachedTextVector {
     vector: Vec<f32>,
 }
 
+#[derive(Clone)]
 struct RagVectorStore {
     db: LanceConnection,
     table: Option<Table>,
     created_table: bool,
     index_dirty: bool,
+    dirty_chunk_count: usize,
+    dirty_delete_count: usize,
 }
 
 #[derive(Debug)]
@@ -243,6 +259,20 @@ struct TextLayout {
 #[derive(Debug)]
 struct ChunkMetadata {
     paragraph_start_line_index: usize,
+    heading_path: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ChunkByteRange {
+    start_byte: usize,
+    end_byte: usize,
+}
+
+#[derive(Debug, Clone)]
+struct SemanticBlock {
+    start_byte: usize,
+    end_byte: usize,
+    char_count: usize,
     heading_path: Vec<String>,
 }
 
@@ -472,7 +502,25 @@ impl RagVectorStore {
             table,
             created_table: false,
             index_dirty: false,
+            dirty_chunk_count: 0,
+            dirty_delete_count: 0,
         })
+    }
+
+    fn mark_index_dirty_for_chunks(&mut self, chunk_count: usize) {
+        self.index_dirty = true;
+        self.dirty_chunk_count = self.dirty_chunk_count.saturating_add(chunk_count);
+    }
+
+    fn mark_index_dirty_for_delete(&mut self) {
+        self.index_dirty = true;
+        self.dirty_delete_count = self.dirty_delete_count.saturating_add(1);
+    }
+
+    fn should_rebuild_index(&self) -> bool {
+        self.created_table
+            || self.dirty_chunk_count >= VECTOR_INDEX_REBUILD_MIN_DIRTY_CHUNKS
+            || self.dirty_delete_count >= VECTOR_INDEX_REBUILD_MIN_DIRTY_DELETES
     }
 
     async fn add_chunks(&mut self, chunks: &[RagChunk], vectors: &[Vec<f32>]) -> Result<()> {
@@ -495,7 +543,7 @@ impl RagVectorStore {
             self.table = Some(created);
             self.created_table = true;
         }
-        self.index_dirty = true;
+        self.mark_index_dirty_for_chunks(chunks.len());
         Ok(())
     }
 
@@ -507,7 +555,7 @@ impl RagVectorStore {
             .delete(filter)
             .await
             .with_context(|| format!("failed to delete LanceDB rows with filter: {filter}"))?;
-        self.index_dirty = true;
+        self.mark_index_dirty_for_delete();
         Ok(())
     }
 
@@ -527,7 +575,6 @@ impl RagVectorStore {
                     chunk_state.as_str()
                 )
             })?;
-        self.index_dirty = true;
         Ok(())
     }
 
@@ -635,16 +682,37 @@ impl RagVectorStore {
         if !self.index_dirty {
             return Ok(());
         }
-        if let Some(table) = &self.table {
-            table
-                .create_index(&["vector"], Index::Auto)
-                .execute()
-                .await
-                .context("failed to create LanceDB vector index")?;
+        if !self.should_rebuild_index() {
+            return Ok(());
         }
+        if let Some(table) = &self.table {
+            if let Err(error) = table.create_index(&["vector"], Index::Auto).execute().await {
+                let error =
+                    anyhow::Error::new(error).context("failed to create LanceDB vector index");
+                if can_skip_vector_index_build(&error) {
+                    tracing::info!(
+                        ?error,
+                        "skipping LanceDB vector index build because current corpus is too small"
+                    );
+                } else {
+                    return Err(error);
+                }
+            }
+        }
+        self.created_table = false;
         self.index_dirty = false;
+        self.dirty_chunk_count = 0;
+        self.dirty_delete_count = 0;
         Ok(())
     }
+}
+
+fn can_skip_vector_index_build(error: &anyhow::Error) -> bool {
+    error.chain().any(|source| {
+        let message = source.to_string();
+        message.contains("Not enough rows to train PQ")
+            || (message.contains("Requires 256 rows") && message.contains("available"))
+    })
 }
 
 impl RagIndexService {
@@ -655,6 +723,7 @@ impl RagIndexService {
             runtime_inputs: Arc::new(AsyncRwLock::new(None)),
             runtime_status: Arc::new(AsyncRwLock::new(RagRuntimeStatus::default())),
             runtime_generation: Arc::new(AtomicU64::new(0)),
+            storage_lock: Arc::new(AsyncMutex::new(())),
         }
     }
 
@@ -690,15 +759,19 @@ impl RagIndexService {
         let runtime_status = self.runtime_status.clone();
         let runtime_generation = self.runtime_generation.clone();
         let generation = runtime_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let runtime_context = RagRuntimeContext {
+            runtime_status: runtime_status.clone(),
+            runtime_generation: runtime_generation.clone(),
+            storage_lock: self.storage_lock.clone(),
+            generation,
+        };
         let start_mode = classify_rag_runtime_start(previous_inputs.as_ref(), &next_inputs);
         *runtime = Some(tokio::spawn(async move {
             if let Err(error) = run_watch_loop(
                 data_dir,
                 settings,
                 llm_settings,
-                runtime_status.clone(),
-                runtime_generation.clone(),
-                generation,
+                runtime_context,
                 start_mode,
             )
             .await
@@ -720,25 +793,24 @@ impl RagIndexService {
     pub async fn runtime_status(&self) -> RagRuntimeStatus {
         self.runtime_status.read().await.clone()
     }
-}
 
-pub async fn scan_rag_sources(
-    data_dir: &Path,
-    settings: &RagSettings,
-    llm_settings: &LlmSettings,
-) -> Result<RagScanResult> {
-    let resolved = resolve_rag_config(settings, llm_settings)?;
-    let runtime_status = Arc::new(AsyncRwLock::new(RagRuntimeStatus::default()));
-    rebuild_index(data_dir, &resolved, &runtime_status, None).await
+    pub async fn scan_sources(
+        &self,
+        settings: &RagSettings,
+        llm_settings: &LlmSettings,
+    ) -> Result<RagScanResult> {
+        let resolved = resolve_rag_config(settings, llm_settings)?;
+        let runtime_status = Arc::new(AsyncRwLock::new(RagRuntimeStatus::default()));
+        let _storage_guard = self.storage_lock.lock().await;
+        rebuild_index_locked(&self.data_dir, &resolved, &runtime_status, None).await
+    }
 }
 
 async fn run_watch_loop(
     data_dir: PathBuf,
     settings: RagSettings,
     llm_settings: LlmSettings,
-    runtime_status: Arc<AsyncRwLock<RagRuntimeStatus>>,
-    runtime_generation: Arc<AtomicU64>,
-    generation: u64,
+    runtime_context: RagRuntimeContext,
     start_mode: RagRuntimeStartMode,
 ) -> Result<()> {
     let database_path = rag_database_path(&data_dir);
@@ -750,9 +822,9 @@ async fn run_watch_loop(
                 clear_index(&database_path).await?;
                 clear_metadata_store(&metadata_path).await?;
                 set_runtime_status_for_generation(
-                    &runtime_status,
-                    &runtime_generation,
-                    generation,
+                    &runtime_context.runtime_status,
+                    &runtime_context.runtime_generation,
+                    runtime_context.generation,
                     RagRuntimePhase::Idle,
                     RuntimeProgress::default(),
                     None,
@@ -761,9 +833,9 @@ async fn run_watch_loop(
                 return Ok(());
             }
             set_runtime_status_for_generation(
-                &runtime_status,
-                &runtime_generation,
-                generation,
+                &runtime_context.runtime_status,
+                &runtime_context.runtime_generation,
+                runtime_context.generation,
                 RagRuntimePhase::Error,
                 RuntimeProgress::default(),
                 Some(error.to_string()),
@@ -777,8 +849,12 @@ async fn run_watch_loop(
         &data_dir,
         &metadata_path,
         &resolved,
-        &runtime_status,
-        Some((&runtime_generation, generation)),
+        &runtime_context.runtime_status,
+        Some((
+            &runtime_context.runtime_generation,
+            runtime_context.generation,
+        )),
+        &runtime_context.storage_lock,
         start_mode,
     )
     .await?;
@@ -818,16 +894,20 @@ async fn run_watch_loop(
         if let Err(error) = process_event_batch(
             &data_dir,
             &resolved,
-            &runtime_status,
-            Some((&runtime_generation, generation)),
+            &runtime_context.runtime_status,
+            Some((
+                &runtime_context.runtime_generation,
+                runtime_context.generation,
+            )),
+            &runtime_context.storage_lock,
             events,
         )
         .await
         {
             set_runtime_status_for_generation(
-                &runtime_status,
-                &runtime_generation,
-                generation,
+                &runtime_context.runtime_status,
+                &runtime_context.runtime_generation,
+                runtime_context.generation,
                 RagRuntimePhase::Error,
                 RuntimeProgress::default(),
                 Some(error.to_string()),
@@ -851,8 +931,10 @@ async fn process_event_batch(
     resolved: &ResolvedRagConfig,
     runtime_status: &Arc<AsyncRwLock<RagRuntimeStatus>>,
     runtime_guard: Option<(&Arc<AtomicU64>, u64)>,
+    storage_lock: &Arc<AsyncMutex<()>>,
     events: Vec<notify::Result<Event>>,
 ) -> Result<()> {
+    let _storage_guard = storage_lock.lock().await;
     let database_path = rag_database_path(data_dir);
     let metadata_path = rag_metadata_database_path(data_dir);
     let mut full_rescan = false;
@@ -867,7 +949,7 @@ async fn process_event_batch(
             }
         };
 
-        if matches!(event.kind, EventKind::Access(_)) {
+        if should_ignore_event_for_indexing(&event) {
             continue;
         }
 
@@ -892,7 +974,7 @@ async fn process_event_batch(
     }
 
     if full_rescan {
-        rebuild_index(data_dir, resolved, runtime_status, runtime_guard).await?;
+        rebuild_index_locked(data_dir, resolved, runtime_status, runtime_guard).await?;
         return Ok(());
     }
 
@@ -973,6 +1055,11 @@ async fn process_event_batch(
 fn should_force_full_rescan_for_event(event: &Event) -> bool {
     matches!(event.kind, EventKind::Any)
         || (matches!(event.kind, EventKind::Other) && event.paths.is_empty())
+}
+
+fn should_ignore_event_for_indexing(event: &Event) -> bool {
+    matches!(event.kind, EventKind::Access(_))
+        || matches!(event.kind, EventKind::Modify(ModifyKind::Metadata(_)))
 }
 
 fn should_force_full_rescan_for_existing_directory(kind: EventKind) -> bool {
@@ -1122,10 +1209,12 @@ async fn initialize_runtime_storage(
     resolved: &ResolvedRagConfig,
     runtime_status: &Arc<AsyncRwLock<RagRuntimeStatus>>,
     runtime_guard: Option<(&Arc<AtomicU64>, u64)>,
+    storage_lock: &Arc<AsyncMutex<()>>,
     start_mode: RagRuntimeStartMode,
 ) -> Result<()> {
     if start_mode == RagRuntimeStartMode::RebuildIndex {
-        rebuild_index(data_dir, resolved, runtime_status, runtime_guard).await?;
+        let _storage_guard = storage_lock.lock().await;
+        rebuild_index_locked(data_dir, resolved, runtime_status, runtime_guard).await?;
         return Ok(());
     }
 
@@ -1144,11 +1233,12 @@ async fn initialize_runtime_storage(
         return Ok(());
     }
 
-    rebuild_index(data_dir, resolved, runtime_status, runtime_guard).await?;
+    let _storage_guard = storage_lock.lock().await;
+    rebuild_index_locked(data_dir, resolved, runtime_status, runtime_guard).await?;
     Ok(())
 }
 
-async fn rebuild_index(
+async fn rebuild_index_locked(
     data_dir: &Path,
     resolved: &ResolvedRagConfig,
     runtime_status: &Arc<AsyncRwLock<RagRuntimeStatus>>,
@@ -1209,9 +1299,9 @@ async fn rebuild_index(
             &mut pending_files,
             &semaphore,
             &metadata_path,
-            &database_path,
             resolved,
             &client,
+            &vector_store,
         )
         .await?;
 
@@ -1467,9 +1557,9 @@ async fn spawn_streaming_reindex_tasks(
     pending_files: &mut VecDeque<PreparedRagFile>,
     semaphore: &Arc<Semaphore>,
     metadata_path: &Path,
-    database_path: &Path,
     resolved: &ResolvedRagConfig,
-    client: &Client,
+    client: &HttpClient,
+    vector_store: &RagVectorStore,
 ) -> Result<()> {
     while let Some(file) = pending_files.pop_front() {
         let Ok(permit) = semaphore.clone().try_acquire_owned() else {
@@ -1482,12 +1572,12 @@ async fn spawn_streaming_reindex_tasks(
             "failed to join streamed RAG metadata stage task",
         )
         .await?;
-        let database_path = database_path.to_path_buf();
         let resolved = resolved.clone();
         let client = client.clone();
+        let vector_store = vector_store.clone();
         join_set.spawn(async move {
             let _permit = permit;
-            index_prepared_file(&database_path, &resolved, &client, file).await
+            index_prepared_file(&resolved, &client, &vector_store, file).await
         });
     }
 
@@ -1685,7 +1775,7 @@ async fn reindex_prepared_file(
     vector_store: &mut RagVectorStore,
     metadata_path: &Path,
     resolved: &ResolvedRagConfig,
-    client: &Client,
+    client: &HttpClient,
     file: &PreparedRagFile,
 ) -> Result<()> {
     let indexed = index_prepared_file_for_store(vector_store, resolved, client, file).await?;
@@ -1693,19 +1783,18 @@ async fn reindex_prepared_file(
 }
 
 async fn index_prepared_file(
-    database_path: &Path,
     resolved: &ResolvedRagConfig,
-    client: &Client,
+    client: &HttpClient,
+    vector_store: &RagVectorStore,
     file: PreparedRagFile,
 ) -> Result<IndexedPreparedFile> {
-    let vector_store = RagVectorStore::open(database_path).await?;
-    build_indexed_file_output(resolved, client, &vector_store, file).await
+    build_indexed_file_output(resolved, client, vector_store, file).await
 }
 
 async fn index_prepared_file_for_store(
     vector_store: &RagVectorStore,
     resolved: &ResolvedRagConfig,
-    client: &Client,
+    client: &HttpClient,
     file: &PreparedRagFile,
 ) -> Result<IndexedPreparedFile> {
     build_indexed_file_output(resolved, client, vector_store, file.clone()).await
@@ -1713,7 +1802,7 @@ async fn index_prepared_file_for_store(
 
 async fn build_indexed_file_output(
     resolved: &ResolvedRagConfig,
-    client: &Client,
+    client: &HttpClient,
     vector_store: &RagVectorStore,
     file: PreparedRagFile,
 ) -> Result<IndexedPreparedFile> {
@@ -1788,7 +1877,7 @@ async fn persist_indexed_file(
 
 async fn resolve_chunk_vectors(
     resolved: &ResolvedRagConfig,
-    client: &Client,
+    client: &HttpClient,
     vector_store: &RagVectorStore,
     chunks: &[RagChunk],
     reusable_vectors: &HashMap<String, Vec<f32>>,
@@ -1885,8 +1974,8 @@ async fn clear_metadata_store(metadata_path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn build_embedding_client() -> Result<Client> {
-    Client::builder()
+pub(crate) fn build_embedding_client() -> Result<HttpClient> {
+    HttpClient::builder()
         .timeout(EMBEDDING_REQUEST_TIMEOUT)
         .build()
         .context("failed to build embedding HTTP client")
@@ -1999,7 +2088,7 @@ fn inspect_path_for_index(
     if should_skip_path(source_root, path, resolved.ignore_globs.as_ref().as_ref()) {
         return Ok(InspectPathOutcome::Skip);
     }
-    if !is_supported_text_file(path) {
+    if !is_supported_document_file(path) {
         return Ok(InspectPathOutcome::Skip);
     }
 
@@ -2051,13 +2140,9 @@ fn inspect_path_for_index(
 
     let bytes =
         std::fs::read(path).with_context(|| format!("failed to read file: {}", path.display()))?;
-    if bytes.contains(&0) {
-        return Ok(InspectPathOutcome::Skip);
-    }
     let content_md5 = format!("{:x}", md5::compute(&bytes));
 
-    let text = String::from_utf8(bytes)
-        .with_context(|| format!("file is not valid UTF-8 text: {}", path.display()))?;
+    let text = extract_document_text_from_bytes(path, &bytes)?;
 
     if let Some(stored_record) = stored_record {
         if same_index_target
@@ -2153,11 +2238,14 @@ fn split_text_for_path(
     capacity: usize,
     overlap: usize,
 ) -> Result<Vec<PreparedRagChunk>> {
-    let layout = build_text_layout(text, is_markdown_text_file(path));
-    if is_markdown_text_file(path) {
-        return build_chunks_from_offsets(
-            MarkdownSplitter::new(build_chunk_config(capacity, overlap)?).chunk_char_indices(text),
+    let layout = build_text_layout(text, uses_markdown_chunking(path));
+    if uses_markdown_chunking(path) {
+        return split_markdown_text(
+            text,
             &layout,
+            MARKDOWN_CHUNK_TARGET_CHARS,
+            MARKDOWN_CHUNK_HARD_MAX_CHARS,
+            MARKDOWN_CHUNK_OVERLAP_CHARS,
         );
     }
 
@@ -2175,28 +2263,354 @@ fn build_chunks_from_offsets<'text>(
         .enumerate()
         .filter(|(_, chunk)| !chunk.chunk.is_empty())
         .map(|(chunk_index, chunk)| {
-            let start_line_index = line_index_for_offset(layout, chunk.byte_offset);
-            let end_offset = chunk
-                .byte_offset
-                .saturating_add(chunk.chunk.len())
-                .saturating_sub(1);
-            let end_line_index = line_index_for_offset(layout, end_offset);
-            let chunk_metadata = resolve_chunk_metadata(layout, start_line_index, end_line_index)?;
-
-            Ok(PreparedRagChunk {
-                chunk_index: i32::try_from(chunk_index).context("chunk index exceeds i32 range")?,
-                line_start: i32::try_from(start_line_index + 1)
-                    .context("chunk start line exceeds i32 range")?,
-                line_end: i32::try_from(end_line_index + 1)
-                    .context("chunk end line exceeds i32 range")?,
-                paragraph_line_start: i32::try_from(chunk_metadata.paragraph_start_line_index + 1)
-                    .context("paragraph start line exceeds i32 range")?,
-                chunk_reuse_key: chunk_reuse_key(chunk.chunk, &chunk_metadata.heading_path),
-                heading_path: chunk_metadata.heading_path,
-                text: chunk.chunk.to_string(),
-            })
+            build_chunk_from_byte_range(
+                layout,
+                chunk_index,
+                chunk.byte_offset,
+                chunk.byte_offset.saturating_add(chunk.chunk.len()),
+                chunk.chunk,
+            )
         })
         .collect()
+}
+
+fn build_chunk_from_byte_range(
+    layout: &TextLayout,
+    chunk_index: usize,
+    start_byte: usize,
+    end_byte: usize,
+    text: &str,
+) -> Result<PreparedRagChunk> {
+    let start_line_index = line_index_for_offset(layout, start_byte);
+    let end_offset = end_byte.saturating_sub(1);
+    let end_line_index = line_index_for_offset(layout, end_offset);
+    let chunk_metadata = resolve_chunk_metadata(layout, start_line_index, end_line_index)?;
+
+    Ok(PreparedRagChunk {
+        chunk_index: i32::try_from(chunk_index).context("chunk index exceeds i32 range")?,
+        line_start: i32::try_from(start_line_index + 1)
+            .context("chunk start line exceeds i32 range")?,
+        line_end: i32::try_from(end_line_index + 1).context("chunk end line exceeds i32 range")?,
+        paragraph_line_start: i32::try_from(chunk_metadata.paragraph_start_line_index + 1)
+            .context("paragraph start line exceeds i32 range")?,
+        chunk_reuse_key: chunk_reuse_key(text, &chunk_metadata.heading_path),
+        heading_path: chunk_metadata.heading_path,
+        text: text.to_string(),
+    })
+}
+
+fn split_markdown_text(
+    text: &str,
+    layout: &TextLayout,
+    target_chars: usize,
+    hard_max_chars: usize,
+    overlap_chars: usize,
+) -> Result<Vec<PreparedRagChunk>> {
+    let semantic_blocks = collect_markdown_semantic_blocks(layout)?;
+    if semantic_blocks.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let ranges = pack_markdown_blocks(
+        text,
+        &semantic_blocks,
+        target_chars,
+        hard_max_chars,
+        overlap_chars,
+    )?;
+
+    ranges
+        .into_iter()
+        .enumerate()
+        .map(|(chunk_index, range)| {
+            let chunk_text = &text[range.start_byte..range.end_byte];
+            build_chunk_from_byte_range(
+                layout,
+                chunk_index,
+                range.start_byte,
+                range.end_byte,
+                chunk_text,
+            )
+        })
+        .collect()
+}
+
+fn collect_markdown_semantic_blocks(layout: &TextLayout) -> Result<Vec<SemanticBlock>> {
+    let mut blocks = Vec::new();
+    let mut line_index = 0usize;
+
+    while line_index < layout.lines.len() {
+        if layout.lines[line_index].content.trim().is_empty() {
+            line_index += 1;
+            continue;
+        }
+
+        let trimmed = layout.lines[line_index].content.trim();
+        let end_line_index = if let Some(fence) = parse_markdown_fence(trimmed) {
+            find_markdown_fence_end(layout, line_index, fence)
+        } else if parse_atx_heading(trimmed).is_some() {
+            line_index
+        } else if parse_setext_heading(&layout.lines, line_index).is_some() {
+            line_index
+                .saturating_add(1)
+                .min(layout.lines.len().saturating_sub(1))
+        } else if parse_markdown_list_item(trimmed).is_some() {
+            find_list_item_end(layout, line_index)
+        } else {
+            find_paragraph_end(layout, line_index)
+        };
+
+        blocks.push(build_semantic_block(layout, line_index, end_line_index)?);
+        line_index = end_line_index.saturating_add(1);
+    }
+
+    Ok(blocks)
+}
+
+fn build_semantic_block(
+    layout: &TextLayout,
+    start_line_index: usize,
+    end_line_index: usize,
+) -> Result<SemanticBlock> {
+    let metadata = resolve_chunk_metadata(layout, start_line_index, end_line_index)?;
+    let start_byte = layout
+        .lines
+        .get(start_line_index)
+        .map(|line| line.start_byte)
+        .context("missing semantic block start line")?;
+    let end_byte = layout
+        .lines
+        .get(end_line_index)
+        .map(|line| line.end_byte)
+        .context("missing semantic block end line")?;
+
+    Ok(SemanticBlock {
+        start_byte,
+        end_byte,
+        char_count: semantic_block_char_count(layout, start_line_index, end_line_index),
+        heading_path: metadata.heading_path,
+    })
+}
+
+fn semantic_block_char_count(
+    layout: &TextLayout,
+    start_line_index: usize,
+    end_line_index: usize,
+) -> usize {
+    layout.lines[start_line_index..=end_line_index]
+        .iter()
+        .map(|line| {
+            line.content.chars().count().saturating_add(
+                line.end_byte
+                    .saturating_sub(line.start_byte)
+                    .saturating_sub(line.content.len()),
+            )
+        })
+        .sum()
+}
+
+fn pack_markdown_blocks(
+    text: &str,
+    blocks: &[SemanticBlock],
+    target_chars: usize,
+    hard_max_chars: usize,
+    overlap_chars: usize,
+) -> Result<Vec<ChunkByteRange>> {
+    let mut ranges = Vec::new();
+    let mut start_index = 0usize;
+
+    while start_index < blocks.len() {
+        let block = &blocks[start_index];
+        if block.char_count > hard_max_chars {
+            ranges.extend(split_oversized_markdown_block(
+                text,
+                block,
+                hard_max_chars,
+                overlap_chars,
+            )?);
+            start_index += 1;
+            continue;
+        }
+
+        let mut end_index = start_index;
+        let heading_path = &block.heading_path;
+        while end_index + 1 < blocks.len() {
+            let next_block = &blocks[end_index + 1];
+            if next_block.char_count > hard_max_chars || next_block.heading_path != *heading_path {
+                break;
+            }
+
+            let candidate_chars =
+                markdown_range_char_count(text, blocks, start_index, end_index + 1);
+            if candidate_chars > hard_max_chars {
+                break;
+            }
+
+            end_index += 1;
+            if candidate_chars >= target_chars {
+                break;
+            }
+        }
+
+        ranges.push(ChunkByteRange {
+            start_byte: blocks[start_index].start_byte,
+            end_byte: blocks[end_index].end_byte,
+        });
+
+        if end_index + 1 >= blocks.len() {
+            break;
+        }
+
+        let next_index = end_index + 1;
+        if blocks[next_index].heading_path == *heading_path {
+            start_index =
+                markdown_overlap_start_index(text, blocks, start_index, end_index, overlap_chars);
+        } else {
+            start_index = next_index;
+        }
+    }
+
+    Ok(ranges)
+}
+
+fn split_oversized_markdown_block(
+    text: &str,
+    block: &SemanticBlock,
+    hard_max_chars: usize,
+    overlap_chars: usize,
+) -> Result<Vec<ChunkByteRange>> {
+    let block_text = &text[block.start_byte..block.end_byte];
+    let splitter = MarkdownSplitter::new(build_chunk_config(hard_max_chars, overlap_chars)?);
+
+    Ok(splitter
+        .chunk_char_indices(block_text)
+        .filter(|chunk| !chunk.chunk.is_empty())
+        .map(|chunk| ChunkByteRange {
+            start_byte: block.start_byte.saturating_add(chunk.byte_offset),
+            end_byte: block
+                .start_byte
+                .saturating_add(chunk.byte_offset)
+                .saturating_add(chunk.chunk.len()),
+        })
+        .collect())
+}
+
+fn markdown_overlap_start_index(
+    text: &str,
+    blocks: &[SemanticBlock],
+    current_start: usize,
+    current_end: usize,
+    overlap_chars: usize,
+) -> usize {
+    if overlap_chars == 0 {
+        return current_end.saturating_add(1);
+    }
+
+    let mut overlap_start = current_end;
+    while overlap_start > current_start
+        && blocks[overlap_start - 1].heading_path == blocks[current_end].heading_path
+    {
+        let overlap_char_count = markdown_byte_range_char_count(
+            text,
+            blocks[overlap_start - 1].start_byte,
+            blocks[current_end].end_byte,
+        );
+        overlap_start -= 1;
+        if overlap_char_count >= overlap_chars {
+            break;
+        }
+    }
+
+    overlap_start.max(current_start.saturating_add(1))
+}
+
+fn markdown_range_char_count(
+    text: &str,
+    blocks: &[SemanticBlock],
+    start_index: usize,
+    end_index: usize,
+) -> usize {
+    markdown_byte_range_char_count(
+        text,
+        blocks[start_index].start_byte,
+        blocks[end_index].end_byte,
+    )
+}
+
+fn markdown_byte_range_char_count(text: &str, start_byte: usize, end_byte: usize) -> usize {
+    text[start_byte..end_byte].chars().count()
+}
+
+fn find_markdown_fence_end(
+    layout: &TextLayout,
+    start_line_index: usize,
+    fence: MarkdownFence,
+) -> usize {
+    for line_index in start_line_index.saturating_add(1)..layout.lines.len() {
+        if is_markdown_fence_close(layout.lines[line_index].content.trim(), fence) {
+            return line_index;
+        }
+    }
+
+    layout.lines.len().saturating_sub(1)
+}
+
+fn find_list_item_end(layout: &TextLayout, start_line_index: usize) -> usize {
+    let mut end_line_index = start_line_index;
+
+    for line_index in start_line_index.saturating_add(1)..layout.lines.len() {
+        let trimmed = layout.lines[line_index].content.trim();
+        if trimmed.is_empty()
+            || parse_atx_heading(trimmed).is_some()
+            || parse_setext_heading(&layout.lines, line_index).is_some()
+            || parse_markdown_fence(trimmed).is_some()
+            || parse_markdown_list_item(trimmed).is_some()
+        {
+            break;
+        }
+        end_line_index = line_index;
+    }
+
+    end_line_index
+}
+
+fn find_paragraph_end(layout: &TextLayout, start_line_index: usize) -> usize {
+    let mut end_line_index = start_line_index;
+
+    for line_index in start_line_index.saturating_add(1)..layout.lines.len() {
+        let trimmed = layout.lines[line_index].content.trim();
+        if trimmed.is_empty()
+            || parse_atx_heading(trimmed).is_some()
+            || parse_setext_heading(&layout.lines, line_index).is_some()
+            || parse_markdown_fence(trimmed).is_some()
+            || parse_markdown_list_item(trimmed).is_some()
+        {
+            break;
+        }
+        end_line_index = line_index;
+    }
+
+    end_line_index
+}
+
+fn parse_markdown_list_item(trimmed_line: &str) -> Option<()> {
+    if ["- ", "* ", "+ "]
+        .iter()
+        .any(|marker| trimmed_line.starts_with(marker))
+    {
+        return Some(());
+    }
+
+    let digit_count = trimmed_line
+        .chars()
+        .take_while(|char| char.is_ascii_digit())
+        .count();
+    if digit_count == 0 {
+        return None;
+    }
+
+    let rest = &trimmed_line[digit_count..];
+    (rest.starts_with(". ") || rest.starts_with(") ")).then_some(())
 }
 
 fn resolve_chunk_metadata(
@@ -2495,28 +2909,6 @@ fn should_skip_path(root: &Path, path: &Path, ignore_matcher: Option<&GlobSet>) 
     ignore_matcher.is_match(&relative) || ignore_matcher.is_match(&absolute)
 }
 
-fn is_supported_text_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| {
-            SUPPORTED_TEXT_FILE_EXTENSIONS
-                .iter()
-                .any(|supported| extension.eq_ignore_ascii_case(supported))
-        })
-        .unwrap_or(false)
-}
-
-fn is_markdown_text_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| {
-            MARKDOWN_TEXT_FILE_EXTENSIONS
-                .iter()
-                .any(|supported| extension.eq_ignore_ascii_case(supported))
-        })
-        .unwrap_or(false)
-}
-
 fn make_chunk_version_id(path: &Path) -> String {
     let path_hash = format!("{:x}", md5::compute(normalize_path_string(path)));
     format!("{:x}-{path_hash}", now_unix_ms().max(0))
@@ -2532,7 +2924,7 @@ fn text_fingerprint(text: &str) -> String {
 }
 
 pub(crate) async fn request_embeddings(
-    client: &Client,
+    client: &HttpClient,
     provider: &LlmProviderConfig,
     inputs: &[String],
 ) -> Result<Vec<Vec<f32>>> {
@@ -2541,7 +2933,7 @@ pub(crate) async fn request_embeddings(
 }
 
 async fn request_embeddings_with_stats(
-    client: &Client,
+    client: &HttpClient,
     provider: &LlmProviderConfig,
     inputs: &[String],
 ) -> Result<(Vec<Vec<f32>>, EmbeddingRequestStats)> {
@@ -2605,40 +2997,27 @@ async fn request_embeddings_with_stats(
 }
 
 async fn request_embeddings_batch(
-    client: &Client,
+    client: &HttpClient,
     provider: &LlmProviderConfig,
     inputs: &[String],
 ) -> Result<Vec<Vec<f32>>> {
-    let base_url = normalize_base_url(&provider.base_url, "embedding provider base URL")?;
-    let mut request = client
-        .post(format!("{base_url}/embeddings"))
-        .json(&EmbeddingRequest {
-            model: provider.model_name(),
-            input: inputs,
-        });
-    let api_key = provider.api_key.trim();
-    if !api_key.is_empty() {
-        request = request.bearer_auth(api_key);
-    }
-
-    let response = request
-        .send()
-        .await
-        .context("failed to request embeddings from provider")?;
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .context("failed to read embedding response body")?;
-
-    if !status.is_success() {
-        let message = extract_provider_error_message(&body);
-        anyhow::bail!("embedding provider request failed ({status}): {message}");
-    }
-
-    let parsed: EmbeddingResponse =
-        serde_json::from_value(parse_json_payload(&body, "embedding response JSON")?)
-            .context("failed to parse embedding response JSON")?;
+    let client = OpenAiCompatibleClient::new_async(
+        client,
+        &provider.base_url,
+        &provider.api_key,
+        "embedding provider base URL",
+    )?;
+    let parsed: EmbeddingResponse = client
+        .post_json(
+            "/embeddings",
+            &EmbeddingRequest {
+                model: provider.model_name(),
+                input: inputs,
+            },
+            "embeddings from provider",
+            crate::infrastructure::openai_compatible::OpenAiCompatibleResponseFormat::Json,
+        )
+        .await?;
     Ok(parsed.data.into_iter().map(|item| item.embedding).collect())
 }
 
@@ -3808,11 +4187,14 @@ impl PathStartsWithAny for Path {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Cursor, Write};
+
     use super::*;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
     };
+    use zip::{write::SimpleFileOptions, ZipWriter};
 
     fn temp_test_root(label: &str) -> PathBuf {
         let unique = SystemTime::now()
@@ -3820,6 +4202,30 @@ mod tests {
             .expect("system clock before unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("wabity-rag-{label}-{unique}"))
+    }
+
+    fn build_test_docx(document_xml: &str, styles_xml: Option<&str>) -> Vec<u8> {
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(cursor);
+        let options = SimpleFileOptions::default();
+
+        writer
+            .start_file("word/document.xml", options)
+            .expect("start document.xml");
+        writer
+            .write_all(document_xml.as_bytes())
+            .expect("write document.xml");
+
+        if let Some(styles_xml) = styles_xml {
+            writer
+                .start_file("word/styles.xml", options)
+                .expect("start styles.xml");
+            writer
+                .write_all(styles_xml.as_bytes())
+                .expect("write styles.xml");
+        }
+
+        writer.finish().expect("finish docx writer").into_inner()
     }
 
     fn test_embedding_provider() -> LlmProviderConfig {
@@ -4107,33 +4513,31 @@ mod tests {
     }
 
     #[test]
-    fn supported_rag_text_extensions_are_case_insensitive() {
-        assert!(is_supported_text_file(Path::new("/tmp/README.MD")));
-        assert!(is_supported_text_file(Path::new("/tmp/notes.mdx")));
-        assert!(is_supported_text_file(Path::new("/tmp/plain.txt")));
-        assert!(!is_supported_text_file(Path::new("/tmp/config.toml")));
-        assert!(!is_supported_text_file(Path::new("/tmp/README")));
+    fn supported_rag_document_extensions_are_case_insensitive() {
+        assert!(is_supported_document_file(Path::new("/tmp/README.MD")));
+        assert!(is_supported_document_file(Path::new("/tmp/notes.mdx")));
+        assert!(is_supported_document_file(Path::new("/tmp/plain.txt")));
+        assert!(is_supported_document_file(Path::new("/tmp/spec.DOCX")));
+        assert!(!is_supported_document_file(Path::new("/tmp/config.toml")));
+        assert!(!is_supported_document_file(Path::new("/tmp/README")));
     }
 
     #[test]
-    fn markdown_files_route_to_markdown_splitter() {
-        let text = "# Heading\n\nParagraph one.\n\n## Next\n\nParagraph two.";
-        let expected = MarkdownSplitter::new(build_chunk_config(24, 0).expect("valid config"))
-            .chunks(text)
-            .map(str::to_owned)
-            .collect::<Vec<_>>();
-
+    fn markdown_files_are_packed_by_semantic_blocks() {
+        let text = "# Heading\n\n- First note.\n\n- Second note.\n\n- Third note.\n\n## Next\n\nParagraph two.";
         let chunks = split_text_for_path(Path::new("/tmp/readme.md"), text, 24, 0)
             .expect("markdown split should succeed");
 
-        assert_eq!(
-            chunks
-                .iter()
-                .map(|chunk| chunk.text.clone())
-                .collect::<Vec<_>>(),
-            expected
-        );
+        assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].heading_path, vec!["Heading".to_string()]);
+        assert!(chunks[0].text.contains("First note."));
+        assert!(chunks[0].text.contains("Second note."));
+        assert!(chunks[0].text.contains("Third note."));
+        assert_eq!(
+            chunks[1].heading_path,
+            vec!["Heading".to_string(), "Next".to_string()]
+        );
+        assert!(chunks[1].text.contains("Paragraph two."));
     }
 
     #[test]
@@ -4194,6 +4598,19 @@ mod tests {
     }
 
     #[test]
+    fn oversized_markdown_blocks_fall_back_to_markdown_splitter() {
+        let text = format!("# Heading\n\n- {}\n", "alpha ".repeat(180));
+        let chunks = split_text_for_path(Path::new("/tmp/readme.md"), &text, 24, 0)
+            .expect("markdown split should succeed");
+
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|chunk| {
+            chunk.heading_path == vec!["Heading".to_string()]
+                && chunk.text.chars().count() <= MARKDOWN_CHUNK_HARD_MAX_CHARS
+        }));
+    }
+
+    #[test]
     fn collect_chunks_for_path_skips_unsupported_extension() {
         let root = temp_test_root("unsupported-extension");
         let file_path = root.join("notes.toml");
@@ -4230,6 +4647,42 @@ mod tests {
 
         assert!(!chunks.is_empty());
         assert!(chunks.len() > 1);
+
+        let _ = std::fs::remove_file(&file_path);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn collect_chunks_for_path_supports_docx_files() {
+        let root = temp_test_root("docx-file");
+        let file_path = root.join("notes.docx");
+        let document_xml = r#"
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:body>
+                <w:p>
+                  <w:pPr><w:pStyle w:val="Heading1"/></w:pPr>
+                  <w:r><w:t>Architecture</w:t></w:r>
+                </w:p>
+                <w:p>
+                  <w:r><w:t>Alpha paragraph.</w:t></w:r>
+                </w:p>
+              </w:body>
+            </w:document>
+        "#;
+        std::fs::create_dir_all(&root).expect("create rag temp root");
+        std::fs::write(&file_path, build_test_docx(document_xml, None)).expect("write docx");
+
+        let resolved = test_resolved_config(&root);
+        let chunks = collect_chunks_for_path(&resolved, &file_path)
+            .expect("collect docx chunks should work");
+
+        assert!(!chunks.is_empty());
+        assert!(chunks
+            .iter()
+            .any(|chunk| chunk.heading_path == vec!["Architecture".to_string()]));
+        assert!(chunks
+            .iter()
+            .any(|chunk| chunk.text.contains("Alpha paragraph.")));
 
         let _ = std::fs::remove_file(&file_path);
         let _ = std::fs::remove_dir_all(&root);
@@ -4514,6 +4967,23 @@ mod tests {
     }
 
     #[test]
+    fn watcher_metadata_event_is_ignored_for_indexing() {
+        let metadata_event = Event {
+            kind: EventKind::Modify(ModifyKind::Metadata(notify::event::MetadataKind::WriteTime)),
+            paths: vec![PathBuf::from("/tmp/docs/a.md")],
+            attrs: Default::default(),
+        };
+        let data_event = Event {
+            kind: EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Any)),
+            paths: vec![PathBuf::from("/tmp/docs/a.md")],
+            attrs: Default::default(),
+        };
+
+        assert!(should_ignore_event_for_indexing(&metadata_event));
+        assert!(!should_ignore_event_for_indexing(&data_event));
+    }
+
+    #[test]
     fn rag_runtime_start_reuses_index_when_effective_inputs_do_not_change() {
         let previous = test_runtime_inputs(Some("rag-provider"), &[("rag-provider", "model-a")]);
         let same_model_different_unrelated_provider = test_runtime_inputs(
@@ -4757,6 +5227,12 @@ mod tests {
 
         let runtime_status = Arc::new(AsyncRwLock::new(RagRuntimeStatus::default()));
         let runtime_generation = Arc::new(AtomicU64::new(0));
+        let runtime_context = RagRuntimeContext {
+            runtime_status: runtime_status.clone(),
+            runtime_generation: runtime_generation.clone(),
+            storage_lock: Arc::new(AsyncMutex::new(())),
+            generation: 1,
+        };
         let error = run_watch_loop(
             root.clone(),
             RagSettings {
@@ -4777,9 +5253,7 @@ mod tests {
                 }],
                 ..LlmSettings::default()
             },
-            runtime_status,
-            runtime_generation,
-            1,
+            runtime_context,
             RagRuntimeStartMode::ReuseIndex,
         )
         .await
@@ -5175,6 +5649,39 @@ mod tests {
         assert_eq!(planner.next_batch_end(&inputs, 0), 2);
         assert_eq!(planner.next_batch_end(&inputs, 2), 3);
         assert_eq!(planner.next_batch_end(&inputs, 3), 4);
+    }
+
+    #[tokio::test]
+    async fn vector_index_policy_skips_small_incremental_batches() {
+        let root = temp_test_root("vector-index-policy-small");
+        std::fs::create_dir_all(&root).expect("create vector policy root");
+        let mut vector_store = RagVectorStore::open(&root)
+            .await
+            .expect("open vector store");
+
+        vector_store.mark_index_dirty_for_chunks(VECTOR_INDEX_REBUILD_MIN_DIRTY_CHUNKS - 1);
+        vector_store.mark_index_dirty_for_delete();
+
+        assert!(vector_store.index_dirty);
+        assert!(!vector_store.should_rebuild_index());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn vector_index_policy_rebuilds_new_table_immediately() {
+        let root = temp_test_root("vector-index-policy-created-table");
+        std::fs::create_dir_all(&root).expect("create vector policy root");
+        let mut vector_store = RagVectorStore::open(&root)
+            .await
+            .expect("open vector store");
+
+        vector_store.created_table = true;
+        vector_store.mark_index_dirty_for_chunks(1);
+
+        assert!(vector_store.should_rebuild_index());
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
@@ -5627,6 +6134,36 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn markdown_list_notes_split_under_same_heading() {
+        let bullet = "- 甲富而乙贫，并不是因为甲有马，乙却步行，而是因为甲富能备有马车，乙贫不能不步行。\n\n";
+        let text = format!(
+            "# 国富论\n\n{}{}{}{}{}{}{}{}{}{}{}{}",
+            bullet,
+            bullet,
+            bullet,
+            bullet,
+            bullet,
+            bullet,
+            bullet,
+            bullet,
+            bullet,
+            bullet,
+            bullet,
+            bullet
+        );
+        let chunks = split_text_for_path(Path::new("/tmp/readme.md"), &text, 1_200, 200)
+            .expect("markdown split should succeed");
+
+        assert!(chunks.len() > 1);
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.heading_path == vec!["国富论".to_string()]));
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.text.chars().count() <= MARKDOWN_CHUNK_HARD_MAX_CHARS));
+    }
+
     #[tokio::test]
     async fn request_embeddings_retries_timed_out_batch_with_smaller_inputs() {
         let listener = TcpListener::bind("127.0.0.1:0")
@@ -5676,7 +6213,7 @@ mod tests {
             }
         });
 
-        let client = Client::builder()
+        let client = HttpClient::builder()
             .timeout(Duration::from_millis(40))
             .build()
             .expect("build short-timeout client");
@@ -5700,6 +6237,15 @@ mod tests {
         assert_eq!(stats.largest_successful_batch_size, 1);
         assert!(stats.had_to_split());
         server.await.expect("server task should complete");
+    }
+
+    #[test]
+    fn small_corpus_vector_index_failure_is_treated_as_skippable() {
+        let error = anyhow::anyhow!(
+            "failed to create LanceDB vector index: Not enough rows to train PQ. Requires 256 rows but only 2 available"
+        );
+
+        assert!(can_skip_vector_index_build(&error));
     }
 
     #[tokio::test]

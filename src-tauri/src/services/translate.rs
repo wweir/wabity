@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use reqwest::blocking::Client;
+use reqwest::blocking::Client as BlockingHttpClient;
 use serde_json::{json, Value};
 
 use crate::domain::{
@@ -9,8 +9,8 @@ use crate::domain::{
     settings::{LlmProviderConfig, LlmProviderProtocol, LlmSettings, PromptsSettings},
 };
 use crate::infrastructure::openai_compatible::{
-    extract_chat_completions_text, extract_provider_error_message, extract_responses_text,
-    normalize_base_url, parse_json_or_sse_payload, parse_json_payload,
+    describe_chat_completions_response_issue, extract_chat_completions_text,
+    extract_responses_text, OpenAiCompatibleClient, OpenAiCompatibleResponseFormat,
 };
 
 const TRANSLATE_COMMAND_ALIASES: [&str; 3] = ["/translate", "/fy", "/tr"];
@@ -32,48 +32,29 @@ pub fn execute_translation(
     }
 
     let provider = resolve_translation_provider(llm_settings)?;
-    let base_url = normalize_base_url(&provider.base_url, "LLM provider base URL")?;
-    let api_key = provider.api_key.trim();
     let model = provider
         .llm_model_name()
         .context("翻译使用的 LLM 模型不能为空")?;
     let protocol = translation_protocol(provider);
 
-    let client = Client::builder()
+    let http_client = BlockingHttpClient::builder()
         .timeout(Duration::from_secs(45))
         .build()
         .context("failed to build HTTP client for translation")?;
+    let client = OpenAiCompatibleClient::new_blocking(
+        &http_client,
+        &provider.base_url,
+        &provider.api_key,
+        "LLM provider base URL",
+    )?;
 
-    let (translated, used_protocol) = match request_translation(
+    let (translated, used_protocol) = request_translation(
         protocol,
         &client,
-        &base_url,
-        api_key,
         model,
         &prompts_settings.translation_prompt,
         payload,
-    ) {
-        Ok(result) => result,
-        Err(primary_error) => {
-            let fallback_protocol = alternate_translation_protocol(protocol);
-            if !should_retry_with_protocol(protocol, &primary_error) {
-                return Err(primary_error);
-            }
-
-            match request_translation(
-                fallback_protocol,
-                &client,
-                &base_url,
-                api_key,
-                model,
-                &prompts_settings.translation_prompt,
-                payload,
-            ) {
-                Ok(result) => result,
-                Err(_) => return Err(primary_error),
-            }
-        }
-    };
+    )?;
 
     Ok(ExecutionResult::success(
         Some(translated),
@@ -158,166 +139,103 @@ fn translation_protocol_label(protocol: TranslationProtocol) -> &'static str {
     }
 }
 
-fn alternate_translation_protocol(protocol: TranslationProtocol) -> TranslationProtocol {
-    match protocol {
-        TranslationProtocol::Responses => TranslationProtocol::ChatCompletions,
-        TranslationProtocol::ChatCompletions => TranslationProtocol::Responses,
-    }
-}
-
 fn request_translation(
     protocol: TranslationProtocol,
-    client: &Client,
-    base_url: &str,
-    api_key: &str,
+    client: &OpenAiCompatibleClient<'_, BlockingHttpClient>,
     model: &str,
     prompt: &str,
     payload: &str,
 ) -> Result<(String, TranslationProtocol)> {
     let translated = match protocol {
-        TranslationProtocol::Responses => {
-            translate_with_responses(client, base_url, api_key, model, prompt, payload)?
-        }
+        TranslationProtocol::Responses => translate_with_responses(client, model, prompt, payload)?,
         TranslationProtocol::ChatCompletions => {
-            translate_with_chat_completions(client, base_url, api_key, model, prompt, payload)?
+            translate_with_chat_completions(client, model, prompt, payload)?
         }
     };
 
     Ok((translated, protocol))
 }
-
-fn should_retry_with_protocol(protocol: TranslationProtocol, error: &anyhow::Error) -> bool {
-    let message = error.to_string().to_ascii_lowercase();
-    match protocol {
-        TranslationProtocol::Responses => {
-            message.contains("route protocol chat")
-                || message.contains("stateless responses requests")
-                || retryable_endpoint_mismatch(&message, "responses")
-        }
-        TranslationProtocol::ChatCompletions => {
-            message.contains("route protocol responses")
-                || (message.contains("chat/completions") && message.contains("does not support"))
-                || retryable_endpoint_mismatch(&message, "chat/completions")
-        }
-    }
-}
-
-fn retryable_endpoint_mismatch(message: &str, endpoint: &str) -> bool {
-    let endpoint_not_available = message.contains(endpoint)
-        && (message.contains("404")
-            || message.contains("405")
-            || message.contains("501")
-            || message.contains("not found")
-            || message.contains("method not allowed")
-            || message.contains("unsupported"));
-    let endpoint_route_missing =
-        message.contains(&format!("/{endpoint}")) && message.contains("not found");
-
-    endpoint_not_available || endpoint_route_missing
-}
-
 fn translate_with_responses(
-    client: &Client,
-    base_url: &str,
-    api_key: &str,
+    client: &OpenAiCompatibleClient<'_, BlockingHttpClient>,
     model: &str,
     prompt: &str,
     payload: &str,
 ) -> Result<String> {
-    let mut request = client.post(format!("{base_url}/responses"));
-    if !api_key.is_empty() {
-        request = request.bearer_auth(api_key);
-    }
-
-    let response = request
-        .json(&json!({
-            "model": model,
-            "input": [
-                {
-                    "role": "system",
-                    "content": [
-                        { "type": "input_text", "text": prompt }
-                    ],
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        { "type": "input_text", "text": payload }
-                    ],
-                },
-            ],
-        }))
-        .send()
-        .context("failed to request translation from responses API")?;
-
-    extract_response_text(
-        response.status(),
-        response
-            .text()
-            .context("failed to read translation response body")?,
-        extract_responses_text,
-        "responses",
-    )
+    let payload: Value = client.post_json(
+        "/responses",
+        &build_responses_translation_request_body(model, prompt, payload),
+        "translation from responses API",
+        OpenAiCompatibleResponseFormat::JsonOrSse,
+    )?;
+    extract_responses_text(&payload).context("LLM provider responses 未返回可识别的译文")
 }
 
 fn translate_with_chat_completions(
-    client: &Client,
-    base_url: &str,
-    api_key: &str,
+    client: &OpenAiCompatibleClient<'_, BlockingHttpClient>,
     model: &str,
     prompt: &str,
     payload: &str,
 ) -> Result<String> {
-    let mut request = client.post(format!("{base_url}/chat/completions"));
-    if !api_key.is_empty() {
-        request = request.bearer_auth(api_key);
-    }
-
-    let response = request
-        .json(&json!({
-            "model": model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": prompt,
-                },
-                {
-                    "role": "user",
-                    "content": payload,
-                },
-            ],
-            "stream": false,
-        }))
-        .send()
-        .context("failed to request translation from chat/completions API")?;
-
-    extract_response_text(
-        response.status(),
-        response
-            .text()
-            .context("failed to read translation response body")?,
-        extract_chat_completions_text,
-        "chat/completions",
-    )
+    let payload: Value = client.post_json(
+        "/chat/completions",
+        &build_chat_completions_translation_request_body(model, prompt, payload),
+        "translation from chat/completions API",
+        OpenAiCompatibleResponseFormat::JsonOrSse,
+    )?;
+    extract_chat_completions_text(&payload).with_context(|| {
+        format!(
+            "LLM provider chat/completions 未返回可识别的译文: {}",
+            describe_chat_completions_response_issue(&payload)
+        )
+    })
 }
 
-fn extract_response_text(
-    status: reqwest::StatusCode,
-    body: String,
-    extractor: fn(&Value) -> Option<String>,
-    endpoint: &str,
-) -> Result<String> {
-    if !status.is_success() {
-        let message = extract_provider_error_message(&body);
-        bail!("LLM provider {endpoint} 请求失败 ({status}): {message}");
-    }
+fn build_responses_translation_request_body(model: &str, prompt: &str, payload: &str) -> Value {
+    json!({
+        "model": model,
+        "stream": true,
+        "thinking": {
+            "type": "disabled",
+        },
+        "input": [
+            {
+                "role": "system",
+                "content": [
+                    { "type": "input_text", "text": prompt }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    { "type": "input_text", "text": payload }
+                ],
+            },
+        ],
+    })
+}
 
-    let payload = if endpoint == "responses" {
-        parse_json_or_sse_payload(&body, "translation response from responses")?
-    } else {
-        parse_json_payload(&body, "translation response from chat/completions")?
-    };
-    extractor(&payload).with_context(|| format!("LLM provider {endpoint} 未返回可识别的译文"))
+fn build_chat_completions_translation_request_body(
+    model: &str,
+    prompt: &str,
+    payload: &str,
+) -> Value {
+    json!({
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": prompt,
+            },
+            {
+                "role": "user",
+                "content": payload,
+            },
+        ],
+        "stream": true,
+        "thinking": {
+            "type": "disabled",
+        },
+    })
 }
 
 fn extract_prefixed_payload<'a>(raw_text: &'a str, aliases: &[&str]) -> Option<&'a str> {
@@ -372,8 +290,8 @@ fn extract_prefixed_payload<'a>(raw_text: &'a str, aliases: &[&str]) -> Option<&
 #[cfg(test)]
 mod tests {
     use super::{
-        alternate_translation_protocol, execute_translation, extract_translate_payload,
-        resolve_translation_provider, should_retry_with_protocol, TranslationProtocol,
+        build_chat_completions_translation_request_body, build_responses_translation_request_body,
+        execute_translation, extract_translate_payload, resolve_translation_provider,
     };
     use crate::domain::settings::{
         default_translation_prompt, LlmModelType, LlmProviderConfig, LlmProviderProtocol,
@@ -527,54 +445,30 @@ mod tests {
     }
 
     #[test]
-    fn protocol_retry_switches_to_other_endpoint() {
+    fn chat_translation_payload_always_disables_thinking_and_uses_stream() {
+        let payload =
+            build_chat_completions_translation_request_body("gpt-4.1-mini", "translate", "hello");
+
         assert_eq!(
-            alternate_translation_protocol(TranslationProtocol::Responses),
-            TranslationProtocol::ChatCompletions
+            payload.get("thinking"),
+            Some(&json!({
+                "type": "disabled",
+            }))
         );
+        assert_eq!(payload.get("stream"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn responses_translation_payload_always_disables_thinking_and_uses_stream() {
+        let payload =
+            build_responses_translation_request_body("gpt-4.1-mini", "translate", "hello");
+
         assert_eq!(
-            alternate_translation_protocol(TranslationProtocol::ChatCompletions),
-            TranslationProtocol::Responses
+            payload.get("thinking"),
+            Some(&json!({
+                "type": "disabled",
+            }))
         );
-    }
-
-    #[test]
-    fn protocol_retry_detects_chat_only_route_mismatch() {
-        let error = anyhow::anyhow!(
-            "LLM provider responses 请求失败 (400 Bad Request): route protocol chat does not support stateless responses requests"
-        );
-        assert!(should_retry_with_protocol(
-            TranslationProtocol::Responses,
-            &error
-        ));
-        assert!(!should_retry_with_protocol(
-            TranslationProtocol::ChatCompletions,
-            &error
-        ));
-    }
-
-    #[test]
-    fn protocol_retry_detects_responses_only_route_mismatch() {
-        let error = anyhow::anyhow!(
-            "LLM provider chat/completions 请求失败 (400 Bad Request): route protocol responses does not support chat/completions requests"
-        );
-        assert!(should_retry_with_protocol(
-            TranslationProtocol::ChatCompletions,
-            &error
-        ));
-        assert!(!should_retry_with_protocol(
-            TranslationProtocol::Responses,
-            &error
-        ));
-    }
-
-    #[test]
-    fn protocol_retry_detects_missing_responses_endpoint_by_status() {
-        let error = anyhow::anyhow!("LLM provider responses 请求失败 (404 Not Found): not found");
-
-        assert!(should_retry_with_protocol(
-            TranslationProtocol::Responses,
-            &error
-        ));
+        assert_eq!(payload.get("stream"), Some(&json!(true)));
     }
 }

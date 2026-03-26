@@ -18,6 +18,7 @@ import type {
 	AcpSessionDetail,
 	AcpSessionSummary,
 	AppSettings,
+	BuiltinLlmProviderTemplate,
 	BuiltinRagMcpServerStatus,
 	LlmProviderConfig,
 	LlmProviderModelEntry,
@@ -67,9 +68,19 @@ export interface OcrTranslationResultEvent {
 	result: ExecutionResult;
 }
 
+export interface OcrCapturedTextEvent {
+	sourceMode: "ocr";
+	sourceText: string;
+}
+
 export interface OcrTranslationStartedEvent {
 	sourceMode: "ocr" | "selection";
 	sourceText: string;
+}
+
+export interface ExecutionProgressEvent {
+	actionId: string;
+	statusText: string;
 }
 
 const browserAppSettings: AppSettings = {
@@ -134,6 +145,294 @@ const browserPublicSkillCatalog: PublicSkillCatalog = {
 	exists: false,
 	skills: [],
 };
+
+const browserBuiltinLlmProviderTemplates: BuiltinLlmProviderTemplate[] = [
+	{
+		id: "zhipu",
+		displayName: "智谱 AI",
+		description: "官方免费模型目录模板。先注册智谱开放平台、创建 API Key，再从白名单里选择模型。",
+		registrationUrl: "https://bigmodel.cn/login?redirect=%2Fusercenter%2Fproj-mgmt%2Fapikeys",
+		apiKeyUrl: "https://bigmodel.cn/login?redirect=%2Fusercenter%2Fproj-mgmt%2Fapikeys",
+		docsUrl: "https://docs.bigmodel.cn/cn/guide/start/quick-start",
+		defaultBaseUrl: "https://open.bigmodel.cn/api/paas/v4",
+		supportsModelListing: true,
+		models: [
+			{
+				id: "glm-4.7-flash",
+				displayName: "GLM-4.7-Flash",
+				model: "glm-4.7-flash",
+				modelType: "llm",
+				protocol: "chat_completions",
+				supportsMultimodal: false,
+				supportsStateful: false,
+				recommendedFor: ["translation", "rag_answer"],
+				summary: "免费文本模型，适合翻译、问答和通用长文本任务。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+			{
+				id: "glm-4.6v-flash",
+				displayName: "GLM-4.6V-Flash",
+				model: "glm-4.6v-flash",
+				modelType: "llm",
+				protocol: "chat_completions",
+				supportsMultimodal: true,
+				supportsStateful: false,
+				recommendedFor: ["translation", "rag_answer"],
+				summary: "免费视觉理解模型，擅长图像、视频和文件理解。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+			{
+				id: "glm-4.1v-thinking-flash",
+				displayName: "GLM-4.1V-Thinking-Flash",
+				model: "glm-4.1v-thinking-flash",
+				modelType: "llm",
+				protocol: "chat_completions",
+				supportsMultimodal: true,
+				supportsStateful: false,
+				recommendedFor: ["translation", "rag_answer"],
+				summary: "免费视觉推理模型，适合图表、GUI 和网页理解场景。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+			{
+				id: "glm-4-flash-250414",
+				displayName: "GLM-4-Flash-250414",
+				model: "glm-4-flash-250414",
+				modelType: "llm",
+				protocol: "chat_completions",
+				supportsMultimodal: false,
+				supportsStateful: false,
+				recommendedFor: ["translation", "rag_answer"],
+				summary: "免费轻量文本模型，适合通用对话、翻译和基础问答。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+			{
+				id: "glm-4v-flash",
+				displayName: "GLM-4V-Flash",
+				model: "glm-4v-flash",
+				modelType: "llm",
+				protocol: "chat_completions",
+				supportsMultimodal: true,
+				supportsStateful: false,
+				recommendedFor: ["translation", "rag_answer"],
+				summary: "免费图像理解模型，适合图像识别、问答和视觉推理。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+			{
+				id: "cogview-3-flash",
+				displayName: "CogView-3-Flash",
+				model: "cogview-3-flash",
+				modelType: "image_generation",
+				protocol: "unsupported",
+				supportsMultimodal: false,
+				supportsStateful: false,
+				recommendedFor: [],
+				summary: "免费图像生成模型，适合根据文本快速生成图片。",
+				selectableInCurrentApp: false,
+				disabledReason: "当前 Wabity 没有图像生成链路，不能当普通 LLM 使用。",
+			},
+			{
+				id: "cogvideox-flash",
+				displayName: "CogVideoX-Flash",
+				model: "cogvideox-flash",
+				modelType: "video_generation",
+				protocol: "unsupported",
+				supportsMultimodal: false,
+				supportsStateful: false,
+				recommendedFor: [],
+				summary: "免费视频生成模型，适合根据文本指令生成短视频。",
+				selectableInCurrentApp: false,
+				disabledReason: "当前 Wabity 没有视频生成链路，不能当普通 LLM 使用。",
+			},
+		],
+	},
+	{
+		id: "siliconflow",
+		displayName: "SiliconFlow",
+		description:
+			"官方免费语言模型目录模板。先注册 SiliconFlow、创建 API Key，再从白名单里选择模型。",
+		registrationUrl: "https://account.siliconflow.cn",
+		apiKeyUrl: "https://cloud.siliconflow.cn/account/ak",
+		docsUrl: "https://docs.siliconflow.cn/cn/api-reference/chat-completions/chat-completions",
+		defaultBaseUrl: "https://api.siliconflow.cn/v1",
+		supportsModelListing: true,
+		models: [
+			{
+				id: "qwen3.5-4b-instruct-2507",
+				displayName: "Qwen3.5-4B-Instruct-2507",
+				model: "Qwen/Qwen3.5-4B-Instruct-2507",
+				modelType: "llm",
+				protocol: "chat_completions",
+				supportsMultimodal: false,
+				supportsStateful: false,
+				recommendedFor: ["translation", "rag_answer"],
+				summary: "免费轻量指令模型，适合低成本翻译、问答和日常文本任务。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+			{
+				id: "paddleocr-vl-1.5",
+				displayName: "PaddleOCR-VL-1.5",
+				model: "PaddlePaddle/PaddleOCR-VL-1.5",
+				modelType: "llm",
+				protocol: "chat_completions",
+				supportsMultimodal: true,
+				supportsStateful: false,
+				recommendedFor: ["rag_answer"],
+				summary: "免费文档理解模型，适合票据、表格和复杂版面 OCR 识别。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+			{
+				id: "deepseek-r1-distill-qwen-7b",
+				displayName: "DeepSeek-R1-Distill-Qwen-7B",
+				model: "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+				modelType: "llm",
+				protocol: "chat_completions",
+				supportsMultimodal: false,
+				supportsStateful: false,
+				recommendedFor: ["translation", "rag_answer"],
+				summary: "免费轻量推理模型，适合分析、问答和需要推理的文本任务。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+			{
+				id: "glm-4.1v-9b-thinking",
+				displayName: "GLM-4.1V-9B-Thinking",
+				model: "THUDM/GLM-4.1V-9B-Thinking",
+				modelType: "llm",
+				protocol: "chat_completions",
+				supportsMultimodal: true,
+				supportsStateful: false,
+				recommendedFor: ["rag_answer"],
+				summary: "免费视觉推理模型，适合图表、截图和复杂图像理解。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+			{
+				id: "paddleocr-vl",
+				displayName: "PaddleOCR-VL",
+				model: "PaddlePaddle/PaddleOCR-VL",
+				modelType: "llm",
+				protocol: "chat_completions",
+				supportsMultimodal: true,
+				supportsStateful: false,
+				recommendedFor: ["rag_answer"],
+				summary: "免费 OCR / 文档解析模型，适合表格、票据和富版面内容提取。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+			{
+				id: "deepseek-ocr",
+				displayName: "DeepSeek-OCR",
+				model: "deepseek-ai/DeepSeek-OCR",
+				modelType: "llm",
+				protocol: "chat_completions",
+				supportsMultimodal: true,
+				supportsStateful: false,
+				recommendedFor: ["rag_answer"],
+				summary: "免费 OCR 模型，适合截图、扫描件和文档文字提取。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+			{
+				id: "qwen3-8b",
+				displayName: "Qwen3-8B",
+				model: "Qwen/Qwen3-8B",
+				modelType: "llm",
+				protocol: "chat_completions",
+				supportsMultimodal: false,
+				supportsStateful: false,
+				recommendedFor: ["translation", "rag_answer"],
+				summary: "免费通用文本模型，适合对话、翻译和基础问答。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+			{
+				id: "hunyuan-mt-7b",
+				displayName: "Hunyuan-MT-7B",
+				model: "tencent/Hunyuan-MT-7B",
+				modelType: "llm",
+				protocol: "chat_completions",
+				supportsMultimodal: false,
+				supportsStateful: false,
+				recommendedFor: ["translation"],
+				summary: "免费机器翻译模型，适合中英文和多语种翻译场景。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+			{
+				id: "deepseek-r1-0528-qwen3-8b",
+				displayName: "DeepSeek-R1-0528-Qwen3-8B",
+				model: "deepseek-ai/DeepSeek-R1-0528-Qwen3-8B",
+				modelType: "llm",
+				protocol: "chat_completions",
+				supportsMultimodal: false,
+				supportsStateful: false,
+				recommendedFor: ["rag_answer"],
+				summary: "免费推理模型，适合复杂问答和需要多步分析的任务。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+			{
+				id: "glm-z1-9b-0414",
+				displayName: "GLM-Z1-9B-0414",
+				model: "THUDM/GLM-Z1-9B-0414",
+				modelType: "llm",
+				protocol: "chat_completions",
+				supportsMultimodal: false,
+				supportsStateful: false,
+				recommendedFor: ["rag_answer"],
+				summary: "免费推理模型，适合代码解释、复杂问答和长链思考。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+			{
+				id: "qwen2.5-7b-instruct",
+				displayName: "Qwen2.5-7B-Instruct",
+				model: "Qwen/Qwen2.5-7B-Instruct",
+				modelType: "llm",
+				protocol: "chat_completions",
+				supportsMultimodal: false,
+				supportsStateful: false,
+				recommendedFor: ["translation", "rag_answer"],
+				summary: "免费通用指令模型，适合日常问答、改写和轻量生成。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+			{
+				id: "glm-4-9b-0414",
+				displayName: "GLM-4-9B-0414",
+				model: "THUDM/GLM-4-9B-0414",
+				modelType: "llm",
+				protocol: "chat_completions",
+				supportsMultimodal: false,
+				supportsStateful: false,
+				recommendedFor: ["translation", "rag_answer"],
+				summary: "免费通用文本模型，适合对话、翻译和基础知识问答。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+			{
+				id: "internlm2-5-7b-chat",
+				displayName: "internlm2_5-7b-chat",
+				model: "internlm/internlm2_5-7b-chat",
+				modelType: "llm",
+				protocol: "chat_completions",
+				supportsMultimodal: false,
+				supportsStateful: false,
+				recommendedFor: ["translation", "rag_answer"],
+				summary: "免费聊天模型，适合日常问答和轻量文本生成。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+		],
+	},
+];
 
 const browserWorkspaceState: WorkspaceState = {
 	rootPath: "/",
@@ -273,6 +572,16 @@ export async function endTransientWindowInteraction(): Promise<void> {
 	return invokeIfDesktop("end_transient_window_interaction");
 }
 
+export async function armLauncherBlurAutoHideSuppression(durationMs: number): Promise<void> {
+	return invokeIfDesktop("arm_launcher_blur_auto_hide_suppression", {
+		durationMs: Math.max(1, Math.ceil(durationMs)),
+	});
+}
+
+export async function setLauncherBlurAutoHideEnabled(enabled: boolean): Promise<void> {
+	return invokeIfDesktop("set_launcher_blur_auto_hide_enabled", { enabled });
+}
+
 let lastLauncherWindowSize: { width: number; height: number } | null = null;
 
 export async function resizeLauncherWindow(size: { width: number; height: number }): Promise<void> {
@@ -295,8 +604,10 @@ export async function resizeLauncherWindow(size: { width: number; height: number
 	await invokeDesktop<void>("resize_launcher_window", { width: nextWidth, height: nextHeight });
 }
 
-export async function onSelectedText(callback: (text: string) => void): Promise<UnlistenFn | null> {
-	return listenIfDesktop("selected-text", callback);
+export async function onOcrCapturedText(
+	callback: (payload: OcrCapturedTextEvent) => void,
+): Promise<UnlistenFn | null> {
+	return listenIfDesktop("ocr-captured-text", callback);
 }
 
 export async function onOcrError(callback: (message: string) => void): Promise<UnlistenFn | null> {
@@ -313,6 +624,12 @@ export async function onOcrTranslationStarted(
 	callback: (payload: OcrTranslationStartedEvent) => void,
 ): Promise<UnlistenFn | null> {
 	return listenIfDesktop("ocr-translation-started", callback);
+}
+
+export async function onExecutionProgress(
+	callback: (payload: ExecutionProgressEvent) => void,
+): Promise<UnlistenFn | null> {
+	return listenIfDesktop("execution-progress", callback);
 }
 
 // Shortcut configuration
@@ -346,6 +663,10 @@ export async function listLlmProviderModels(
 	provider: LlmProviderConfig,
 ): Promise<LlmProviderModelEntry[]> {
 	return invokeOrDefault("list_llm_provider_models", [], { provider });
+}
+
+export async function listBuiltinLlmProviderTemplates(): Promise<BuiltinLlmProviderTemplate[]> {
+	return invokeOrDefault("list_builtin_llm_provider_templates", browserBuiltinLlmProviderTemplates);
 }
 
 export async function scanRagSources(

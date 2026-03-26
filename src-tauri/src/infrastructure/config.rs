@@ -10,8 +10,8 @@ use crate::domain::acp::{
     AcpMcpServerStdioConfig, AcpNameValuePair,
 };
 use crate::domain::settings::{
-    AppearanceSettings, GeneralSettings, LlmModelType, LlmProviderConfig, LlmProviderProtocol,
-    LlmSettings, OcrSettings, PromptsSettings, RagSettings,
+    fixed_rag_ignore_globs, AppearanceSettings, GeneralSettings, LlmModelType, LlmProviderConfig,
+    LlmProviderProtocol, LlmSettings, OcrSettings, PromptsSettings, RagSettings,
 };
 
 const CONFIG_FILE_NAME: &str = "config.toml";
@@ -576,12 +576,21 @@ impl RagSettings {
             .collect();
 
         let mut seen_globs = HashSet::new();
-        self.ignore_globs = self
+        let extra_ignore_globs = self
             .ignore_globs
             .iter()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .filter(|value| seen_globs.insert(value.clone()))
+            .collect::<Vec<_>>();
+        self.ignore_globs = fixed_rag_ignore_globs()
+            .iter()
+            .map(|pattern| pattern.to_string())
+            .chain(
+                extra_ignore_globs
+                    .into_iter()
+                    .filter(|pattern| !fixed_rag_ignore_globs().contains(&pattern.as_str())),
+            )
             .collect();
 
         let resolved_provider_id = self
@@ -1160,6 +1169,7 @@ mod tests {
                 }],
             }),
         ];
+        config.normalize();
         let content = serialize_config_content(&config).expect("toml serialization should succeed");
         let parsed = parse_config_content(&content).expect("toml parsing should succeed");
 
@@ -1450,7 +1460,10 @@ embeddingProviderId = "combo"
         );
         assert_eq!(
             config.rag.ignore_globs,
-            vec!["**/*.png".to_string(), "**/node_modules/**".to_string()]
+            crate::domain::settings::default_rag_ignore_globs()
+                .into_iter()
+                .chain(["**/*.png".to_string()])
+                .collect::<Vec<_>>()
         );
         assert_eq!(
             config.rag.embedding_provider_id.as_deref(),
@@ -1470,6 +1483,22 @@ sourceDirectories = ["/tmp/docs"]
         assert_eq!(
             parsed.rag.ignore_globs,
             crate::domain::settings::default_rag_ignore_globs()
+        );
+    }
+
+    #[test]
+    fn normalize_rag_settings_reinserts_fixed_ignore_globs_when_user_removed_them() {
+        let mut config = AppConfig::default();
+        config.rag.ignore_globs = vec!["**/*.png".to_string()];
+
+        config.normalize();
+
+        assert_eq!(
+            config.rag.ignore_globs,
+            crate::domain::settings::default_rag_ignore_globs()
+                .into_iter()
+                .chain(["**/*.png".to_string()])
+                .collect::<Vec<_>>()
         );
     }
 }

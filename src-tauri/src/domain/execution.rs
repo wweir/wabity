@@ -105,6 +105,13 @@ pub struct ExecutionResult {
     pub should_close_launcher: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionProgressEvent {
+    pub action_id: String,
+    pub status_text: String,
+}
+
 impl ExecutionResult {
     pub fn success(
         primary_text: Option<String>,

@@ -8,8 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::domain::settings::LlmProviderConfig;
 use crate::infrastructure::openai_compatible::{
-    extract_provider_error_message, extract_responses_text, normalize_base_url,
-    parse_json_or_sse_payload,
+    extract_responses_text, normalize_base_url, OpenAiCompatibleClient,
+    OpenAiCompatibleResponseFormat,
 };
 
 const OPENAI_COMPATIBLE_OCR_PROMPT: &str =
@@ -163,10 +163,15 @@ pub fn capture_interactive_screenshot() -> Result<Option<PathBuf>> {
             .metadata()
             .map(|metadata| metadata.len() > 0)
             .unwrap_or(false);
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
 
     if output.status.success() {
         if screenshot_exists {
             return Ok(Some(output_path));
+        }
+
+        if is_interactive_screenshot_cancelled(&stderr) {
+            return Ok(None);
         }
 
         bail!("screencapture exited successfully but did not write an image");
@@ -176,8 +181,7 @@ pub fn capture_interactive_screenshot() -> Result<Option<PathBuf>> {
         return Ok(Some(output_path));
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stderr.is_empty() {
+    if is_interactive_screenshot_cancelled(&stderr) {
         return Ok(None);
     }
 
@@ -191,6 +195,13 @@ fn next_screenshot_path() -> PathBuf {
         .unwrap_or(0);
 
     std::env::temp_dir().join(format!("wabity-ocr-{timestamp_ms}.png"))
+}
+
+fn is_interactive_screenshot_cancelled(stderr: &str) -> bool {
+    let normalized = stderr.trim().to_ascii_lowercase();
+    normalized.is_empty()
+        || normalized.contains("cancel")
+        || normalized.contains("selection is empty")
 }
 
 fn aggregate_text(blocks: &[OcrTextBlock]) -> String {
@@ -255,6 +266,31 @@ fn recognize_with_openai_compatible(
     request: &OcrRequest,
 ) -> Result<OcrResult> {
     let image_path = Path::new(&request.image_path);
+    let image_data_url = encode_image_path_as_data_url(image_path)?;
+    let request_body = build_openai_compatible_ocr_request_body(model, &image_data_url);
+    let client = OpenAiCompatibleClient::new_blocking(
+        client,
+        base_url,
+        api_key,
+        "OpenAI-compatible base URL",
+    )?;
+
+    tracing::debug!(
+        model,
+        image_path = %image_path.display(),
+        "sending OCR image to OpenAI-compatible multimodal model"
+    );
+
+    let parsed: Value = client.post_json(
+        "/responses",
+        &request_body,
+        "OCR request to OpenAI-compatible endpoint",
+        OpenAiCompatibleResponseFormat::JsonOrSse,
+    )?;
+    Ok(map_openai_compatible_response_to_result(parsed))
+}
+
+fn encode_image_path_as_data_url(image_path: &Path) -> Result<String> {
     if !image_path.is_file() {
         bail!(
             "ocr image path does not exist or is not a file: {}",
@@ -269,50 +305,31 @@ fn recognize_with_openai_compatible(
         )
     })?;
     let mime_type = infer_image_mime_type(image_path);
-    let image_data_url = format!(
+    Ok(format!(
         "data:{mime_type};base64,{}",
         BASE64_STANDARD.encode(image_bytes)
-    );
+    ))
+}
 
-    let mut request_builder = client.post(format!("{base_url}/responses"));
-    if !api_key.is_empty() {
-        request_builder = request_builder.bearer_auth(api_key);
-    }
-
-    let response = request_builder
-        .json(&json!({
-            "model": model,
-            "input": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": OPENAI_COMPATIBLE_OCR_PROMPT,
-                        },
-                        {
-                            "type": "input_image",
-                            "image_url": image_data_url,
-                        }
-                    ],
-                }
-            ],
-        }))
-        .send()
-        .context("failed to send OCR request to OpenAI-compatible endpoint")?;
-    let status = response.status();
-    let body = response
-        .text()
-        .context("failed to read OpenAI-compatible OCR response body")?;
-
-    if !status.is_success() {
-        let message = extract_provider_error_message(&body);
-        bail!("OpenAI-compatible OCR request failed with status {status}: {message}");
-    }
-
-    let parsed = parse_json_or_sse_payload(&body, "OpenAI-compatible OCR response body")
-        .context("failed to parse OpenAI-compatible OCR response JSON")?;
-    Ok(map_openai_compatible_response_to_result(parsed))
+fn build_openai_compatible_ocr_request_body(model: &str, image_data_url: &str) -> Value {
+    json!({
+        "model": model,
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": OPENAI_COMPATIBLE_OCR_PROMPT,
+                    },
+                    {
+                        "type": "input_image",
+                        "image_url": image_data_url,
+                    }
+                ],
+            }
+        ],
+    })
 }
 
 fn infer_image_mime_type(path: &Path) -> &'static str {
@@ -462,12 +479,26 @@ pub fn remove_screenshot_file(path: &Path) {
 mod tests {
     use super::{
         aggregate_text, average_confidence, block_for_focus_point,
-        map_openai_compatible_response_to_result, OcrBoundingBox, OcrPoint, OcrTextBlock,
+        build_openai_compatible_ocr_request_body, encode_image_path_as_data_url,
+        is_interactive_screenshot_cancelled, map_openai_compatible_response_to_result,
+        OcrBoundingBox, OcrPoint, OcrProvider, OcrRequest, OcrTextBlock,
+        OpenAiCompatibleOcrProvider, OPENAI_COMPATIBLE_OCR_PROMPT,
     };
     use crate::infrastructure::openai_compatible::{
         extract_provider_error_message, normalize_base_url,
     };
+    use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
     use serde_json::json;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+        thread,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
+
+    static NEXT_TEMP_IMAGE_ID: AtomicU64 = AtomicU64::new(0);
 
     fn block(text: &str, x: f32, y: f32, width: f32, height: f32) -> OcrTextBlock {
         OcrTextBlock {
@@ -515,6 +546,20 @@ mod tests {
     }
 
     #[test]
+    fn interactive_screenshot_does_not_treat_rect_failure_as_cancelled() {
+        assert!(!is_interactive_screenshot_cancelled(
+            "could not create image from rect"
+        ));
+    }
+
+    #[test]
+    fn interactive_screenshot_cancel_detection_is_case_insensitive() {
+        assert!(is_interactive_screenshot_cancelled(
+            "User CANCELED screenshot"
+        ));
+    }
+
+    #[test]
     fn normalize_base_url_trims_trailing_slash() {
         let normalized = normalize_base_url(
             " https://api.openai.example.com/v1/ ",
@@ -557,11 +602,168 @@ mod tests {
     }
 
     #[test]
+    fn encode_image_path_as_data_url_uses_file_extension_and_base64_body() {
+        let image_bytes = b"\x89PNG\r\n\x1a\nwabity";
+        let image_path = write_temp_image_file("png", image_bytes);
+
+        let data_url = encode_image_path_as_data_url(&image_path).unwrap();
+
+        assert_eq!(
+            data_url,
+            format!(
+                "data:image/png;base64,{}",
+                BASE64_STANDARD.encode(image_bytes)
+            )
+        );
+
+        std::fs::remove_file(image_path).unwrap();
+    }
+
+    #[test]
+    fn build_openai_compatible_ocr_request_body_includes_builtin_prompt_and_image() {
+        let request_body = build_openai_compatible_ocr_request_body(
+            "vision-model",
+            "data:image/png;base64,abc123",
+        );
+
+        assert_eq!(request_body["model"], "vision-model");
+        assert_eq!(
+            request_body["input"][0]["content"][0],
+            json!({
+                "type": "input_text",
+                "text": OPENAI_COMPATIBLE_OCR_PROMPT,
+            })
+        );
+        assert_eq!(
+            request_body["input"][0]["content"][1],
+            json!({
+                "type": "input_image",
+                "image_url": "data:image/png;base64,abc123",
+            })
+        );
+    }
+
+    #[test]
+    fn openai_compatible_ocr_provider_posts_image_and_prompt_to_responses_api() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let image_bytes = b"\x89PNG\r\n\x1a\nwabity llm ocr";
+        let image_path = write_temp_image_file("png", image_bytes);
+
+        let server_thread = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+
+            let mut buffer = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let body = loop {
+                let bytes_read = stream.read(&mut chunk).unwrap();
+                if bytes_read == 0 {
+                    panic!("client closed before request body was fully received");
+                }
+                buffer.extend_from_slice(&chunk[..bytes_read]);
+
+                let Some(header_end) = find_header_end(&buffer) else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&buffer[..header_end]);
+                let content_length = parse_content_length(&headers).unwrap();
+                let body_start = header_end + 4;
+                while buffer.len() < body_start + content_length {
+                    let bytes_read = stream.read(&mut chunk).unwrap();
+                    if bytes_read == 0 {
+                        panic!("client closed before request body was fully received");
+                    }
+                    buffer.extend_from_slice(&chunk[..bytes_read]);
+                }
+
+                break String::from_utf8(buffer[body_start..body_start + content_length].to_vec())
+                    .unwrap();
+            };
+
+            let response_body = json!({
+                "output_text": "captured text"
+            })
+            .to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            body
+        });
+
+        let provider =
+            OpenAiCompatibleOcrProvider::new(format!("http://{address}"), "", "vision-model")
+                .unwrap();
+
+        let result = provider
+            .recognize(&OcrRequest {
+                image_path: image_path.to_string_lossy().into_owned(),
+                focus_point: None,
+            })
+            .unwrap();
+
+        assert_eq!(result.text, "captured text");
+
+        let request_body: serde_json::Value =
+            serde_json::from_str(&server_thread.join().unwrap()).unwrap();
+        let content = request_body["input"][0]["content"].as_array().unwrap();
+
+        assert_eq!(request_body["model"], "vision-model");
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(content[0]["text"], OPENAI_COMPATIBLE_OCR_PROMPT);
+        assert_eq!(content[1]["type"], "input_image");
+        assert_eq!(
+            content[1]["image_url"],
+            format!(
+                "data:image/png;base64,{}",
+                BASE64_STANDARD.encode(image_bytes)
+            )
+        );
+
+        std::fs::remove_file(image_path).unwrap();
+    }
+
+    #[test]
     fn extract_openai_compatible_error_prefers_message_field() {
         let message = extract_provider_error_message(
             r#"{"error":{"message":"provider rejected image input"}}"#,
         );
 
         assert_eq!(message, "provider rejected image input");
+    }
+
+    fn write_temp_image_file(extension: &str, bytes: &[u8]) -> PathBuf {
+        let timestamp_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let unique_id = NEXT_TEMP_IMAGE_ID.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "wabity-ocr-test-{timestamp_ns}-{}-{unique_id}.{}",
+            std::process::id(),
+            extension
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    fn find_header_end(buffer: &[u8]) -> Option<usize> {
+        buffer.windows(4).position(|window| window == b"\r\n\r\n")
+    }
+
+    fn parse_content_length(headers: &str) -> Option<usize> {
+        headers.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            if !name.eq_ignore_ascii_case("content-length") {
+                return None;
+            }
+
+            value.trim().parse::<usize>().ok()
+        })
     }
 }

@@ -1,12 +1,13 @@
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
 
 use anyhow::{bail, Context, Result};
 use futures::future::join_all;
-use reqwest::Client;
+use reqwest::Client as HttpClient;
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::fs;
@@ -16,17 +17,19 @@ use crate::{
         acp::{AcpActionEvent, AcpMcpServerConfig, AcpNameValuePair},
         execution::{
             ExecutionCitation, ExecutionConversationRole, ExecutionConversationState,
-            ExecutionConversationTurn, ExecutionResult, ExecutionToolCall,
+            ExecutionConversationTurn, ExecutionProgressEvent, ExecutionResult, ExecutionToolCall,
         },
         settings::{
             LlmProviderConfig, LlmProviderProtocol, LlmSettings, PromptsSettings, RagSettings,
         },
     },
     infrastructure::openai_compatible::{
-        extract_provider_error_message, extract_responses_text, extract_text_content,
-        normalize_base_url, parse_json_or_sse_payload, parse_json_payload,
+        describe_chat_completions_response_issue, extract_chat_completions_message_parts,
+        extract_responses_text, normalize_base_url, OpenAiCompatibleClient,
+        OpenAiCompatibleResponseFormat,
     },
     services::{
+        document_extract::load_readable_document_text,
         rag,
         rag_query::{self, RagSearchHit},
     },
@@ -39,8 +42,11 @@ const MAX_TOOL_ROUNDS: usize = 8;
 const MAX_READ_FILE_LINES: usize = 240;
 const MAX_READ_FILE_BYTES: u64 = 512 * 1024;
 const DEFAULT_RAG_TOOL_TOP_K: usize = 6;
-const DEFAULT_RAG_TOOL_MIN_SCORE: f32 = 0.2;
+const DEFAULT_RAG_TOOL_MIN_SCORE: f32 = 0.35;
 const CITATION_SNIPPET_MAX_CHARS: usize = 240;
+static RESPONSES_TOOL_COMPATIBILITY_CACHE: OnceLock<
+    Mutex<HashMap<String, ResponsesToolCompatibilityMode>>,
+> = OnceLock::new();
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,6 +55,7 @@ struct RagAnswerPayload {
     render: &'static str,
     response_id: Option<String>,
     conversation_state: ExecutionConversationState,
+    reasoning: Option<String>,
     citations: Vec<ExecutionCitation>,
     retrieval: RagRetrievalPayload,
     actions: Vec<AcpActionEvent>,
@@ -95,12 +102,13 @@ struct McpToolCallTrace {
     output_detail: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct QuestionToolRuntime<'a> {
     data_dir: &'a Path,
     workspace_root: &'a Path,
     rag_settings: &'a RagSettings,
     llm_settings: &'a LlmSettings,
+    progress_event_tx: Option<Arc<dyn Fn(ExecutionProgressEvent) + Send + Sync>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -134,6 +142,13 @@ enum QuestionAnswerProtocol {
     ChatCompletions,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ResponsesToolCompatibilityMode {
+    Full,
+    NoMcp,
+    NoTools,
+}
+
 pub struct QuestionAnswerRequest<'a> {
     pub data_dir: &'a Path,
     pub workspace_root: &'a Path,
@@ -144,6 +159,7 @@ pub struct QuestionAnswerRequest<'a> {
     pub rag_settings: &'a RagSettings,
     pub llm_settings: &'a LlmSettings,
     pub mcp_servers: &'a [AcpMcpServerConfig],
+    pub progress_event_tx: Option<Arc<dyn Fn(ExecutionProgressEvent) + Send + Sync>>,
 }
 
 struct PreparedConversationState<'a> {
@@ -157,8 +173,13 @@ pub async fn answer_question(request: QuestionAnswerRequest<'_>) -> Result<Execu
         bail!("请输入要提问的内容");
     }
 
+    emit_question_progress(
+        request.progress_event_tx.as_ref(),
+        "文档问答 · 正在检查模型与工具配置",
+    );
+
     let provider = resolve_answer_provider(request.llm_settings)?;
-    let client = Client::builder()
+    let client = HttpClient::builder()
         .timeout(Duration::from_secs(90))
         .build()
         .context("failed to build HTTP client for question answering")?;
@@ -180,6 +201,7 @@ pub async fn answer_question(request: QuestionAnswerRequest<'_>) -> Result<Execu
         workspace_root: request.workspace_root,
         rag_settings: request.rag_settings,
         llm_settings: request.llm_settings,
+        progress_event_tx: request.progress_event_tx.clone(),
     };
     let execution = QuestionAnswerExecutionContext {
         provider,
@@ -195,18 +217,7 @@ pub async fn answer_question(request: QuestionAnswerRequest<'_>) -> Result<Execu
         mcp_servers: request.mcp_servers,
     };
     let initial_protocol = answer_protocol(provider);
-    let (answer, protocol, tool_catalog) = match request_answer(initial_protocol, &execution).await
-    {
-        Ok(answer) => answer,
-        Err(primary_error) => {
-            let fallback_protocol = alternate_answer_protocol(initial_protocol);
-            if !should_retry_answer_with_protocol(initial_protocol, &primary_error) {
-                return Err(primary_error);
-            }
-
-            request_answer(fallback_protocol, &execution).await?
-        }
-    };
+    let (answer, protocol, tool_catalog) = request_answer(initial_protocol, &execution).await?;
 
     let citations = deduplicate_and_number_citations(answer.citations);
     let retrieval = RagRetrievalPayload {
@@ -256,6 +267,7 @@ pub async fn answer_question(request: QuestionAnswerRequest<'_>) -> Result<Execu
                 &answer.actions,
                 &answer.tool_calls,
             ),
+            reasoning: answer.reasoning,
             citations,
             retrieval,
             tools: RagToolUsagePayload {
@@ -272,7 +284,7 @@ pub async fn answer_question(request: QuestionAnswerRequest<'_>) -> Result<Execu
 
 struct QuestionAnswerExecutionContext<'a> {
     provider: &'a LlmProviderConfig,
-    client: &'a Client,
+    client: &'a HttpClient,
     base_url: &'a str,
     api_key: &'a str,
     model: &'a str,
@@ -289,9 +301,20 @@ async fn request_answer(
     context: &QuestionAnswerExecutionContext<'_>,
 ) -> Result<(AnswerOutcome, QuestionAnswerProtocol, ToolCatalog)> {
     let tool_catalog = build_tool_catalog(context.mcp_servers, protocol);
-    let answer = match protocol {
+    emit_question_progress(
+        context.runtime.progress_event_tx.as_ref(),
+        match protocol {
+            QuestionAnswerProtocol::Responses => {
+                "文档问答 · 已建立 responses 链路，正在等待模型规划"
+            }
+            QuestionAnswerProtocol::ChatCompletions => {
+                "文档问答 · 已建立 chat/completions 链路，正在等待模型规划"
+            }
+        },
+    );
+    let (answer, effective_tool_catalog) = match protocol {
         QuestionAnswerProtocol::Responses => {
-            answer_with_responses(ResponsesAnswerRequest {
+            let (answer, effective_tool_catalog) = answer_with_responses(ResponsesAnswerRequest {
                 client: context.client,
                 base_url: context.base_url,
                 api_key: context.api_key,
@@ -304,9 +327,10 @@ async fn request_answer(
                 question: context.question,
                 runtime: context.runtime,
             })
-            .await?
+            .await?;
+            (answer, effective_tool_catalog)
         }
-        QuestionAnswerProtocol::ChatCompletions => {
+        QuestionAnswerProtocol::ChatCompletions => (
             answer_with_chat_completions(ChatCompletionsAnswerRequest {
                 client: context.client,
                 base_url: context.base_url,
@@ -319,15 +343,17 @@ async fn request_answer(
                 question: context.question,
                 runtime: context.runtime,
             })
-            .await?
-        }
+            .await?,
+            tool_catalog.clone(),
+        ),
     };
 
-    Ok((answer, protocol, tool_catalog))
+    Ok((answer, protocol, effective_tool_catalog))
 }
 
 struct AnswerOutcome {
     final_answer: String,
+    reasoning: Option<String>,
     response_id: Option<String>,
     citations: Vec<ExecutionCitation>,
     tool_calls: Vec<ExecutionToolCall>,
@@ -335,7 +361,7 @@ struct AnswerOutcome {
 }
 
 struct ResponsesAnswerRequest<'a> {
-    client: &'a Client,
+    client: &'a HttpClient,
     base_url: &'a str,
     api_key: &'a str,
     model: &'a str,
@@ -349,7 +375,7 @@ struct ResponsesAnswerRequest<'a> {
 }
 
 struct ChatCompletionsAnswerRequest<'a> {
-    client: &'a Client,
+    client: &'a HttpClient,
     base_url: &'a str,
     api_key: &'a str,
     model: &'a str,
@@ -361,11 +387,24 @@ struct ChatCompletionsAnswerRequest<'a> {
     runtime: &'a QuestionToolRuntime<'a>,
 }
 
-async fn answer_with_responses(request: ResponsesAnswerRequest<'_>) -> Result<AnswerOutcome> {
+async fn answer_with_responses(
+    request: ResponsesAnswerRequest<'_>,
+) -> Result<(AnswerOutcome, ToolCatalog)> {
     let initial_previous_response_id =
         previous_response_id_for_follow_up(request.conversation_state, request.supports_stateful);
     let continue_previous_response = initial_previous_response_id.is_some();
     let mut previous_response_id = initial_previous_response_id;
+    let mcp_free_tool_catalog = tool_catalog_without_mcp_tools(request.tool_catalog);
+    let tool_free_tool_catalog = tool_catalog_without_all_tools(request.tool_catalog);
+    let compatibility_cache_key =
+        responses_tool_compatibility_cache_key(request.base_url, request.model);
+    let mut compatibility_mode = load_cached_responses_tool_compatibility(&compatibility_cache_key);
+    let mut disabled_mcp_tools_for_compat = matches!(
+        compatibility_mode,
+        ResponsesToolCompatibilityMode::NoMcp | ResponsesToolCompatibilityMode::NoTools
+    );
+    let mut disabled_all_tools_for_compat =
+        matches!(compatibility_mode, ResponsesToolCompatibilityMode::NoTools);
     let mut pending_input = json!(build_initial_responses_input(
         request.conversation,
         request.question,
@@ -387,13 +426,28 @@ async fn answer_with_responses(request: ResponsesAnswerRequest<'_>) -> Result<An
 
     let final_answer = loop {
         round += 1;
+        emit_question_progress(
+            request.runtime.progress_event_tx.as_ref(),
+            if round == 1 {
+                "文档问答 · 正在等待模型首轮响应"
+            } else {
+                "文档问答 · 正在等待模型继续分析"
+            },
+        );
+        let active_tool_catalog = if disabled_all_tools_for_compat {
+            &tool_free_tool_catalog
+        } else if disabled_mcp_tools_for_compat {
+            &mcp_free_tool_catalog
+        } else {
+            request.tool_catalog
+        };
         let response = match request_responses_turn(ResponsesTurnRequest {
             client: request.client,
             base_url: request.base_url,
             api_key: request.api_key,
             model: request.model,
             instructions: request.system_prompt,
-            tool_catalog: request.tool_catalog,
+            tool_catalog: active_tool_catalog,
             previous_response_id: previous_response_id.as_deref(),
             input: pending_input.clone(),
         })
@@ -413,6 +467,48 @@ async fn answer_with_responses(request: ResponsesAnswerRequest<'_>) -> Result<An
                     request.question,
                     false,
                 ));
+                round = round.saturating_sub(1);
+                continue;
+            }
+            Err(error)
+                if should_retry_without_mcp_tools(
+                    disabled_all_tools_for_compat,
+                    disabled_mcp_tools_for_compat,
+                    active_tool_catalog,
+                    &error,
+                ) =>
+            {
+                disabled_mcp_tools_for_compat = true;
+                compatibility_mode = ResponsesToolCompatibilityMode::NoMcp;
+                store_cached_responses_tool_compatibility(
+                    &compatibility_cache_key,
+                    compatibility_mode,
+                );
+                emit_question_progress(
+                    request.runtime.progress_event_tx.as_ref(),
+                    "文档问答 · 当前 provider 不兼容 MCP tools，已回退到内置工具重试",
+                );
+                round = round.saturating_sub(1);
+                continue;
+            }
+            Err(error)
+                if should_retry_without_all_tools(
+                    disabled_all_tools_for_compat,
+                    active_tool_catalog,
+                    &error,
+                ) =>
+            {
+                disabled_all_tools_for_compat = true;
+                disabled_mcp_tools_for_compat = true;
+                compatibility_mode = ResponsesToolCompatibilityMode::NoTools;
+                store_cached_responses_tool_compatibility(
+                    &compatibility_cache_key,
+                    compatibility_mode,
+                );
+                emit_question_progress(
+                    request.runtime.progress_event_tx.as_ref(),
+                    "文档问答 · 当前 provider 不兼容 function tools，已回退到无工具请求",
+                );
                 round = round.saturating_sub(1);
                 continue;
             }
@@ -446,6 +542,13 @@ async fn answer_with_responses(request: ResponsesAnswerRequest<'_>) -> Result<An
             });
         }
 
+        if !mcp_calls.is_empty() {
+            emit_question_progress(
+                request.runtime.progress_event_tx.as_ref(),
+                "文档问答 · 模型正在调用外部工具",
+            );
+        }
+
         for (index, call) in mcp_calls.iter().enumerate() {
             tool_calls.push(call.trace.clone());
             let correlation_id = call
@@ -470,6 +573,10 @@ async fn answer_with_responses(request: ResponsesAnswerRequest<'_>) -> Result<An
         }
 
         if local_calls.is_empty() {
+            emit_question_progress(
+                request.runtime.progress_event_tx.as_ref(),
+                "文档问答 · 工具结果已收敛，正在整理最终回答",
+            );
             break extract_responses_text(&response)
                 .context("LLM provider responses 未返回可识别的回答")?;
         }
@@ -477,6 +584,11 @@ async fn answer_with_responses(request: ResponsesAnswerRequest<'_>) -> Result<An
         if tool_calls.len() + local_calls.len() > MAX_TOOL_ROUNDS {
             bail!("问答工具调用轮数超过限制，模型没有稳定收敛");
         }
+
+        emit_question_progress(
+            request.runtime.progress_event_tx.as_ref(),
+            summarize_local_tool_progress(&local_calls),
+        );
 
         let executed = join_all(
             local_calls
@@ -508,13 +620,25 @@ async fn answer_with_responses(request: ResponsesAnswerRequest<'_>) -> Result<An
         pending_input = json!(build_tool_output_items(&tool_outputs));
     };
 
-    Ok(AnswerOutcome {
-        final_answer,
-        response_id: previous_response_id,
-        citations,
-        tool_calls,
-        actions,
-    })
+    let effective_tool_catalog = if disabled_all_tools_for_compat {
+        tool_free_tool_catalog
+    } else if disabled_mcp_tools_for_compat {
+        mcp_free_tool_catalog
+    } else {
+        request.tool_catalog.clone()
+    };
+
+    Ok((
+        AnswerOutcome {
+            final_answer,
+            reasoning: None,
+            response_id: previous_response_id,
+            citations,
+            tool_calls,
+            actions,
+        },
+        effective_tool_catalog,
+    ))
 }
 
 async fn answer_with_chat_completions(
@@ -539,8 +663,16 @@ async fn answer_with_chat_completions(
         .unwrap_or_default();
     let mut round = 0usize;
 
-    let final_answer = loop {
+    let (final_answer, reasoning) = loop {
         round += 1;
+        emit_question_progress(
+            request.runtime.progress_event_tx.as_ref(),
+            if round == 1 {
+                "文档问答 · 正在等待模型首轮响应"
+            } else {
+                "文档问答 · 正在等待模型继续分析"
+            },
+        );
         let response = request_chat_completions_turn(ChatCompletionsTurnRequest {
             client: request.client,
             base_url: request.base_url,
@@ -565,16 +697,45 @@ async fn answer_with_chat_completions(
         }
 
         if local_calls.is_empty() {
-            let content = assistant_message
-                .get("content")
-                .context("chat/completions message 缺少 content")?;
-            break extract_text_content(content)
-                .context("LLM provider chat/completions 未返回可识别的回答")?;
+            emit_question_progress(
+                request.runtime.progress_event_tx.as_ref(),
+                "文档问答 · 工具结果已收敛，正在整理最终回答",
+            );
+            let message_parts =
+                extract_chat_completions_message_parts(&response).with_context(|| {
+                    format!(
+                        "LLM provider chat/completions 未返回可识别的回答: {}",
+                        describe_chat_completions_response_issue(&response)
+                    )
+                })?;
+            let final_answer = message_parts
+                .content
+                .clone()
+                .or_else(|| message_parts.reasoning.clone())
+                .with_context(|| {
+                    format!(
+                        "LLM provider chat/completions 未返回可识别的回答: {}",
+                        describe_chat_completions_response_issue(&response)
+                    )
+                })?;
+            let reasoning = if message_parts.content.is_some() {
+                message_parts
+                    .reasoning
+                    .filter(|candidate| candidate.trim() != final_answer.trim())
+            } else {
+                None
+            };
+            break (final_answer, reasoning);
         }
 
         if tool_calls.len() + local_calls.len() > MAX_TOOL_ROUNDS {
             bail!("问答工具调用轮数超过限制，模型没有稳定收敛");
         }
+
+        emit_question_progress(
+            request.runtime.progress_event_tx.as_ref(),
+            summarize_local_tool_progress(&local_calls),
+        );
 
         let assistant_tool_call_message =
             build_chat_assistant_tool_call_message(&assistant_message);
@@ -614,6 +775,7 @@ async fn answer_with_chat_completions(
 
     Ok(AnswerOutcome {
         final_answer,
+        reasoning,
         response_id: None,
         citations,
         tool_calls,
@@ -630,51 +792,43 @@ fn build_round_action(round: usize, tool_count: usize) -> AcpActionEvent {
     }
 }
 
+fn emit_question_progress(
+    progress_event_tx: Option<&Arc<dyn Fn(ExecutionProgressEvent) + Send + Sync>>,
+    status_text: &str,
+) {
+    let Some(progress_event_tx) = progress_event_tx else {
+        return;
+    };
+
+    progress_event_tx(ExecutionProgressEvent {
+        action_id: "rag_answer".to_string(),
+        status_text: status_text.to_string(),
+    });
+}
+
+fn summarize_local_tool_progress(local_calls: &[LocalToolCall]) -> &'static str {
+    let rag_query_count = local_calls
+        .iter()
+        .filter(|call| call.name == RAG_QUERY_TOOL_NAME)
+        .count();
+    let read_file_count = local_calls
+        .iter()
+        .filter(|call| call.name == READ_FILE_TOOL_NAME)
+        .count();
+
+    match (rag_query_count > 0, read_file_count > 0) {
+        (true, true) => "文档问答 · 正在检索索引并读取证据文件",
+        (true, false) => "文档问答 · 正在检索本地文档索引",
+        (false, true) => "文档问答 · 正在读取证据文件",
+        (false, false) => "文档问答 · 正在执行模型请求的工具",
+    }
+}
+
 fn answer_protocol(provider: &LlmProviderConfig) -> QuestionAnswerProtocol {
     match provider.protocol {
         LlmProviderProtocol::Responses => QuestionAnswerProtocol::Responses,
         LlmProviderProtocol::ChatCompletions => QuestionAnswerProtocol::ChatCompletions,
     }
-}
-
-fn alternate_answer_protocol(protocol: QuestionAnswerProtocol) -> QuestionAnswerProtocol {
-    match protocol {
-        QuestionAnswerProtocol::Responses => QuestionAnswerProtocol::ChatCompletions,
-        QuestionAnswerProtocol::ChatCompletions => QuestionAnswerProtocol::Responses,
-    }
-}
-
-fn should_retry_answer_with_protocol(
-    protocol: QuestionAnswerProtocol,
-    error: &anyhow::Error,
-) -> bool {
-    let message = error.to_string().to_ascii_lowercase();
-    match protocol {
-        QuestionAnswerProtocol::Responses => {
-            message.contains("route protocol chat")
-                || message.contains("stateless responses requests")
-                || retryable_endpoint_mismatch(&message, "responses")
-        }
-        QuestionAnswerProtocol::ChatCompletions => {
-            message.contains("route protocol responses")
-                || (message.contains("chat/completions") && message.contains("does not support"))
-                || retryable_endpoint_mismatch(&message, "chat/completions")
-        }
-    }
-}
-
-fn retryable_endpoint_mismatch(message: &str, endpoint: &str) -> bool {
-    let endpoint_not_available = message.contains(endpoint)
-        && (message.contains("404")
-            || message.contains("405")
-            || message.contains("501")
-            || message.contains("not found")
-            || message.contains("method not allowed")
-            || message.contains("unsupported"));
-    let endpoint_route_missing =
-        message.contains(&format!("/{endpoint}")) && message.contains("not found");
-
-    endpoint_not_available || endpoint_route_missing
 }
 
 fn should_retry_without_response_chain(
@@ -685,6 +839,31 @@ fn should_retry_without_response_chain(
     round == 1 && continue_previous_response && is_budget_exceeded_error(error)
 }
 
+fn should_retry_without_mcp_tools(
+    disabled_all_tools_for_compat: bool,
+    disabled_mcp_tools_for_compat: bool,
+    tool_catalog: &ToolCatalog,
+    error: &anyhow::Error,
+) -> bool {
+    !disabled_all_tools_for_compat
+        && !disabled_mcp_tools_for_compat
+        && tool_catalog
+            .request_tools
+            .iter()
+            .any(is_mcp_tool_definition)
+        && is_provider_transport_or_server_error(error)
+}
+
+fn should_retry_without_all_tools(
+    disabled_all_tools_for_compat: bool,
+    tool_catalog: &ToolCatalog,
+    error: &anyhow::Error,
+) -> bool {
+    !disabled_all_tools_for_compat
+        && !tool_catalog.request_tools.is_empty()
+        && is_provider_transport_or_server_error(error)
+}
+
 fn is_budget_exceeded_error(error: &anyhow::Error) -> bool {
     let message = error.to_string().to_ascii_lowercase();
     message.contains("budget has been exceeded")
@@ -693,6 +872,22 @@ fn is_budget_exceeded_error(error: &anyhow::Error) -> bool {
         || message.contains("maximum context length")
         || message.contains("prompt is too long")
         || message.contains("request too large")
+}
+
+fn is_provider_transport_or_server_error(error: &anyhow::Error) -> bool {
+    if error
+        .chain()
+        .filter_map(|source| source.downcast_ref::<reqwest::Error>())
+        .any(reqwest::Error::is_timeout)
+    {
+        return true;
+    }
+
+    let message = error.to_string();
+    ["500", "502", "503", "504"]
+        .iter()
+        .any(|status| message.contains(&format!("({status} ")))
+        || message.to_ascii_lowercase().contains("context canceled")
 }
 
 fn protocol_label(protocol: QuestionAnswerProtocol, provider: &LlmProviderConfig) -> String {
@@ -765,6 +960,83 @@ fn build_tool_catalog(
         available_names,
         skipped_mcp_servers,
     }
+}
+
+fn tool_catalog_without_mcp_tools(tool_catalog: &ToolCatalog) -> ToolCatalog {
+    let mut skipped_mcp_servers = tool_catalog.skipped_mcp_servers.clone();
+    skipped_mcp_servers.extend(
+        tool_catalog
+            .request_tools
+            .iter()
+            .filter(|tool| is_mcp_tool_definition(tool))
+            .filter_map(|tool| {
+                tool.get("server_label")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+            }),
+    );
+
+    ToolCatalog {
+        request_tools: tool_catalog
+            .request_tools
+            .iter()
+            .filter(|tool| !is_mcp_tool_definition(tool))
+            .cloned()
+            .collect(),
+        available_names: tool_catalog
+            .available_names
+            .iter()
+            .filter(|name| !name.starts_with("mcp:"))
+            .cloned()
+            .collect(),
+        skipped_mcp_servers,
+    }
+}
+
+fn tool_catalog_without_all_tools(tool_catalog: &ToolCatalog) -> ToolCatalog {
+    let mut stripped = tool_catalog_without_mcp_tools(tool_catalog);
+    stripped.request_tools.clear();
+    stripped.available_names.clear();
+    stripped
+}
+
+fn responses_tool_compatibility_cache_key(base_url: &str, model: &str) -> String {
+    format!("responses::{base_url}::{model}")
+}
+
+fn load_cached_responses_tool_compatibility(
+    compatibility_cache_key: &str,
+) -> ResponsesToolCompatibilityMode {
+    responses_tool_compatibility_cache()
+        .lock()
+        .expect("responses tool compatibility cache lock poisoned")
+        .get(compatibility_cache_key)
+        .copied()
+        .unwrap_or(ResponsesToolCompatibilityMode::Full)
+}
+
+fn store_cached_responses_tool_compatibility(
+    compatibility_cache_key: &str,
+    mode: ResponsesToolCompatibilityMode,
+) {
+    let mut cache = responses_tool_compatibility_cache()
+        .lock()
+        .expect("responses tool compatibility cache lock poisoned");
+    let entry = cache
+        .entry(compatibility_cache_key.to_string())
+        .or_insert(ResponsesToolCompatibilityMode::Full);
+    if mode > *entry {
+        *entry = mode;
+    }
+}
+
+fn responses_tool_compatibility_cache(
+) -> &'static Mutex<HashMap<String, ResponsesToolCompatibilityMode>> {
+    RESPONSES_TOOL_COMPATIBILITY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn is_mcp_tool_definition(tool: &Value) -> bool {
+    tool.get("type").and_then(Value::as_str) == Some("mcp")
 }
 
 fn build_read_file_tool(protocol: QuestionAnswerProtocol) -> Value {
@@ -868,7 +1140,7 @@ fn build_initial_responses_input(
     if continue_previous_response {
         return vec![json!({
             "role": "user",
-            "content": question,
+            "content": build_responses_text_content(question),
         })];
     }
 
@@ -885,15 +1157,22 @@ fn build_initial_responses_input(
                     ExecutionConversationRole::User => "user",
                     ExecutionConversationRole::Assistant => "assistant",
                 },
-                "content": content,
+                "content": build_responses_text_content(content),
             }))
         })
         .collect::<Vec<_>>();
     input.push(json!({
         "role": "user",
-        "content": question,
+        "content": build_responses_text_content(question),
     }));
     input
+}
+
+fn build_responses_text_content(text: &str) -> Vec<Value> {
+    vec![json!({
+        "type": "input_text",
+        "text": text,
+    })]
 }
 
 fn build_initial_chat_messages(
@@ -1100,9 +1379,13 @@ async fn execute_read_file_tool(
         );
     }
 
-    let text = fs::read_to_string(&resolved_path)
-        .await
-        .with_context(|| format!("无法读取 UTF-8 文本文件: {}", resolved_path.display()))?;
+    let text = tokio::task::spawn_blocking({
+        let resolved_path = resolved_path.clone();
+        move || load_readable_document_text(&resolved_path)
+    })
+    .await
+    .context("读取文档文本任务失败")?
+    .with_context(|| format!("无法读取可索引文档文本: {}", resolved_path.display()))?;
     let lines = text.lines().collect::<Vec<_>>();
     let start_index = line_start.saturating_sub(1);
     let selected = lines
@@ -1248,7 +1531,7 @@ fn citation_from_rag_hit(hit: &RagSearchHit) -> ExecutionCitation {
 }
 
 struct ResponsesTurnRequest<'a> {
-    client: &'a Client,
+    client: &'a HttpClient,
     base_url: &'a str,
     api_key: &'a str,
     model: &'a str,
@@ -1259,7 +1542,7 @@ struct ResponsesTurnRequest<'a> {
 }
 
 struct ChatCompletionsTurnRequest<'a> {
-    client: &'a Client,
+    client: &'a HttpClient,
     base_url: &'a str,
     api_key: &'a str,
     model: &'a str,
@@ -1268,76 +1551,60 @@ struct ChatCompletionsTurnRequest<'a> {
 }
 
 async fn request_responses_turn(request_args: ResponsesTurnRequest<'_>) -> Result<Value> {
-    let mut request = request_args
-        .client
-        .post(format!("{}/responses", request_args.base_url));
-    if !request_args.api_key.is_empty() {
-        request = request.bearer_auth(request_args.api_key);
-    }
-
+    let client = OpenAiCompatibleClient::new_async(
+        request_args.client,
+        request_args.base_url,
+        request_args.api_key,
+        "LLM provider base URL",
+    )?;
     let mut body = json!({
         "model": request_args.model,
         "instructions": request_args.instructions,
         "input": request_args.input,
-        "tools": request_args.tool_catalog.request_tools,
-        "parallel_tool_calls": true,
         "stream": false,
     });
+    if !request_args.tool_catalog.request_tools.is_empty() {
+        body["tools"] = Value::Array(request_args.tool_catalog.request_tools.clone());
+        body["parallel_tool_calls"] = Value::Bool(true);
+    }
     if let Some(previous_response_id) = request_args.previous_response_id {
         body["previous_response_id"] = Value::String(previous_response_id.to_string());
     }
 
-    let response = request
-        .json(&body)
-        .send()
+    client
+        .post_json(
+            "/responses",
+            &body,
+            "question answering from responses API",
+            OpenAiCompatibleResponseFormat::JsonOrSse,
+        )
         .await
-        .context("failed to request question answering from responses API")?;
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .context("failed to read responses API body")?;
-    if !status.is_success() {
-        let message = extract_provider_error_message(&body);
-        bail!("LLM provider responses 请求失败 ({status}): {message}");
-    }
-
-    parse_json_or_sse_payload(&body, "question answer JSON from responses")
 }
 
 async fn request_chat_completions_turn(
     request_args: ChatCompletionsTurnRequest<'_>,
 ) -> Result<Value> {
-    let mut request = request_args
-        .client
-        .post(format!("{}/chat/completions", request_args.base_url));
-    if !request_args.api_key.is_empty() {
-        request = request.bearer_auth(request_args.api_key);
-    }
-
-    let response = request
-        .json(&json!({
-            "model": request_args.model,
-            "messages": request_args.messages,
-            "tools": request_args.tool_catalog.request_tools,
-            "tool_choice": "auto",
-            "parallel_tool_calls": true,
-            "stream": false,
-        }))
-        .send()
+    let client = OpenAiCompatibleClient::new_async(
+        request_args.client,
+        request_args.base_url,
+        request_args.api_key,
+        "LLM provider base URL",
+    )?;
+    client
+        .post_json(
+            "/chat/completions",
+            &json!({
+                "model": request_args.model,
+                "messages": request_args.messages,
+                "tools": request_args.tool_catalog.request_tools,
+                "tool_choice": "auto",
+                "parallel_tool_calls": true,
+                "stream": false,
+            }),
+            "question answering from chat/completions API",
+            OpenAiCompatibleResponseFormat::Json,
+        )
         .await
-        .context("failed to request question answering from chat/completions API")?;
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .context("failed to read chat/completions API body")?;
-    if !status.is_success() {
-        let message = extract_provider_error_message(&body);
-        bail!("LLM provider chat/completions 请求失败 ({status}): {message}");
-    }
-
-    parse_json_payload(&body, "question answer JSON from chat/completions")
 }
 
 fn has_mcp_approval_request(payload: &Value) -> bool {
@@ -1719,28 +1986,36 @@ fn name_value_pairs_to_json_object(pairs: &[AcpNameValuePair]) -> Value {
 #[cfg(test)]
 mod tests {
     use std::{
+        io::{Cursor, Write},
         path::{Path, PathBuf},
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::{
-        alternate_answer_protocol, build_answer_conversation_state, build_initial_responses_input,
-        build_round_action, deduplicate_and_number_citations, extract_mcp_tool_calls,
-        extract_rag_answer_payload, is_budget_exceeded_error, normalize_previous_response_id,
+        build_answer_conversation_state, build_initial_responses_input, build_round_action,
+        build_tool_catalog, deduplicate_and_number_citations, execute_read_file_tool,
+        extract_mcp_tool_calls, extract_rag_answer_payload, is_budget_exceeded_error,
+        load_cached_responses_tool_compatibility, normalize_previous_response_id,
         prepare_conversation_state, previous_response_id_for_follow_up,
         provider_continuation_scope, question_payload, resolve_readable_file_path,
-        should_retry_answer_with_protocol, should_retry_without_response_chain,
-        QuestionAnswerProtocol, RAG_QUERY_TOOL_NAME,
+        responses_tool_compatibility_cache_key, should_retry_without_all_tools,
+        should_retry_without_mcp_tools, should_retry_without_response_chain,
+        store_cached_responses_tool_compatibility, summarize_local_tool_progress,
+        tool_catalog_without_all_tools, tool_catalog_without_mcp_tools, LocalToolCall,
+        QuestionAnswerProtocol, QuestionToolRuntime, ResponsesToolCompatibilityMode,
+        RAG_QUERY_TOOL_NAME, READ_FILE_TOOL_NAME,
     };
     use crate::domain::{
-        acp::AcpActionEvent,
+        acp::{AcpActionEvent, AcpMcpServerConfig, AcpMcpServerHttpConfig, AcpNameValuePair},
         execution::{
             ExecutionCitation, ExecutionConversationRole, ExecutionConversationState,
             ExecutionConversationTurn, ExecutionToolCall,
         },
         settings::{LlmModelType, LlmProviderConfig, LlmProviderProtocol},
+        settings::{LlmSettings, RagSettings},
     };
     use crate::infrastructure::openai_compatible::{body_preview, parse_json_or_sse_payload};
+    use zip::{write::SimpleFileOptions, ZipWriter};
 
     fn test_provider() -> LlmProviderConfig {
         LlmProviderConfig {
@@ -1764,6 +2039,19 @@ mod tests {
 
     fn normalize_path(path: &Path) -> String {
         path.to_string_lossy().replace('\\', "/")
+    }
+
+    fn build_test_docx(document_xml: &str) -> Vec<u8> {
+        let cursor = Cursor::new(Vec::new());
+        let mut writer = ZipWriter::new(cursor);
+        let options = SimpleFileOptions::default();
+        writer
+            .start_file("word/document.xml", options)
+            .expect("start document.xml");
+        writer
+            .write_all(document_xml.as_bytes())
+            .expect("write document.xml");
+        writer.finish().expect("finish docx writer").into_inner()
     }
 
     #[test]
@@ -1792,7 +2080,12 @@ mod tests {
         assert_eq!(input.len(), 3);
         assert_eq!(input[0]["role"], "user");
         assert_eq!(input[1]["role"], "assistant");
-        assert_eq!(input[2]["content"], "follow up");
+        assert_eq!(input[0]["content"][0]["type"], "input_text");
+        assert_eq!(input[0]["content"][0]["text"], "first question");
+        assert_eq!(input[1]["content"][0]["type"], "input_text");
+        assert_eq!(input[1]["content"][0]["text"], "first answer");
+        assert_eq!(input[2]["content"][0]["type"], "input_text");
+        assert_eq!(input[2]["content"][0]["text"], "follow up");
     }
 
     #[test]
@@ -1801,7 +2094,8 @@ mod tests {
 
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["role"], "user");
-        assert_eq!(input[0]["content"], "follow up");
+        assert_eq!(input[0]["content"][0]["type"], "input_text");
+        assert_eq!(input[0]["content"][0]["text"], "follow up");
     }
 
     #[test]
@@ -2018,6 +2312,178 @@ mod tests {
     }
 
     #[test]
+    fn summarize_local_tool_progress_reports_rag_query_only() {
+        let progress = summarize_local_tool_progress(&[LocalToolCall {
+            call_id: "call_1".to_string(),
+            name: RAG_QUERY_TOOL_NAME.to_string(),
+            arguments: serde_json::json!({}),
+        }]);
+
+        assert_eq!(progress, "文档问答 · 正在检索本地文档索引");
+    }
+
+    #[test]
+    fn summarize_local_tool_progress_reports_combined_lookup() {
+        let progress = summarize_local_tool_progress(&[
+            LocalToolCall {
+                call_id: "call_1".to_string(),
+                name: RAG_QUERY_TOOL_NAME.to_string(),
+                arguments: serde_json::json!({}),
+            },
+            LocalToolCall {
+                call_id: "call_2".to_string(),
+                name: READ_FILE_TOOL_NAME.to_string(),
+                arguments: serde_json::json!({}),
+            },
+        ]);
+
+        assert_eq!(progress, "文档问答 · 正在检索索引并读取证据文件");
+    }
+
+    #[test]
+    fn tool_catalog_without_mcp_tools_keeps_builtin_tools_only() {
+        let tool_catalog = build_tool_catalog(
+            &[AcpMcpServerConfig::Http(AcpMcpServerHttpConfig {
+                name: "WebMCP".to_string(),
+                url: "https://example.com/mcp".to_string(),
+                headers: vec![AcpNameValuePair {
+                    name: "Authorization".to_string(),
+                    value: "Bearer token".to_string(),
+                }],
+            })],
+            QuestionAnswerProtocol::Responses,
+        );
+
+        let filtered = tool_catalog_without_mcp_tools(&tool_catalog);
+
+        assert_eq!(filtered.request_tools.len(), 2);
+        assert_eq!(
+            filtered.available_names,
+            vec![
+                READ_FILE_TOOL_NAME.to_string(),
+                RAG_QUERY_TOOL_NAME.to_string(),
+            ]
+        );
+        assert_eq!(filtered.skipped_mcp_servers, vec!["WebMCP".to_string()]);
+    }
+
+    #[test]
+    fn tool_catalog_without_all_tools_strips_function_tools_too() {
+        let tool_catalog = build_tool_catalog(
+            &[AcpMcpServerConfig::Http(AcpMcpServerHttpConfig {
+                name: "WebMCP".to_string(),
+                url: "https://example.com/mcp".to_string(),
+                headers: Vec::new(),
+            })],
+            QuestionAnswerProtocol::Responses,
+        );
+
+        let filtered = tool_catalog_without_all_tools(&tool_catalog);
+
+        assert!(filtered.request_tools.is_empty());
+        assert!(filtered.available_names.is_empty());
+        assert_eq!(filtered.skipped_mcp_servers, vec!["WebMCP".to_string()]);
+    }
+
+    #[test]
+    fn responses_tool_compatibility_cache_only_degrades() {
+        let cache_key = responses_tool_compatibility_cache_key(
+            "https://example.com/v1",
+            &format!("gpt-test-{}", std::process::id()),
+        );
+
+        store_cached_responses_tool_compatibility(
+            &cache_key,
+            ResponsesToolCompatibilityMode::NoMcp,
+        );
+        store_cached_responses_tool_compatibility(&cache_key, ResponsesToolCompatibilityMode::Full);
+        assert_eq!(
+            load_cached_responses_tool_compatibility(&cache_key),
+            ResponsesToolCompatibilityMode::NoMcp
+        );
+
+        store_cached_responses_tool_compatibility(
+            &cache_key,
+            ResponsesToolCompatibilityMode::NoTools,
+        );
+        assert_eq!(
+            load_cached_responses_tool_compatibility(&cache_key),
+            ResponsesToolCompatibilityMode::NoTools
+        );
+    }
+
+    #[test]
+    fn retry_without_mcp_tools_only_triggers_for_provider_5xx_with_mcp_tools() {
+        let tool_catalog = build_tool_catalog(
+            &[AcpMcpServerConfig::Http(AcpMcpServerHttpConfig {
+                name: "WebMCP".to_string(),
+                url: "https://example.com/mcp".to_string(),
+                headers: Vec::new(),
+            })],
+            QuestionAnswerProtocol::Responses,
+        );
+        let provider_error = anyhow::anyhow!(
+            "LLM provider responses 请求失败 (500 Internal Server Error): internal error"
+        );
+        let client_error =
+            anyhow::anyhow!("LLM provider responses 请求失败 (400 Bad Request): invalid input");
+        let cancelled_error = anyhow::anyhow!(
+            "failed to request question answering from responses API: send request: context canceled"
+        );
+
+        assert!(should_retry_without_mcp_tools(
+            false,
+            false,
+            &tool_catalog,
+            &provider_error
+        ));
+        assert!(should_retry_without_mcp_tools(
+            false,
+            false,
+            &tool_catalog,
+            &cancelled_error
+        ));
+        assert!(!should_retry_without_mcp_tools(
+            false,
+            true,
+            &tool_catalog,
+            &provider_error
+        ));
+        assert!(!should_retry_without_mcp_tools(
+            false,
+            false,
+            &tool_catalog,
+            &client_error
+        ));
+    }
+
+    #[test]
+    fn retry_without_all_tools_triggers_for_provider_5xx_with_function_tools() {
+        let tool_catalog = build_tool_catalog(&[], QuestionAnswerProtocol::Responses);
+        let provider_error = anyhow::anyhow!(
+            "LLM provider responses 请求失败 (500 Internal Server Error): internal error"
+        );
+        let client_error =
+            anyhow::anyhow!("LLM provider responses 请求失败 (400 Bad Request): invalid input");
+
+        assert!(should_retry_without_all_tools(
+            false,
+            &tool_catalog,
+            &provider_error
+        ));
+        assert!(!should_retry_without_all_tools(
+            true,
+            &tool_catalog,
+            &provider_error
+        ));
+        assert!(!should_retry_without_all_tools(
+            false,
+            &tool_catalog,
+            &client_error
+        ));
+    }
+
+    #[test]
     fn read_file_tool_rejects_paths_outside_allowed_roots() {
         let root = temp_test_root("allowed-roots");
         let workspace_root = root.join("workspace");
@@ -2064,6 +2530,55 @@ mod tests {
                 .expect("relative workspace file should resolve");
 
         assert_eq!(normalize_path(&resolved), normalize_path(&file_path));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn read_file_tool_reads_normalized_docx_text() {
+        let root = temp_test_root("read-docx");
+        let workspace_root = root.join("workspace");
+        let docs_root = workspace_root.join("docs");
+        let file_path = docs_root.join("manual.docx");
+        let document_xml = r#"
+            <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+              <w:body>
+                <w:p>
+                  <w:pPr><w:pStyle w:val="Heading1"/></w:pPr>
+                  <w:r><w:t>Guide</w:t></w:r>
+                </w:p>
+                <w:p>
+                  <w:r><w:t>Alpha paragraph.</w:t></w:r>
+                </w:p>
+              </w:body>
+            </w:document>
+        "#;
+        std::fs::create_dir_all(&docs_root).expect("create docs root");
+        std::fs::write(&file_path, build_test_docx(document_xml)).expect("write docx");
+
+        let workspace_root = workspace_root
+            .canonicalize()
+            .expect("canonicalize workspace root");
+        let runtime = QuestionToolRuntime {
+            data_dir: &workspace_root,
+            workspace_root: &workspace_root,
+            rag_settings: &RagSettings::default(),
+            llm_settings: &LlmSettings::default(),
+            progress_event_tx: None,
+        };
+        let executed = execute_read_file_tool(
+            &runtime,
+            &serde_json::json!({
+                "path": "docs/manual.docx",
+                "line_start": 1,
+                "line_count": 3
+            }),
+        )
+        .await
+        .expect("read file tool should support docx");
+
+        assert!(executed.output.contains("# Guide"));
+        assert!(executed.output.contains("Alpha paragraph."));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2147,60 +2662,6 @@ mod tests {
             calls[0].output_detail.as_deref(),
             Some("{\n  \"hits\": 2\n}")
         );
-    }
-
-    #[test]
-    fn protocol_retry_switches_to_other_endpoint() {
-        assert_eq!(
-            alternate_answer_protocol(QuestionAnswerProtocol::Responses),
-            QuestionAnswerProtocol::ChatCompletions
-        );
-        assert_eq!(
-            alternate_answer_protocol(QuestionAnswerProtocol::ChatCompletions),
-            QuestionAnswerProtocol::Responses
-        );
-    }
-
-    #[test]
-    fn protocol_retry_detects_chat_only_route_mismatch() {
-        let error = anyhow::anyhow!(
-            "LLM provider responses 请求失败 (400 Bad Request): route protocol chat does not support stateless responses requests"
-        );
-
-        assert!(should_retry_answer_with_protocol(
-            QuestionAnswerProtocol::Responses,
-            &error
-        ));
-        assert!(!should_retry_answer_with_protocol(
-            QuestionAnswerProtocol::ChatCompletions,
-            &error
-        ));
-    }
-
-    #[test]
-    fn protocol_retry_detects_responses_only_route_mismatch() {
-        let error = anyhow::anyhow!(
-            "LLM provider chat/completions 请求失败 (400 Bad Request): route protocol responses does not support chat/completions requests"
-        );
-
-        assert!(should_retry_answer_with_protocol(
-            QuestionAnswerProtocol::ChatCompletions,
-            &error
-        ));
-        assert!(!should_retry_answer_with_protocol(
-            QuestionAnswerProtocol::Responses,
-            &error
-        ));
-    }
-
-    #[test]
-    fn protocol_retry_detects_missing_responses_endpoint_by_status() {
-        let error = anyhow::anyhow!("LLM provider responses 请求失败 (404 Not Found): not found");
-
-        assert!(should_retry_answer_with_protocol(
-            QuestionAnswerProtocol::Responses,
-            &error
-        ));
     }
 
     #[test]

@@ -5,7 +5,9 @@ use tauri::{
 use tracing::error;
 
 use crate::{
-    domain::settings::{AppSettings, LlmProviderConfig, LlmProviderModelEntry},
+    domain::settings::{
+        AppSettings, BuiltinLlmProviderTemplate, LlmProviderConfig, LlmProviderModelEntry,
+    },
     infrastructure::autostart,
     state::AppState,
 };
@@ -63,6 +65,12 @@ pub async fn list_llm_provider_models(
         .map_err(|error| error.to_string())
 }
 
+pub async fn list_builtin_llm_provider_templates(
+    state: State<'_, AppState>,
+) -> Result<Vec<BuiltinLlmProviderTemplate>, String> {
+    Ok(state.builtin_llm_provider_templates().await)
+}
+
 pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
     match invoke.message.command() {
         "get_app_settings" => {
@@ -91,6 +99,17 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
                 let state = super::parse_arg(&invoke, "list_llm_provider_models", "state")?;
                 let provider = super::parse_arg(&invoke, "list_llm_provider_models", "provider")?;
                 list_llm_provider_models(state, provider)
+                    .await
+                    .map_err(InvokeError::from)
+            });
+            true
+        }
+        "list_builtin_llm_provider_templates" => {
+            let resolver = invoke.resolver.clone();
+            resolver.respond_async(async move {
+                let state =
+                    super::parse_arg(&invoke, "list_builtin_llm_provider_templates", "state")?;
+                list_builtin_llm_provider_templates(state)
                     .await
                     .map_err(InvokeError::from)
             });
