@@ -39,7 +39,6 @@ import {
 
 const browserShortcutConfig: ShortcutConfig = {
 	toggle_launcher: "Alt+Space",
-	ocr_capture: "Alt+R",
 	ocr_translate: "Alt+D",
 };
 
@@ -88,6 +87,13 @@ const browserAppSettings: AppSettings = {
 		autoStart: false,
 		showInDock: true,
 		language: "zh-CN",
+	},
+	notification: {
+		enabled: false,
+		notifyQuestionAnswerCompletion: true,
+		notifyAcpPromptCompletion: true,
+		onlyWhenLauncherInBackground: true,
+		contentPreview: "brief",
 	},
 	appearance: {
 		theme: "auto",

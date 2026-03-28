@@ -9,6 +9,7 @@ use crate::domain::acp::{
     AcpAgentConfig, AcpMcpServerConfig, AcpMcpServerHttpConfig, AcpMcpServerSseConfig,
     AcpMcpServerStdioConfig, AcpNameValuePair,
 };
+use crate::domain::notification::NotificationSettings;
 use crate::domain::settings::{
     fixed_rag_ignore_globs, AppearanceSettings, GeneralSettings, LlmModelType, LlmProviderConfig,
     LlmProviderProtocol, LlmSettings, OcrSettings, PromptsSettings, RagSettings,
@@ -17,10 +18,6 @@ use crate::domain::settings::{
 const CONFIG_FILE_NAME: &str = "config.toml";
 const WORKSPACE_HISTORY_FILE_NAME: &str = "workspace-history.toml";
 pub const RECENT_WORKSPACE_LIMIT: usize = 3;
-#[cfg(target_os = "macos")]
-const LEGACY_DEFAULT_OCR_SHORTCUT: &str = "Cmd+Ctrl+Shift+Space";
-#[cfg(not(target_os = "macos"))]
-const LEGACY_DEFAULT_OCR_SHORTCUT: &str = "Ctrl+Alt+Shift+Space";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
@@ -30,6 +27,8 @@ pub struct AppConfig {
     pub workspace: WorkspaceConfig,
     #[serde(default)]
     pub general: GeneralSettings,
+    #[serde(default)]
+    pub notification: NotificationSettings,
     #[serde(default)]
     pub appearance: AppearanceSettings,
     #[serde(default)]
@@ -49,8 +48,6 @@ pub struct AppConfig {
 pub struct ShortcutConfig {
     /// Format: "modifiers+key", e.g., "Alt+Space" or "Ctrl+Shift+Space"
     pub toggle_launcher: String,
-    /// Format: "modifiers+key", e.g., "Alt+R"
-    pub ocr_capture: String,
     /// Format: "modifiers+key", e.g., "Alt+D"
     pub ocr_translate: String,
 }
@@ -58,7 +55,6 @@ pub struct ShortcutConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShortcutKey {
     ToggleLauncher,
-    OcrCapture,
     OcrTranslate,
 }
 
@@ -66,7 +62,6 @@ impl ShortcutKey {
     pub fn parse(value: &str) -> Result<Self> {
         match value {
             "toggle_launcher" => Ok(Self::ToggleLauncher),
-            "ocr_capture" => Ok(Self::OcrCapture),
             "ocr_translate" => Ok(Self::OcrTranslate),
             other => anyhow::bail!("unknown shortcut key: {other}"),
         }
@@ -75,7 +70,6 @@ impl ShortcutKey {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ToggleLauncher => "toggle_launcher",
-            Self::OcrCapture => "ocr_capture",
             Self::OcrTranslate => "ocr_translate",
         }
     }
@@ -83,7 +77,6 @@ impl ShortcutKey {
     pub fn display_name(self) -> &'static str {
         match self {
             Self::ToggleLauncher => "launcher",
-            Self::OcrCapture => "OCR capture",
             Self::OcrTranslate => "OCR translate",
         }
     }
@@ -93,7 +86,6 @@ impl Default for ShortcutConfig {
     fn default() -> Self {
         Self {
             toggle_launcher: "Alt+Space".to_string(),
-            ocr_capture: "Alt+R".to_string(),
             ocr_translate: "Alt+D".to_string(),
         }
     }
@@ -103,7 +95,6 @@ impl ShortcutConfig {
     pub fn get(&self, key: ShortcutKey) -> &str {
         match key {
             ShortcutKey::ToggleLauncher => &self.toggle_launcher,
-            ShortcutKey::OcrCapture => &self.ocr_capture,
             ShortcutKey::OcrTranslate => &self.ocr_translate,
         }
     }
@@ -111,7 +102,6 @@ impl ShortcutConfig {
     pub fn set(&mut self, key: ShortcutKey, shortcut: impl Into<String>) {
         match key {
             ShortcutKey::ToggleLauncher => self.toggle_launcher = shortcut.into(),
-            ShortcutKey::OcrCapture => self.ocr_capture = shortcut.into(),
             ShortcutKey::OcrTranslate => self.ocr_translate = shortcut.into(),
         }
     }
@@ -119,7 +109,6 @@ impl ShortcutConfig {
     pub fn default_value(key: ShortcutKey) -> &'static str {
         match key {
             ShortcutKey::ToggleLauncher => "Alt+Space",
-            ShortcutKey::OcrCapture => "Alt+R",
             ShortcutKey::OcrTranslate => "Alt+D",
         }
     }
@@ -316,10 +305,7 @@ impl ConfigStore {
             .await
             .with_context(|| format!("failed to read config file: {:?}", self.config_path))?;
 
-        let mut config = parse_config_content(&content)?;
-        if migrate_legacy_shortcuts(&mut config) {
-            self.save(&config).await?;
-        }
+        let config = parse_config_content(&content)?;
 
         let mut cached = self.cached_config.lock().unwrap();
         *cached = Some(config.clone());
@@ -953,15 +939,6 @@ fn serialize_workspace_history_content(history: &WorkspaceHistory) -> Result<Str
     toml::to_string_pretty(history).with_context(|| "failed to serialize workspace history")
 }
 
-fn migrate_legacy_shortcuts(config: &mut AppConfig) -> bool {
-    if config.shortcuts.ocr_capture != LEGACY_DEFAULT_OCR_SHORTCUT {
-        return false;
-    }
-
-    config.shortcuts.ocr_capture = ShortcutConfig::default().ocr_capture;
-    true
-}
-
 pub async fn safe_write(path: &Path, content: &str) -> Result<()> {
     let parent = path
         .parent()
@@ -1061,7 +1038,6 @@ mod tests {
     fn test_shortcut_config_default() {
         let config = ShortcutConfig::default();
         assert_eq!(config.toggle_launcher, "Alt+Space");
-        assert_eq!(config.ocr_capture, "Alt+R");
         assert_eq!(config.ocr_translate, "Alt+D");
     }
 
@@ -1213,7 +1189,6 @@ saved_sessions = []
 
         let parsed = parse_config_content(content).expect("legacy config should parse");
 
-        assert_eq!(parsed.shortcuts.ocr_capture, "Alt+R");
         assert_eq!(parsed.shortcuts.ocr_translate, "Alt+D");
         assert_eq!(parsed.ocr, OcrSettings::default());
         assert_eq!(parsed.llm, LlmSettings::default());
@@ -1294,21 +1269,19 @@ saved_sessions = []
     }
 
     #[test]
-    fn migrate_legacy_shortcuts_updates_old_default_ocr_shortcut() {
-        let mut config = AppConfig::default();
-        config.shortcuts.ocr_capture = LEGACY_DEFAULT_OCR_SHORTCUT.to_string();
+    fn parse_config_content_ignores_legacy_ocr_capture_shortcut() {
+        let content = r#"
+[shortcuts]
+toggle_launcher = "Alt+Space"
+ocr_capture = "Alt+R"
+ocr_translate = "Alt+D"
+"#;
 
-        assert!(migrate_legacy_shortcuts(&mut config));
-        assert_eq!(config.shortcuts.ocr_capture, "Alt+R");
-    }
+        let parsed =
+            parse_config_content(content).expect("legacy OCR capture shortcut should parse");
 
-    #[test]
-    fn migrate_legacy_shortcuts_keeps_custom_ocr_shortcut() {
-        let mut config = AppConfig::default();
-        config.shortcuts.ocr_capture = "Cmd+Alt+O".to_string();
-
-        assert!(!migrate_legacy_shortcuts(&mut config));
-        assert_eq!(config.shortcuts.ocr_capture, "Cmd+Alt+O");
+        assert_eq!(parsed.shortcuts.toggle_launcher, "Alt+Space");
+        assert_eq!(parsed.shortcuts.ocr_translate, "Alt+D");
     }
 
     #[test]

@@ -3,6 +3,7 @@ pub mod actions;
 pub mod application;
 pub mod execution;
 pub mod file_search;
+pub mod notification;
 pub mod query;
 pub mod rag;
 pub mod settings;

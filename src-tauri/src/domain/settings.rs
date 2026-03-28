@@ -1,5 +1,7 @@
 use serde::{de::Error as DeError, Deserialize, Deserializer, Serialize};
 
+use crate::domain::notification::NotificationSettings;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GeneralSettings {
@@ -890,6 +892,8 @@ pub const fn fixed_rag_ignore_globs() -> &'static [&'static str] {
 pub struct AppSettings {
     #[serde(default)]
     pub general: GeneralSettings,
+    #[serde(default)]
+    pub notification: NotificationSettings,
     #[serde(default)]
     pub appearance: AppearanceSettings,
     #[serde(default)]

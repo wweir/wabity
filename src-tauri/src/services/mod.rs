@@ -4,6 +4,7 @@ pub mod document_extract;
 pub mod executor;
 pub mod file_search;
 pub mod matcher;
+pub mod notification;
 pub mod ocr;
 pub mod public_skills;
 pub mod question_answer_backend;

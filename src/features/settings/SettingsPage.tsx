@@ -38,6 +38,7 @@ import type {
 	LlmProviderConfig,
 	LlmProviderModelEntry,
 	LlmSettings,
+	NotificationSettings,
 	OcrSettings,
 	PromptsSettings,
 	PublicSkillCatalog,
@@ -502,6 +503,7 @@ const settingsSections: ReadonlyArray<{
 const settingsQuickLinks: Readonly<Record<SettingsSectionId, readonly SettingsQuickLink[]>> = {
 	general: [
 		{ id: "general-shortcuts", label: "快捷键", hint: "启动、截图、翻译" },
+		{ id: "general-notifications", label: "通知", hint: "后台完成提醒" },
 		{ id: "general-appearance", label: "外观", hint: "主题与字号" },
 		{ id: "general-ocr", label: "OCR", hint: "截图识别" },
 	],
@@ -600,6 +602,7 @@ function SettingsQuickJumpList({
 }
 
 function ShortcutRecorderField({
+	instructionsId,
 	isRecording,
 	isSaving,
 	label,
@@ -608,6 +611,7 @@ function ShortcutRecorderField({
 	statusId,
 	triggerId,
 }: {
+	instructionsId: string;
 	isRecording: boolean;
 	isSaving: boolean;
 	label: string;
@@ -620,17 +624,24 @@ function ShortcutRecorderField({
 		? "正在录制，直接按下目标快捷键，按 Escape 取消。"
 		: isSaving
 			? "正在保存快捷键。"
-			: "按 Enter 或空格开始录制，然后直接按下目标快捷键。";
-	const actionLabel = isRecording ? "正在录制" : isSaving ? "保存中" : "开始录制";
+			: "";
+	const actionLabel = isRecording
+		? "正在录制"
+		: isSaving
+			? "保存中"
+			: shortcutValue.trim()
+				? "重新录制"
+				: "开始录制";
+	const describedBy = [instructionsId, statusId].join(" ");
 
 	return (
-		<div className="settings-item settings-item-stacked">
+		<div className="settings-item settings-shortcut-item">
 			<div className="settings-shortcut-field">
 				<div className="settings-shortcut-copy">
-					<span className="settings-label">{label}</span>
+					<span className="settings-shortcut-label">{label}</span>
 					<span
 						aria-live="polite"
-						className="settings-help-text settings-help-text-tight"
+						className={`settings-help-text settings-help-text-tight ${statusText ? "" : "sr-only"}`}
 						id={statusId}
 						role="status"
 					>
@@ -638,7 +649,7 @@ function ShortcutRecorderField({
 					</span>
 				</div>
 				<button
-					aria-describedby={statusId}
+					aria-describedby={describedBy}
 					aria-pressed={isRecording}
 					className={`settings-input settings-shortcut-trigger ${isRecording ? "recording" : ""}`}
 					disabled={isSaving}
@@ -1826,16 +1837,24 @@ function validateMcpServers(servers: AcpMcpServerDraft[]): McpDraftValidation {
 
 export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) {
 	const [activeSection, setActiveSection] = useState<SettingsSectionId>("general");
+	const [translationPromptExpanded, setTranslationPromptExpanded] = useState(false);
+	const [questionAnswerPromptExpanded, setQuestionAnswerPromptExpanded] = useState(false);
 	const [generalSettings, setGeneralSettings] = useState<GeneralSettings>({
 		autoStart: false,
 		showInDock: true,
 		language: "zh-CN",
 	});
+	const [notificationSettings, setNotificationSettings] = useState<NotificationSettings>({
+		enabled: false,
+		notifyQuestionAnswerCompletion: true,
+		notifyAcpPromptCompletion: true,
+		onlyWhenLauncherInBackground: true,
+		contentPreview: "brief",
+	});
 	const [promptsSettings, setPromptsSettings] = useState<PromptsSettings>(defaultPromptsSettings);
 
 	const [shortcutSettings, setShortcutSettings] = useState<ShortcutConfig>({
 		toggle_launcher: "Alt+Space",
-		ocr_capture: "Alt+R",
 		ocr_translate: "Alt+D",
 	});
 	const [llmSettings, setLlmSettings] = useState<LlmSettings>({
@@ -1918,6 +1937,13 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 			autoStart: false,
 			showInDock: true,
 			language: "zh-CN",
+		},
+		notification: {
+			enabled: false,
+			notifyQuestionAnswerCompletion: true,
+			notifyAcpPromptCompletion: true,
+			onlyWhenLauncherInBackground: true,
+			contentPreview: "brief",
 		},
 		appearance: {
 			theme: "auto",
@@ -2322,6 +2348,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 			});
 		void getAppSettings().then((settings) => {
 			setGeneralSettings(settings.general);
+			setNotificationSettings(settings.notification);
 			setAppearanceSettings(settings.appearance);
 			applyAppearanceSettings(settings.appearance);
 			onAppearanceChange?.(settings.appearance);
@@ -2704,6 +2731,23 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		eligibleAiTaskProviders.find(
 			(provider) => provider.id === llmSettings.questionAnswerProviderId,
 		) ?? null;
+	const translationPromptIsDefault =
+		promptsSettings.translationPrompt.trim() === defaultPromptsSettings.translationPrompt.trim();
+	const questionAnswerPromptIsDefault =
+		promptsSettings.ragAnswerSystemPrompt.trim() ===
+		defaultPromptsSettings.ragAnswerSystemPrompt.trim();
+	const translationPromptSummary =
+		promptsSettings.translationPrompt.trim().length === 0
+			? "当前为空，保存后会恢复默认提示词。"
+			: translationPromptIsDefault
+				? "当前使用内置默认提示词。"
+				: "当前使用自定义提示词。";
+	const questionAnswerPromptSummary =
+		promptsSettings.ragAnswerSystemPrompt.trim().length === 0
+			? "当前为空，保存后会恢复默认提示词。"
+			: questionAnswerPromptIsDefault
+				? "当前使用内置默认提示词。"
+				: "当前使用自定义提示词。";
 	const eligibleRagEmbeddingProviders = llmSettings.providers.filter((provider) =>
 		providerCanHandleRagEmbedding(provider),
 	);
@@ -2753,6 +2797,18 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		skills: skillCatalog.exists ? `${skillCatalog.skills.length} 个 skill` : "只读",
 		about: "只读",
 	};
+	const sectionDescriptionText: Record<SettingsSectionId, string> = {
+		general: "快捷键、通知、外观和 OCR。",
+		prompts: "翻译与文档问答。",
+		llm: "维护可复用的模型条目。",
+		rag: "索引输入、目录与重建。",
+		acp: "本地 Agent 启动命令。",
+		mcp: "全局 MCP 服务清单。",
+		skills: "浏览公共 skill 目录。",
+		about: "版本与产品定位。",
+	};
+	const activeSectionLabel =
+		settingsSections.find((section) => section.id === activeSection)?.label ?? "设置";
 	const selectedPresetInstallOption =
 		acpAgentOptions.find((option) => option.id === selectedPresetOptionId) ?? null;
 	const selectedLlmIssueCount = selectedLlmProvider
@@ -3072,10 +3128,15 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		setSettingsError(null);
 	}
 
-	async function saveAppSettings(nextGeneral: GeneralSettings, nextAppearance: AppearanceSettings) {
+	async function saveAppSettings(
+		nextGeneral: GeneralSettings,
+		nextNotification: NotificationSettings,
+		nextAppearance: AppearanceSettings,
+	) {
 		await persistAppSettings(
 			{
 				general: nextGeneral,
+				notification: nextNotification,
 				appearance: nextAppearance,
 				prompts: persistedAppSettings.prompts,
 				llm: persistedAppSettings.llm,
@@ -3095,10 +3156,15 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		);
 	}
 
+	async function saveNotificationSettings(nextNotification: NotificationSettings) {
+		await saveAppSettings(generalSettings, nextNotification, appearanceSettings);
+	}
+
 	async function handleSaveTranslationConfig() {
 		await persistAppSettings(
 			{
 				general: persistedAppSettings.general,
+				notification: persistedAppSettings.notification,
 				appearance: persistedAppSettings.appearance,
 				prompts: {
 					translationPrompt: promptsSettings.translationPrompt,
@@ -3128,6 +3194,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		await persistAppSettings(
 			{
 				general: persistedAppSettings.general,
+				notification: persistedAppSettings.notification,
 				appearance: persistedAppSettings.appearance,
 				prompts: {
 					translationPrompt: persistedAppSettings.prompts.translationPrompt,
@@ -3162,6 +3229,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		await persistAppSettings(
 			{
 				general: persistedAppSettings.general,
+				notification: persistedAppSettings.notification,
 				appearance: persistedAppSettings.appearance,
 				prompts: persistedAppSettings.prompts,
 				llm: {
@@ -3189,6 +3257,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		await persistAppSettings(
 			{
 				general: persistedAppSettings.general,
+				notification: persistedAppSettings.notification,
 				appearance: persistedAppSettings.appearance,
 				prompts: persistedAppSettings.prompts,
 				llm: persistedAppSettings.llm,
@@ -3217,6 +3286,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		await persistAppSettings(
 			{
 				general: persistedAppSettings.general,
+				notification: persistedAppSettings.notification,
 				appearance: persistedAppSettings.appearance,
 				prompts: persistedAppSettings.prompts,
 				llm: persistedAppSettings.llm,
@@ -3254,6 +3324,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		try {
 			const saved = await setAppSettings(nextSettings);
 			setGeneralSettings(saved.general);
+			setNotificationSettings(saved.notification);
 			setAppearanceSettings(saved.appearance);
 			applyAppearanceSettings(saved.appearance);
 			onAppearanceChange?.(saved.appearance);
@@ -3853,25 +3924,20 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 							) : null}
 							<div className="settings-main-header">
 								<div className="settings-main-header-copy">
-									<span className="settings-section-kicker">当前分组</span>
-									<h2 className="settings-main-title">
-										{settingsSections.find((section) => section.id === activeSection)?.label}
-									</h2>
+									<h2 className="settings-main-title">{activeSectionLabel}</h2>
 									<span className="settings-help-text settings-help-text-tight">
-										{sectionSummaryText[activeSection]}
+										{sectionDescriptionText[activeSection]}
 									</span>
 								</div>
-							</div>
-							{activeQuickLinks.length > 0 ? (
-								<div className="settings-main-jump-bar">
+								{activeQuickLinks.length > 0 ? (
 									<SettingsQuickJumpList
 										activeBlockId={activeSectionBlockId}
 										compact
 										links={activeQuickLinks}
 										onSelect={scrollToSectionBlock}
 									/>
-								</div>
-							) : null}
+								) : null}
+							</div>
 
 							{activeSection === "general" ? (
 								<section
@@ -3881,7 +3947,6 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 									role="tabpanel"
 									tabIndex={0}
 								>
-									<h2 className="settings-section-title">通用</h2>
 									<div className="settings-item">
 										<label className="settings-label">
 											<span>开机自启动</span>
@@ -3891,6 +3956,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 												onChange={(e) =>
 													void saveAppSettings(
 														{ ...generalSettings, autoStart: e.target.checked },
+														notificationSettings,
 														appearanceSettings,
 													)
 												}
@@ -3908,6 +3974,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 												onChange={(e) =>
 													void saveAppSettings(
 														{ ...generalSettings, showInDock: e.target.checked },
+														notificationSettings,
 														appearanceSettings,
 													)
 												}
@@ -3925,6 +3992,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 												onChange={(e) =>
 													void saveAppSettings(
 														{ ...generalSettings, language: e.target.value },
+														notificationSettings,
 														appearanceSettings,
 													)
 												}
@@ -3937,7 +4005,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 									</div>
 
 									<div
-										className="settings-editor-card settings-editor-card-subtle"
+										className="settings-editor-card settings-editor-card-subtle settings-editor-card-shortcuts"
 										id="general-shortcuts"
 										ref={bindSectionBlockRef("general-shortcuts")}
 									>
@@ -3945,12 +4013,19 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 											<div className="settings-acp-detail-copy">
 												<span className="settings-section-kicker">Shortcuts</span>
 												<h3 className="settings-subsection-title">快捷键</h3>
-												<span className="settings-help-text settings-help-text-tight">
+												<span
+													className="settings-help-text settings-help-text-tight"
+													id="general-shortcuts-instructions"
+												>
 													快捷键配置并入通用页，但仍然通过独立命令保存，避免和其它设置字段互相覆盖。
+												</span>
+												<span className="settings-help-text settings-help-text-tight">
+													按 Enter 或空格开始录制，再按目标组合键；按 Escape 取消当前录制。
 												</span>
 											</div>
 										</div>
 										<ShortcutRecorderField
+											instructionsId="general-shortcuts-instructions"
 											isRecording={isRecording("toggle_launcher")}
 											isSaving={savingShortcutKey === "toggle_launcher"}
 											label="打开启动器"
@@ -3960,23 +4035,127 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 											triggerId="shortcut-toggle-launcher-trigger"
 										/>
 										<ShortcutRecorderField
-											isRecording={isRecording("ocr_capture")}
-											isSaving={savingShortcutKey === "ocr_capture"}
-											label="截图 OCR"
-											onActivate={() => handleShortcutClick("ocr_capture")}
-											shortcutValue={shortcutSettings.ocr_capture}
-											statusId="shortcut-ocr-capture-status"
-											triggerId="shortcut-ocr-capture-trigger"
-										/>
-										<ShortcutRecorderField
+											instructionsId="general-shortcuts-instructions"
 											isRecording={isRecording("ocr_translate")}
 											isSaving={savingShortcutKey === "ocr_translate"}
-											label="优先翻译选中文本，否则 OCR"
+											label="翻译选中文本，未选中时 OCR"
 											onActivate={() => handleShortcutClick("ocr_translate")}
 											shortcutValue={shortcutSettings.ocr_translate}
 											statusId="shortcut-ocr-translate-status"
 											triggerId="shortcut-ocr-translate-trigger"
 										/>
+									</div>
+
+									<div
+										className="settings-editor-card settings-editor-card-subtle"
+										id="general-notifications"
+										ref={bindSectionBlockRef("general-notifications")}
+									>
+										<div className="settings-editor-card-header">
+											<div className="settings-acp-detail-copy">
+												<span className="settings-section-kicker">Notifications</span>
+												<h3 className="settings-subsection-title">通知</h3>
+												<span className="settings-help-text settings-help-text-tight">
+													系统通知使用 macOS
+													原生样式，当前可定制空间很小；重点放在结果摘要，而不是应用内自定义皮肤。
+												</span>
+												<span className="settings-help-text settings-help-text-tight">
+													如果系统没有显示通知，请到 macOS 系统设置的“通知”里检查
+													Wabity；当前版本不提供应用内权限请求按钮。
+												</span>
+												<span className="settings-help-text settings-help-text-tight">
+													“简短响应摘要”会自动去掉 Markdown 结构和代码块，只截取前面的有效内容。
+												</span>
+											</div>
+										</div>
+										<div className="settings-item">
+											<label className="settings-label">
+												<span>启用完成通知</span>
+												<input
+													checked={notificationSettings.enabled}
+													className="settings-toggle"
+													onChange={(e) =>
+														void saveNotificationSettings({
+															...notificationSettings,
+															enabled: e.target.checked,
+														})
+													}
+													disabled={savingSettings}
+													type="checkbox"
+												/>
+											</label>
+										</div>
+										<div className="settings-item">
+											<label className="settings-label">
+												<span>通知内容</span>
+												<select
+													className="settings-select"
+													value={notificationSettings.contentPreview}
+													onChange={(e) =>
+														void saveNotificationSettings({
+															...notificationSettings,
+															contentPreview: e.target
+																.value as NotificationSettings["contentPreview"],
+														})
+													}
+													disabled={savingSettings || !notificationSettings.enabled}
+												>
+													<option value="brief">显示简短响应摘要</option>
+													<option value="hidden">只显示完成状态</option>
+												</select>
+											</label>
+										</div>
+										<div className="settings-item">
+											<label className="settings-label">
+												<span>轻量问答完成后通知</span>
+												<input
+													checked={notificationSettings.notifyQuestionAnswerCompletion}
+													className="settings-toggle"
+													onChange={(e) =>
+														void saveNotificationSettings({
+															...notificationSettings,
+															notifyQuestionAnswerCompletion: e.target.checked,
+														})
+													}
+													disabled={savingSettings || !notificationSettings.enabled}
+													type="checkbox"
+												/>
+											</label>
+										</div>
+										<div className="settings-item">
+											<label className="settings-label">
+												<span>ACP Agent 执行完成后通知</span>
+												<input
+													checked={notificationSettings.notifyAcpPromptCompletion}
+													className="settings-toggle"
+													onChange={(e) =>
+														void saveNotificationSettings({
+															...notificationSettings,
+															notifyAcpPromptCompletion: e.target.checked,
+														})
+													}
+													disabled={savingSettings || !notificationSettings.enabled}
+													type="checkbox"
+												/>
+											</label>
+										</div>
+										<div className="settings-item">
+											<label className="settings-label">
+												<span>仅在 launcher 不在前台时通知</span>
+												<input
+													checked={notificationSettings.onlyWhenLauncherInBackground}
+													className="settings-toggle"
+													onChange={(e) =>
+														void saveNotificationSettings({
+															...notificationSettings,
+															onlyWhenLauncherInBackground: e.target.checked,
+														})
+													}
+													disabled={savingSettings || !notificationSettings.enabled}
+													type="checkbox"
+												/>
+											</label>
+										</div>
 									</div>
 
 									<div
@@ -4000,7 +4179,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 													className="settings-select"
 													value={appearanceSettings.theme}
 													onChange={(e) =>
-														void saveAppSettings(generalSettings, {
+														void saveAppSettings(generalSettings, notificationSettings, {
 															...appearanceSettings,
 															theme: e.target.value,
 														})
@@ -4020,7 +4199,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 													className="settings-select"
 													value={appearanceSettings.fontSize}
 													onChange={(e) =>
-														void saveAppSettings(generalSettings, {
+														void saveAppSettings(generalSettings, notificationSettings, {
 															...appearanceSettings,
 															fontSize: e.target.value,
 														})
@@ -4134,240 +4313,297 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 									role="tabpanel"
 									tabIndex={0}
 								>
-									<h2 className="settings-section-title">AI 功能</h2>
-									<div className="settings-acp-form-layout">
-										<div className="settings-acp-detail" id="prompts-editor">
-											<div
-												className="settings-editor-card"
-												id="prompts-translation"
-												ref={bindSectionBlockRef("prompts-translation")}
-											>
-												<div className="settings-editor-card-header">
-													<div className="settings-acp-detail-copy">
-														<span className="settings-section-kicker">Translation</span>
+									<div className="settings-ai-task-grid">
+										<article
+											className="settings-editor-card settings-task-card"
+											id="prompts-translation"
+											ref={bindSectionBlockRef("prompts-translation")}
+										>
+											<div className="settings-task-card-header">
+												<div className="settings-acp-detail-copy">
+													<div className="settings-task-card-title-row">
 														<h3 className="settings-subsection-title">翻译配置</h3>
-														<span className="settings-help-text settings-help-text-tight">
-															slash command `/translate`、`/fy`、`/tr`
-															会使用这里指定的模型和系统提示词。未显式指定目标语言时，默认规则会在简体中文和英文之间互译。
+														<span
+															className={`settings-status-chip ${
+																translationHasUnsavedChanges ? "settings-status-chip-strong" : ""
+															}`}
+														>
+															{translationHasUnsavedChanges ? "有草稿" : "已同步"}
 														</span>
 													</div>
-													<div className="settings-editor-card-actions">
-														<button
-															className="settings-button settings-agent-secondary"
-															disabled={savingAiTaskConfig}
-															onClick={() =>
-																setPromptsSettings((current) => ({
-																	...current,
-																	translationPrompt: defaultPromptsSettings.translationPrompt,
-																}))
-															}
-															type="button"
-														>
-															恢复默认
-														</button>
-														<button
-															className="settings-button settings-agent-secondary"
-															disabled={savingAiTaskConfig || !translationHasUnsavedChanges}
-															onClick={handleDiscardTranslationDraft}
-															type="button"
-														>
-															{DISCARD_DRAFT_BUTTON_LABEL}
-														</button>
-														<button
-															className="settings-button"
-															disabled={savingAiTaskConfig || !translationHasUnsavedChanges}
-															onClick={() => void handleSaveTranslationConfig()}
-															type="button"
-														>
-															{savingTranslationConfig ? "保存中..." : "保存翻译配置"}
-														</button>
-													</div>
-												</div>
-												<div className="settings-item settings-item-stacked">
-													<label
-														className="settings-label settings-label-stacked"
-														htmlFor="translation-provider"
-													>
-														<span>翻译模型</span>
-													</label>
-													<select
-														className="settings-select"
-														disabled={savingAiTaskConfig}
-														id="translation-provider"
-														onChange={(event) =>
-															handleLlmRouteProviderChange(
-																"translationProviderId",
-																event.target.value || null,
-															)
-														}
-														value={llmSettings.translationProviderId ?? ""}
-													>
-														<option value="">请选择一个普通 LLM 条目</option>
-														{eligibleAiTaskProviders.map((provider) => (
-															<option key={provider.id} value={provider.id}>
-																{provider.name || provider.model || provider.baseUrl}
-																{` · ${summarizeLlmProviderProfile(provider)}`}
-															</option>
-														))}
-													</select>
 													<span className="settings-help-text settings-help-text-tight">
-														当前用于翻译链路的条目：
-														{selectedTranslationProvider
-															? `${selectedTranslationProvider.name || selectedTranslationProvider.model || selectedTranslationProvider.baseUrl} · ${summarizeLlmProviderProfile(selectedTranslationProvider)}`
-															: "未配置"}
+														选择翻译模型。提示词默认已内置，只有要覆盖时再展开编辑。
 													</span>
-													{eligibleAiTaskProviders.length === 0 ? (
-														<span className="settings-help-text settings-help-text-tight">
-															当前没有可用的翻译模型。先在 LLM 页面配置一个普通 LLM
-															模型，再回到这里选择翻译模型。
-														</span>
-													) : null}
 												</div>
-												<div className="settings-item settings-item-stacked">
+											</div>
+											<div className="settings-item settings-item-stacked">
+												<label
+													className="settings-label settings-label-stacked"
+													htmlFor="translation-provider"
+												>
+													<span>翻译模型</span>
+												</label>
+												<select
+													className="settings-select"
+													disabled={savingAiTaskConfig}
+													id="translation-provider"
+													onChange={(event) =>
+														handleLlmRouteProviderChange(
+															"translationProviderId",
+															event.target.value || null,
+														)
+													}
+													value={llmSettings.translationProviderId ?? ""}
+												>
+													<option value="">请选择一个普通 LLM 条目</option>
+													{eligibleAiTaskProviders.map((provider) => (
+														<option key={provider.id} value={provider.id}>
+															{provider.name || provider.model || provider.baseUrl}
+															{` · ${summarizeLlmProviderProfile(provider)}`}
+														</option>
+													))}
+												</select>
+												<span className="settings-help-text settings-help-text-tight">
+													当前条目：
+													{selectedTranslationProvider
+														? `${selectedTranslationProvider.name || selectedTranslationProvider.model || selectedTranslationProvider.baseUrl} · ${summarizeLlmProviderProfile(selectedTranslationProvider)}`
+														: "未配置"}
+												</span>
+												{eligibleAiTaskProviders.length === 0 ? (
+													<span className="settings-help-text settings-help-text-tight">
+														当前没有可选普通 LLM 条目。
+														<button
+															className="settings-text-link"
+															onClick={() => handleSelectSection("llm")}
+															type="button"
+														>
+															前往 LLM 配置
+														</button>
+													</span>
+												) : null}
+											</div>
+											<div className="settings-item settings-item-stacked">
+												<div className="settings-task-field-header">
 													<label
 														className="settings-label settings-label-stacked"
 														htmlFor="translation-prompt"
 													>
-														<span>系统提示词</span>
+														<span>提示词</span>
 													</label>
-													<textarea
-														className="settings-textarea"
-														disabled={savingAiTaskConfig}
-														id="translation-prompt"
-														onChange={(event) =>
-															setPromptsSettings((current) => ({
-																...current,
-																translationPrompt: event.target.value,
-															}))
-														}
-														placeholder="留空并保存时会恢复内置默认提示词"
-														rows={10}
-														value={promptsSettings.translationPrompt}
-													/>
-													<span className="settings-help-text">
-														默认提示词要求模型只输出译文，并保留格式、Markdown、代码块、占位符和链接。这里只改翻译阶段，不影响
-														RAG 问答。
+													<button
+														aria-controls="translation-prompt-panel"
+														aria-expanded={translationPromptExpanded}
+														className="settings-text-link"
+														onClick={() => setTranslationPromptExpanded((current) => !current)}
+														type="button"
+													>
+														{translationPromptExpanded ? "收起编辑" : "展开编辑"}
+													</button>
+												</div>
+												<span className="settings-help-text settings-help-text-tight">
+													{translationPromptSummary}
+												</span>
+												{translationPromptExpanded ? (
+													<div className="settings-task-prompt-panel" id="translation-prompt-panel">
+														<textarea
+															className="settings-textarea settings-task-prompt-textarea"
+															disabled={savingAiTaskConfig}
+															id="translation-prompt"
+															onChange={(event) =>
+																setPromptsSettings((current) => ({
+																	...current,
+																	translationPrompt: event.target.value,
+																}))
+															}
+															placeholder="留空并保存时会恢复内置默认提示词"
+															rows={6}
+															value={promptsSettings.translationPrompt}
+														/>
+														<span className="settings-help-text settings-help-text-tight">
+															默认规则只输出译文，并保留 Markdown、代码块、链接和原文格式。
+														</span>
+													</div>
+												) : null}
+											</div>
+											<div className="settings-task-card-actions">
+												<button
+													className="settings-button settings-agent-secondary"
+													disabled={savingAiTaskConfig}
+													onClick={() =>
+														setPromptsSettings((current) => ({
+															...current,
+															translationPrompt: defaultPromptsSettings.translationPrompt,
+														}))
+													}
+													type="button"
+												>
+													恢复默认
+												</button>
+												<button
+													className="settings-button settings-agent-secondary"
+													disabled={savingAiTaskConfig || !translationHasUnsavedChanges}
+													onClick={handleDiscardTranslationDraft}
+													type="button"
+												>
+													{DISCARD_DRAFT_BUTTON_LABEL}
+												</button>
+												<button
+													className="settings-button settings-task-card-save"
+													disabled={savingAiTaskConfig || !translationHasUnsavedChanges}
+													onClick={() => void handleSaveTranslationConfig()}
+													type="button"
+												>
+													{savingTranslationConfig ? "保存中..." : "保存翻译配置"}
+												</button>
+											</div>
+										</article>
+
+										<article
+											className="settings-editor-card settings-task-card"
+											id="prompts-rag-answer"
+											ref={bindSectionBlockRef("prompts-rag-answer")}
+										>
+											<div className="settings-task-card-header">
+												<div className="settings-acp-detail-copy">
+													<div className="settings-task-card-title-row">
+														<h3 className="settings-subsection-title">文档问答</h3>
+														<span
+															className={`settings-status-chip ${
+																questionAnswerHasUnsavedChanges ? "settings-status-chip-strong" : ""
+															}`}
+														>
+															{questionAnswerHasUnsavedChanges ? "有草稿" : "已同步"}
+														</span>
+													</div>
+													<span className="settings-help-text settings-help-text-tight">
+														这里只控制回答阶段。文档检索仍然使用 RAG 页里的 Embedding。
 													</span>
 												</div>
 											</div>
-
-											<div
-												className="settings-editor-card"
-												id="prompts-rag-answer"
-												ref={bindSectionBlockRef("prompts-rag-answer")}
-											>
-												<div className="settings-editor-card-header">
-													<div className="settings-acp-detail-copy">
-														<span className="settings-section-kicker">RAG Answer</span>
-														<h3 className="settings-subsection-title">文档问答配置</h3>
-														<span className="settings-help-text settings-help-text-tight">
-															这里只控制检索后的回答阶段使用哪个模型，以及回答阶段遵循的系统提示词；不影响向量化、召回数量和
-															Embedding 条目选择。
-														</span>
-													</div>
-													<div className="settings-editor-card-actions">
-														<button
-															className="settings-button settings-agent-secondary"
-															disabled={savingAiTaskConfig}
-															onClick={() =>
-																setPromptsSettings((current) => ({
-																	...current,
-																	ragAnswerSystemPrompt:
-																		defaultPromptsSettings.ragAnswerSystemPrompt,
-																}))
-															}
-															type="button"
-														>
-															恢复默认
-														</button>
-														<button
-															className="settings-button settings-agent-secondary"
-															disabled={savingAiTaskConfig || !questionAnswerHasUnsavedChanges}
-															onClick={handleDiscardQuestionAnswerDraft}
-															type="button"
-														>
-															{DISCARD_DRAFT_BUTTON_LABEL}
-														</button>
-														<button
-															className="settings-button"
-															disabled={savingAiTaskConfig || !questionAnswerHasUnsavedChanges}
-															onClick={() => void handleSaveQuestionAnswerConfig()}
-															type="button"
-														>
-															{savingQuestionAnswerConfig ? "保存中..." : "保存文档问答配置"}
-														</button>
-													</div>
-												</div>
-												<div className="settings-item settings-item-stacked">
-													<label
-														className="settings-label settings-label-stacked"
-														htmlFor="question-answer-provider"
-													>
-														<span>问答模型</span>
-													</label>
-													<select
-														className="settings-select"
-														disabled={savingAiTaskConfig}
-														id="question-answer-provider"
-														onChange={(event) =>
-															handleLlmRouteProviderChange(
-																"questionAnswerProviderId",
-																event.target.value || null,
-															)
-														}
-														value={llmSettings.questionAnswerProviderId ?? ""}
-													>
-														<option value="">请选择一个普通 LLM 条目</option>
-														{eligibleAiTaskProviders.map((provider) => (
-															<option key={provider.id} value={provider.id}>
-																{provider.name || provider.model || provider.baseUrl}
-																{` · ${summarizeLlmProviderProfile(provider)}`}
-															</option>
-														))}
-													</select>
+											<div className="settings-item settings-item-stacked">
+												<label
+													className="settings-label settings-label-stacked"
+													htmlFor="question-answer-provider"
+												>
+													<span>问答模型</span>
+												</label>
+												<select
+													className="settings-select"
+													disabled={savingAiTaskConfig}
+													id="question-answer-provider"
+													onChange={(event) =>
+														handleLlmRouteProviderChange(
+															"questionAnswerProviderId",
+															event.target.value || null,
+														)
+													}
+													value={llmSettings.questionAnswerProviderId ?? ""}
+												>
+													<option value="">请选择一个普通 LLM 条目</option>
+													{eligibleAiTaskProviders.map((provider) => (
+														<option key={provider.id} value={provider.id}>
+															{provider.name || provider.model || provider.baseUrl}
+															{` · ${summarizeLlmProviderProfile(provider)}`}
+														</option>
+													))}
+												</select>
+												<span className="settings-help-text settings-help-text-tight">
+													当前条目：
+													{selectedQuestionAnswerProvider
+														? `${selectedQuestionAnswerProvider.name || selectedQuestionAnswerProvider.model || selectedQuestionAnswerProvider.baseUrl} · ${summarizeLlmProviderProfile(selectedQuestionAnswerProvider)}`
+														: "未配置"}
+												</span>
+												{eligibleAiTaskProviders.length === 0 ? (
 													<span className="settings-help-text settings-help-text-tight">
-														当前用于回答阶段的条目：
-														{selectedQuestionAnswerProvider
-															? `${selectedQuestionAnswerProvider.name || selectedQuestionAnswerProvider.model || selectedQuestionAnswerProvider.baseUrl} · ${summarizeLlmProviderProfile(selectedQuestionAnswerProvider)}`
-															: "未配置"}
+														当前没有可选普通 LLM 条目。
+														<button
+															className="settings-text-link"
+															onClick={() => handleSelectSection("llm")}
+															type="button"
+														>
+															前往 LLM 配置
+														</button>
 													</span>
-													<span className="settings-help-text settings-help-text-tight">
-														文档检索仍然使用 RAG 页面配置的 Embedding 条目；这里只决定回答阶段。
-													</span>
-													{eligibleAiTaskProviders.length === 0 ? (
-														<span className="settings-help-text settings-help-text-tight">
-															当前没有可用的普通 LLM 条目。先在 LLM 页面配置至少一个非 Embedding
-															模型。
-														</span>
-													) : null}
-												</div>
-												<div className="settings-item settings-item-stacked">
+												) : null}
+											</div>
+											<div className="settings-item settings-item-stacked">
+												<div className="settings-task-field-header">
 													<label
 														className="settings-label settings-label-stacked"
 														htmlFor="rag-answer-system-prompt"
 													>
-														<span>系统提示词</span>
+														<span>提示词</span>
 													</label>
-													<textarea
-														className="settings-textarea"
-														disabled={savingAiTaskConfig}
-														id="rag-answer-system-prompt"
-														onChange={(event) =>
-															setPromptsSettings((current) => ({
-																...current,
-																ragAnswerSystemPrompt: event.target.value,
-															}))
-														}
-														placeholder="留空并保存时会恢复内置默认提示词"
-														rows={10}
-														value={promptsSettings.ragAnswerSystemPrompt}
-													/>
-													<span className="settings-help-text">
-														默认提示词会强制模型先用工具取证，再区分事实与推断；证据不足、冲突或缺失时，必须直接说明，而不是猜。
-													</span>
+													<button
+														aria-controls="question-answer-prompt-panel"
+														aria-expanded={questionAnswerPromptExpanded}
+														className="settings-text-link"
+														onClick={() => setQuestionAnswerPromptExpanded((current) => !current)}
+														type="button"
+													>
+														{questionAnswerPromptExpanded ? "收起编辑" : "展开编辑"}
+													</button>
 												</div>
+												<span className="settings-help-text settings-help-text-tight">
+													{questionAnswerPromptSummary}
+												</span>
+												{questionAnswerPromptExpanded ? (
+													<div
+														className="settings-task-prompt-panel"
+														id="question-answer-prompt-panel"
+													>
+														<textarea
+															className="settings-textarea settings-task-prompt-textarea"
+															disabled={savingAiTaskConfig}
+															id="rag-answer-system-prompt"
+															onChange={(event) =>
+																setPromptsSettings((current) => ({
+																	...current,
+																	ragAnswerSystemPrompt: event.target.value,
+																}))
+															}
+															placeholder="留空并保存时会恢复内置默认提示词"
+															rows={6}
+															value={promptsSettings.ragAnswerSystemPrompt}
+														/>
+														<span className="settings-help-text settings-help-text-tight">
+															默认规则要求先取证，再区分事实与推断；证据不够时直接说明。
+														</span>
+													</div>
+												) : null}
 											</div>
-										</div>
+											<div className="settings-task-card-actions">
+												<button
+													className="settings-button settings-agent-secondary"
+													disabled={savingAiTaskConfig}
+													onClick={() =>
+														setPromptsSettings((current) => ({
+															...current,
+															ragAnswerSystemPrompt: defaultPromptsSettings.ragAnswerSystemPrompt,
+														}))
+													}
+													type="button"
+												>
+													恢复默认
+												</button>
+												<button
+													className="settings-button settings-agent-secondary"
+													disabled={savingAiTaskConfig || !questionAnswerHasUnsavedChanges}
+													onClick={handleDiscardQuestionAnswerDraft}
+													type="button"
+												>
+													{DISCARD_DRAFT_BUTTON_LABEL}
+												</button>
+												<button
+													className="settings-button settings-task-card-save"
+													disabled={savingAiTaskConfig || !questionAnswerHasUnsavedChanges}
+													onClick={() => void handleSaveQuestionAnswerConfig()}
+													type="button"
+												>
+													{savingQuestionAnswerConfig ? "保存中..." : "保存文档问答配置"}
+												</button>
+											</div>
+										</article>
 									</div>
 								</section>
 							) : null}
@@ -4380,31 +4616,64 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 									role="tabpanel"
 									tabIndex={0}
 								>
-									<h2 className="settings-section-title">LLM</h2>
-									<div className="settings-acp-form-layout settings-llm-layout">
-										<aside
-											className="settings-acp-sidebar settings-acp-sidebar-secondary settings-llm-sidebar"
-											id="llm-catalog"
-											ref={bindSectionBlockRef("llm-catalog")}
-										>
+									{llmSettings.providers.length === 0 ? (
+										<div className="settings-editor-card settings-llm-empty-state">
 											<div className="settings-acp-sidebar-header">
 												<div className="settings-acp-sidebar-copy">
-													<span className="settings-section-kicker">已配置</span>
-													<h3 className="settings-subsection-title">LLM 条目</h3>
+													<span className="settings-section-kicker">开始配置</span>
+													<h3 className="settings-subsection-title">还没有 LLM 条目</h3>
 													<span className="settings-help-text settings-help-text-tight">
-														每个条目只配置一个模型。新增条目后，可直接在右侧编辑卡顶部选择是否套用内置模板。
+														先新增一个普通 LLM 条目。翻译、文档问答和 OCR 都会引用这里的条目；RAG
+														索引则使用 Embedding 条目。
 													</span>
 												</div>
 												<button
-													className="settings-button settings-button-compact"
+													className="settings-button"
 													onClick={handleAddLlmProvider}
 													type="button"
 												>
-													新增
+													新增条目
 												</button>
 											</div>
+											<div className="settings-llm-empty-steps">
+												<div className="settings-llm-empty-step">
+													<strong>1. 先选配置类型</strong>
+													<span className="settings-agent-meta">
+														普通 LLM 用于翻译、问答和 OCR；Embedding 用于 RAG 建索引。
+													</span>
+												</div>
+												<div className="settings-llm-empty-step">
+													<strong>2. 再填接入信息</strong>
+													<span className="settings-agent-meta">
+														填写名称、Base URL、API Key 和模型名；需要时再套内置模板。
+													</span>
+												</div>
+											</div>
+										</div>
+									) : (
+										<div className="settings-acp-form-layout settings-llm-layout">
+											<aside
+												className="settings-acp-sidebar settings-acp-sidebar-secondary settings-llm-sidebar"
+												id="llm-catalog"
+												ref={bindSectionBlockRef("llm-catalog")}
+											>
+												<div className="settings-acp-sidebar-header">
+													<div className="settings-acp-sidebar-copy">
+														<span className="settings-section-kicker">已配置</span>
+														<h3 className="settings-subsection-title">LLM 条目</h3>
+														<span className="settings-help-text settings-help-text-tight">
+															每个条目只配置一个模型。新增条目后，可直接在右侧编辑卡顶部选择是否套用内置模板。
+														</span>
+													</div>
+													<button
+														className="settings-button settings-button-compact"
+														onClick={handleAddLlmProvider}
+														type="button"
+													>
+														新增
+													</button>
+												</div>
 
-											{llmSettings.providers.length > 0 ? (
 												<div className="settings-llm-provider-grid">
 													{llmSettings.providers.map((provider) => {
 														const issueCount =
@@ -4475,767 +4744,770 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 														);
 													})}
 												</div>
-											) : (
-												<div className="settings-empty-panel settings-empty-panel-subtle">
-													<strong className="settings-empty-title">还没有 LLM 条目</strong>
-													<span className="settings-help-text settings-help-text-tight">
-														先添加至少一个条目。OCR、翻译和 RAG 问答会引用 LLM 类型条目；RAG
-														索引会引用 Embedding 类型条目。
-													</span>
-												</div>
-											)}
-										</aside>
+											</aside>
 
-										<div
-											className="settings-acp-detail settings-llm-detail"
-											id="llm-editor"
-											ref={bindSectionBlockRef("llm-editor")}
-										>
-											<>
-												<SettingsDraftActionCard
-													actions={
-														<>
-															{llmValidation.totalIssues > 0 ? (
+											<div
+												className="settings-acp-detail settings-llm-detail"
+												id="llm-editor"
+												ref={bindSectionBlockRef("llm-editor")}
+											>
+												<>
+													<SettingsDraftActionCard
+														actions={
+															<>
+																{llmValidation.totalIssues > 0 ? (
+																	<button
+																		className="settings-button settings-agent-secondary"
+																		onClick={locateFirstLlmIssue}
+																		type="button"
+																	>
+																		定位问题
+																	</button>
+																) : null}
 																<button
 																	className="settings-button settings-agent-secondary"
-																	onClick={locateFirstLlmIssue}
+																	disabled={savingLlm || !llmHasUnsavedChanges}
+																	onClick={handleDiscardLlmDraft}
 																	type="button"
 																>
-																	定位问题
+																	{DISCARD_DRAFT_BUTTON_LABEL}
 																</button>
-															) : null}
-															<button
-																className="settings-button settings-agent-secondary"
-																disabled={savingLlm || !llmHasUnsavedChanges}
-																onClick={handleDiscardLlmDraft}
-																type="button"
+																<button
+																	className="settings-button"
+																	disabled={savingLlm || !llmHasUnsavedChanges}
+																	onClick={() => void handleSaveLlm()}
+																	type="button"
+																>
+																	{savingLlm ? "保存中..." : "保存 LLM 配置"}
+																</button>
+															</>
+														}
+														description={
+															llmHasUnsavedChanges
+																? "当前 LLM 草稿尚未写回配置。"
+																: "LLM 配置已同步到本地配置文件。"
+														}
+														title={llmHasUnsavedChanges ? "有未保存的 LLM 草稿" : "LLM 配置已同步"}
+													/>
+													{selectedLlmProvider ? (
+														<>
+															<div
+																className={`settings-llm-editor-hero settings-llm-editor-hero-${selectedLlmProvider.modelType}`}
 															>
-																{DISCARD_DRAFT_BUTTON_LABEL}
-															</button>
-															<button
-																className="settings-button"
-																disabled={savingLlm || !llmHasUnsavedChanges}
-																onClick={() => void handleSaveLlm()}
-																type="button"
-															>
-																{savingLlm ? "保存中..." : "保存 LLM 配置"}
-															</button>
-														</>
-													}
-													description={
-														llmHasUnsavedChanges
-															? "当前 LLM 草稿尚未写回配置。"
-															: "LLM 配置已同步到本地配置文件。"
-													}
-													title={llmHasUnsavedChanges ? "有未保存的 LLM 草稿" : "LLM 配置已同步"}
-												/>
-												{selectedLlmProvider ? (
-													<>
-														<div
-															className={`settings-llm-editor-hero settings-llm-editor-hero-${selectedLlmProvider.modelType}`}
-														>
-															<div className="settings-llm-editor-hero-copy">
-																<span className="settings-section-kicker">编辑</span>
-																<h3 className="settings-subsection-title">
-																	{selectedLlmProvider.name.trim() || "LLM 条目"}
-																</h3>
-																<div className="settings-llm-editor-hero-meta">
-																	<span>
-																		{selectedLlmProvider.baseUrl.trim() || "未设置 Base URL"}
-																	</span>
-																	<span>{selectedLlmProvider.model.trim() || "未配置模型"}</span>
-																</div>
-																<div className="settings-llm-editor-hero-badges">
-																	<span
-																		className={`settings-llm-hero-type settings-llm-hero-type-${selectedLlmProvider.modelType}`}
-																	>
-																		{getLlmProviderKindLabel(
-																			selectedLlmProviderKind ?? "embedding",
-																		)}
-																	</span>
-																	{llmSettings.translationProviderId === selectedLlmProvider.id ? (
-																		<span className="settings-status-chip settings-status-chip-strong">
-																			翻译 LLM
+																<div className="settings-llm-editor-hero-copy">
+																	<span className="settings-section-kicker">编辑</span>
+																	<h3 className="settings-subsection-title">
+																		{selectedLlmProvider.name.trim() || "LLM 条目"}
+																	</h3>
+																	<div className="settings-llm-editor-hero-meta">
+																		<span>
+																			{selectedLlmProvider.baseUrl.trim() || "未设置 Base URL"}
 																		</span>
-																	) : null}
-																	{llmSettings.questionAnswerProviderId ===
-																	selectedLlmProvider.id ? (
-																		<span className="settings-status-chip settings-status-chip-strong">
-																			问答 LLM
+																		<span>{selectedLlmProvider.model.trim() || "未配置模型"}</span>
+																	</div>
+																	<div className="settings-llm-editor-hero-badges">
+																		<span
+																			className={`settings-llm-hero-type settings-llm-hero-type-${selectedLlmProvider.modelType}`}
+																		>
+																			{getLlmProviderKindLabel(
+																				selectedLlmProviderKind ?? "embedding",
+																			)}
 																		</span>
-																	) : null}
-																	{providerCanHandleOcr(selectedLlmProvider) ? (
-																		<span className="settings-status-chip">多模态</span>
-																	) : null}
+																		{llmSettings.translationProviderId ===
+																		selectedLlmProvider.id ? (
+																			<span className="settings-status-chip settings-status-chip-strong">
+																				翻译 LLM
+																			</span>
+																		) : null}
+																		{llmSettings.questionAnswerProviderId ===
+																		selectedLlmProvider.id ? (
+																			<span className="settings-status-chip settings-status-chip-strong">
+																				问答 LLM
+																			</span>
+																		) : null}
+																		{providerCanHandleOcr(selectedLlmProvider) ? (
+																			<span className="settings-status-chip">多模态</span>
+																		) : null}
+																	</div>
 																</div>
+																<button
+																	className="settings-button settings-agent-remove-inline"
+																	onClick={() => handleRemoveLlmProvider(selectedLlmProvider.id)}
+																	type="button"
+																>
+																	删除
+																</button>
 															</div>
-															<button
-																className="settings-button settings-agent-remove-inline"
-																onClick={() => handleRemoveLlmProvider(selectedLlmProvider.id)}
-																type="button"
-															>
-																删除
-															</button>
-														</div>
 
-														<div className="settings-llm-editor-grid">
-															<div className="settings-llm-editor-main">
-																<div className="settings-llm-editor-panel">
-																	<div className="settings-item settings-item-stacked">
-																		<label
-																			className="settings-label settings-label-stacked"
-																			htmlFor="llm-provider-template"
-																		>
-																			<span>使用模板</span>
-																		</label>
-																		<select
-																			className="settings-select"
-																			disabled={savingLlm}
-																			id="llm-provider-template"
-																			onChange={(event) =>
-																				handleLlmProviderTemplateChange(
-																					selectedLlmProvider.id,
-																					event.target.value,
-																				)
-																			}
-																			value={selectedLlmProvider.builtinPresetId ?? ""}
-																		>
-																			<option value="">不使用模板</option>
-																			{builtinLlmTemplates.map((template) => (
-																				<option key={template.id} value={template.id}>
-																					{template.displayName}
+															<div className="settings-llm-editor-grid">
+																<div className="settings-llm-editor-main">
+																	<div className="settings-llm-editor-panel">
+																		<div className="settings-item settings-item-stacked">
+																			<label
+																				className="settings-label settings-label-stacked"
+																				htmlFor="llm-provider-template"
+																			>
+																				<span>使用模板</span>
+																			</label>
+																			<select
+																				className="settings-select"
+																				disabled={savingLlm}
+																				id="llm-provider-template"
+																				onChange={(event) =>
+																					handleLlmProviderTemplateChange(
+																						selectedLlmProvider.id,
+																						event.target.value,
+																					)
+																				}
+																				value={selectedLlmProvider.builtinPresetId ?? ""}
+																			>
+																				<option value="">不使用模板</option>
+																				{builtinLlmTemplates.map((template) => (
+																					<option key={template.id} value={template.id}>
+																						{template.displayName}
+																					</option>
+																				))}
+																			</select>
+																			<span className="settings-help-text settings-help-text-tight">
+																				{selectedLlmProviderIsBuiltin
+																					? "当前条目已绑定模板；模型只能从模板白名单里选。切回“不使用模板”会保留当前字段值，但解除模板约束。"
+																					: "选择后会自动填入 Base URL、协议、默认模型和能力约束。"}
+																			</span>
+																		</div>
+
+																		<div className="settings-item settings-item-stacked">
+																			<label
+																				className="settings-label settings-label-stacked"
+																				htmlFor="llm-provider-kind"
+																			>
+																				<span>配置类型</span>
+																			</label>
+																			<select
+																				className="settings-select"
+																				disabled={savingLlm || selectedLlmProviderIsBuiltin}
+																				id="llm-provider-kind"
+																				onChange={(event) =>
+																					handleLlmProviderKindChange(
+																						selectedLlmProvider.id,
+																						event.target.value as LlmProviderKind,
+																					)
+																				}
+																				value={selectedLlmProviderKind ?? "embedding"}
+																			>
+																				<option value="llm_responses_stateless">
+																					LLM · responses stateless
 																				</option>
-																			))}
-																		</select>
-																		<span className="settings-help-text settings-help-text-tight">
-																			{selectedLlmProviderIsBuiltin
-																				? "当前条目已绑定模板；模型只能从模板白名单里选。切回“不使用模板”会保留当前字段值，但解除模板约束。"
-																				: "选择后会自动填入 Base URL、协议、默认模型和能力约束。"}
-																		</span>
-																	</div>
+																				<option value="llm_responses_stateful">
+																					LLM · responses stateful
+																				</option>
+																				<option value="llm_chat_completions">
+																					LLM · chat/completions
+																				</option>
+																				<option value="embedding">Embedding</option>
+																			</select>
+																			{selectedLlmProviderIsBuiltin ? (
+																				<span className="settings-help-text settings-help-text-tight">
+																					内置模板条目的配置类型跟随目录模型，不能手动改协议类型。
+																				</span>
+																			) : null}
+																		</div>
 
-																	<div className="settings-item settings-item-stacked">
-																		<label
-																			className="settings-label settings-label-stacked"
-																			htmlFor="llm-provider-kind"
-																		>
-																			<span>配置类型</span>
-																		</label>
-																		<select
-																			className="settings-select"
-																			disabled={savingLlm || selectedLlmProviderIsBuiltin}
-																			id="llm-provider-kind"
-																			onChange={(event) =>
-																				handleLlmProviderKindChange(
-																					selectedLlmProvider.id,
-																					event.target.value as LlmProviderKind,
-																				)
-																			}
-																			value={selectedLlmProviderKind ?? "embedding"}
-																		>
-																			<option value="llm_responses_stateless">
-																				LLM · responses stateless
-																			</option>
-																			<option value="llm_responses_stateful">
-																				LLM · responses stateful
-																			</option>
-																			<option value="llm_chat_completions">
-																				LLM · chat/completions
-																			</option>
-																			<option value="embedding">Embedding</option>
-																		</select>
-																		{selectedLlmProviderIsBuiltin ? (
-																			<span className="settings-help-text settings-help-text-tight">
-																				内置模板条目的配置类型跟随目录模型，不能手动改协议类型。
-																			</span>
-																		) : null}
-																	</div>
-
-																	<div className="settings-item settings-item-stacked">
-																		<label
-																			className="settings-label settings-label-stacked"
-																			htmlFor="llm-provider-name"
-																		>
-																			<span>名称</span>
-																		</label>
-																		<input
-																			aria-describedby={joinDescribedByIds(
-																				selectedLlmFieldIssues.name
-																					? buildFieldIssueId("llm", "name", selectedLlmProvider.id)
-																					: undefined,
-																			)}
-																			aria-invalid={selectedLlmFieldIssues.name ? true : undefined}
-																			className="settings-input settings-input-wide"
-																			disabled={savingLlm}
-																			id="llm-provider-name"
-																			onChange={(event) =>
-																				handleLlmProviderFieldChange(
-																					selectedLlmProvider.id,
-																					"name",
-																					event.target.value,
-																				)
-																			}
-																			ref={bindLlmFieldRef(selectedLlmProvider.id, "name")}
-																			type="text"
-																			value={selectedLlmProvider.name}
-																		/>
-																		{selectedLlmFieldIssues.name ? (
-																			<span
-																				className="settings-field-error"
-																				id={buildFieldIssueId(
-																					"llm",
-																					"name",
-																					selectedLlmProvider.id,
-																				)}
+																		<div className="settings-item settings-item-stacked">
+																			<label
+																				className="settings-label settings-label-stacked"
+																				htmlFor="llm-provider-name"
 																			>
-																				{selectedLlmFieldIssues.name}
-																			</span>
-																		) : null}
-																	</div>
+																				<span>名称</span>
+																			</label>
+																			<input
+																				aria-describedby={joinDescribedByIds(
+																					selectedLlmFieldIssues.name
+																						? buildFieldIssueId(
+																								"llm",
+																								"name",
+																								selectedLlmProvider.id,
+																							)
+																						: undefined,
+																				)}
+																				aria-invalid={
+																					selectedLlmFieldIssues.name ? true : undefined
+																				}
+																				className="settings-input settings-input-wide"
+																				disabled={savingLlm}
+																				id="llm-provider-name"
+																				onChange={(event) =>
+																					handleLlmProviderFieldChange(
+																						selectedLlmProvider.id,
+																						"name",
+																						event.target.value,
+																					)
+																				}
+																				ref={bindLlmFieldRef(selectedLlmProvider.id, "name")}
+																				type="text"
+																				value={selectedLlmProvider.name}
+																			/>
+																			{selectedLlmFieldIssues.name ? (
+																				<span
+																					className="settings-field-error"
+																					id={buildFieldIssueId(
+																						"llm",
+																						"name",
+																						selectedLlmProvider.id,
+																					)}
+																				>
+																					{selectedLlmFieldIssues.name}
+																				</span>
+																			) : null}
+																		</div>
 
-																	<div className="settings-item settings-item-stacked">
-																		<label
-																			className="settings-label settings-label-stacked"
-																			htmlFor="llm-provider-base-url"
-																		>
-																			<span>API Base URL</span>
-																		</label>
-																		<input
-																			aria-describedby={joinDescribedByIds(
-																				selectedLlmFieldIssues.baseUrl
-																					? buildFieldIssueId(
-																							"llm",
-																							"base-url",
-																							selectedLlmProvider.id,
-																						)
-																					: undefined,
-																			)}
-																			aria-invalid={
-																				selectedLlmFieldIssues.baseUrl ? true : undefined
-																			}
-																			className="settings-input settings-input-wide settings-input-mono"
-																			disabled={
-																				savingLlm ||
-																				(selectedLlmProviderIsBuiltin &&
-																					selectedLlmProvider.managedBaseUrl)
-																			}
-																			id="llm-provider-base-url"
-																			onChange={(event) =>
-																				handleLlmProviderFieldChange(
-																					selectedLlmProvider.id,
-																					"baseUrl",
-																					event.target.value,
-																				)
-																			}
-																			placeholder="https://api.openai.com/v1"
-																			ref={bindLlmFieldRef(selectedLlmProvider.id, "baseUrl")}
-																			type="text"
-																			value={selectedLlmProvider.baseUrl}
-																		/>
-																		{selectedLlmProviderIsBuiltin ? (
-																			<span className="settings-help-text settings-help-text-tight">
-																				{selectedLlmProvider.managedBaseUrl ? (
-																					<>
-																						当前使用模板默认接入点。
-																						<button
-																							className="settings-text-link"
-																							onClick={() =>
-																								handleBuiltinProviderManagedBaseUrlChange(
-																									selectedLlmProvider.id,
-																									false,
-																								)
-																							}
-																							type="button"
-																						>
-																							改为自定义接入点
-																						</button>
-																					</>
-																				) : (
-																					<>
-																						当前已脱离模板默认接入点管理。
-																						<button
-																							className="settings-text-link"
-																							onClick={() =>
-																								handleBuiltinProviderManagedBaseUrlChange(
-																									selectedLlmProvider.id,
-																									true,
-																								)
-																							}
-																							type="button"
-																						>
-																							恢复模板默认接入点
-																						</button>
-																					</>
-																				)}
-																			</span>
-																		) : null}
-																		{selectedLlmFieldIssues.baseUrl ? (
-																			<span
-																				className="settings-field-error"
-																				id={buildFieldIssueId(
-																					"llm",
-																					"base-url",
-																					selectedLlmProvider.id,
-																				)}
+																		<div className="settings-item settings-item-stacked">
+																			<label
+																				className="settings-label settings-label-stacked"
+																				htmlFor="llm-provider-base-url"
 																			>
-																				{selectedLlmFieldIssues.baseUrl}
-																			</span>
-																		) : null}
-																	</div>
-
-																	<div className="settings-item settings-item-stacked">
-																		<label
-																			className="settings-label settings-label-stacked"
-																			htmlFor="llm-provider-api-key"
-																		>
-																			<span>API Key</span>
-																		</label>
-																		<input
-																			autoComplete="off"
-																			className="settings-input settings-input-wide settings-input-mono"
-																			disabled={savingLlm}
-																			id="llm-provider-api-key"
-																			onChange={(event) =>
-																				handleLlmProviderFieldChange(
-																					selectedLlmProvider.id,
-																					"apiKey",
-																					event.target.value,
-																				)
-																			}
-																			placeholder="sk-..."
-																			type="password"
-																			value={selectedLlmProvider.apiKey}
-																		/>
-																	</div>
-
-																	<div
-																		className="settings-item settings-item-stacked"
-																		ref={llmModelMenuRef}
-																	>
-																		<label
-																			className="settings-label settings-label-stacked"
-																			htmlFor="llm-provider-model"
-																		>
-																			<span>模型名</span>
-																		</label>
-																		<div className="settings-llm-model-picker">
-																			<div className="settings-llm-model-input-row">
-																				<input
-																					aria-describedby={joinDescribedByIds(
-																						selectedLlmFieldIssues.model
-																							? buildFieldIssueId(
-																									"llm",
-																									"model",
-																									selectedLlmProvider.id,
-																								)
-																							: undefined,
-																						"llm-provider-model-help",
-																					)}
-																					aria-invalid={
-																						selectedLlmFieldIssues.model ? true : undefined
-																					}
-																					aria-controls={
-																						openLlmModelPickerId ===
-																						buildLlmModelPickerId(selectedLlmProvider.id, "model")
-																							? "llm-provider-model-menu"
-																							: undefined
-																					}
-																					aria-expanded={
-																						openLlmModelPickerId ===
-																						buildLlmModelPickerId(selectedLlmProvider.id, "model")
-																					}
-																					aria-haspopup="listbox"
-																					className="settings-input settings-input-wide settings-input-mono"
-																					disabled={savingLlm}
-																					id="llm-provider-model"
-																					onChange={
-																						selectedLlmProviderIsBuiltin
-																							? undefined
-																							: (event) =>
-																									handleLlmProviderFieldChange(
-																										selectedLlmProvider.id,
-																										"model",
-																										event.target.value,
-																									)
-																					}
-																					onKeyDown={(event) =>
-																						handleLlmModelInputKeyDown(
-																							event,
-																							selectedLlmProvider,
-																							"model",
-																						)
-																					}
-																					placeholder={getLlmProviderModelPlaceholder(
-																						selectedLlmProvider,
-																					)}
-																					readOnly={selectedLlmProviderIsBuiltin}
-																					ref={bindLlmFieldRef(selectedLlmProvider.id, "model")}
-																					type="text"
-																					value={selectedLlmProvider.model}
-																				/>
-																				<button
-																					aria-expanded={
-																						openLlmModelPickerId ===
-																						buildLlmModelPickerId(selectedLlmProvider.id, "model")
-																					}
-																					aria-haspopup="listbox"
-																					aria-label={
-																						selectedLlmProviderIsBuiltin
-																							? "展开模板白名单模型"
-																							: selectedLlmProviderModels.length > 0
-																								? "展开模型列表"
-																								: "通过 /models 拉取模型列表"
-																					}
-																					className="settings-button settings-llm-model-toggle"
-																					disabled={
-																						savingLlm ||
-																						(!selectedLlmProviderIsBuiltin &&
-																							!selectedLlmProvider.baseUrl.trim())
-																					}
-																					onClick={() =>
-																						void handleToggleLlmModelMenu(
-																							selectedLlmProvider,
-																							"model",
-																						)
-																					}
-																					type="button"
-																				>
-																					{isLoadingSelectedLlmProviderModels ? "..." : "▾"}
-																				</button>
-																			</div>
-																			{openLlmModelPickerId ===
-																			buildLlmModelPickerId(selectedLlmProvider.id, "model") ? (
-																				<div
-																					className="settings-combobox-panel settings-llm-model-panel"
-																					id="llm-provider-model-menu"
-																					role="listbox"
-																				>
-																					<div className="settings-llm-model-panel-header">
-																						<span className="settings-combobox-option-meta">
-																							{selectedLlmProviderIsBuiltin
-																								? `目录可选 ${selectedBuiltinLlmSelectableModels.length} 个模型`
-																								: `已拉取 ${selectedLlmProviderModels.length} 个模型`}
-																						</span>
-																						{selectedLlmProviderIsBuiltin ? null : (
+																				<span>API Base URL</span>
+																			</label>
+																			<input
+																				aria-describedby={joinDescribedByIds(
+																					selectedLlmFieldIssues.baseUrl
+																						? buildFieldIssueId(
+																								"llm",
+																								"base-url",
+																								selectedLlmProvider.id,
+																							)
+																						: undefined,
+																				)}
+																				aria-invalid={
+																					selectedLlmFieldIssues.baseUrl ? true : undefined
+																				}
+																				className="settings-input settings-input-wide settings-input-mono"
+																				disabled={
+																					savingLlm ||
+																					(selectedLlmProviderIsBuiltin &&
+																						selectedLlmProvider.managedBaseUrl)
+																				}
+																				id="llm-provider-base-url"
+																				onChange={(event) =>
+																					handleLlmProviderFieldChange(
+																						selectedLlmProvider.id,
+																						"baseUrl",
+																						event.target.value,
+																					)
+																				}
+																				placeholder="https://api.openai.com/v1"
+																				ref={bindLlmFieldRef(selectedLlmProvider.id, "baseUrl")}
+																				type="text"
+																				value={selectedLlmProvider.baseUrl}
+																			/>
+																			{selectedLlmProviderIsBuiltin ? (
+																				<span className="settings-help-text settings-help-text-tight">
+																					{selectedLlmProvider.managedBaseUrl ? (
+																						<>
+																							当前使用模板默认接入点。
 																							<button
-																								className="settings-button settings-llm-model-refresh"
-																								disabled={
-																									savingLlm || isLoadingSelectedLlmProviderModels
-																								}
+																								className="settings-text-link"
 																								onClick={() =>
-																									void handleFetchLlmProviderModels(
-																										selectedLlmProvider,
-																										{
-																											openField: "model",
-																										},
+																									handleBuiltinProviderManagedBaseUrlChange(
+																										selectedLlmProvider.id,
+																										false,
 																									)
 																								}
 																								type="button"
 																							>
-																								刷新
+																								改为自定义接入点
 																							</button>
-																						)}
-																					</div>
-																					{selectedLlmProviderIsBuiltin
-																						? selectedBuiltinLlmSelectableModels.map((model) => (
-																								<button
-																									aria-selected={
-																										selectedLlmProvider.builtinPresetModelId ===
-																										model.id
-																									}
-																									className={`settings-combobox-option ${
-																										selectedLlmProvider.builtinPresetModelId ===
-																										model.id
-																											? "settings-combobox-option-active"
-																											: ""
-																									}`}
-																									key={model.id}
-																									onClick={() =>
-																										handleBuiltinTemplateModelChange(
-																											selectedLlmProvider.id,
-																											model.id,
-																										)
-																									}
-																									role="option"
-																									type="button"
-																								>
-																									<span className="settings-combobox-option-label">
-																										{model.displayName}
-																									</span>
-																									<span className="settings-combobox-option-meta">
-																										{model.summary}
-																									</span>
-																								</button>
-																							))
-																						: selectedLlmProviderModels.map((model) => (
-																								<button
-																									aria-selected={
-																										selectedLlmProvider.model === model.id
-																									}
-																									className={`settings-combobox-option ${
-																										selectedLlmProvider.model === model.id
-																											? "settings-combobox-option-active"
-																											: ""
-																									}`}
-																									key={model.id}
-																									onClick={() =>
-																										handleLlmModelOptionClick(
-																											selectedLlmProvider.id,
-																											"model",
-																											model,
-																										)
-																									}
-																									role="option"
-																									type="button"
-																								>
-																									<span className="settings-combobox-option-label">
-																										{model.id}
-																									</span>
-																									<span className="settings-combobox-option-meta">
-																										{selectedLlmProvider.model === model.id
-																											? "当前已选"
-																											: "点击填入输入框"}
-																									</span>
-																								</button>
-																							))}
-																				</div>
+																						</>
+																					) : (
+																						<>
+																							当前已脱离模板默认接入点管理。
+																							<button
+																								className="settings-text-link"
+																								onClick={() =>
+																									handleBuiltinProviderManagedBaseUrlChange(
+																										selectedLlmProvider.id,
+																										true,
+																									)
+																								}
+																								type="button"
+																							>
+																								恢复模板默认接入点
+																							</button>
+																						</>
+																					)}
+																				</span>
+																			) : null}
+																			{selectedLlmFieldIssues.baseUrl ? (
+																				<span
+																					className="settings-field-error"
+																					id={buildFieldIssueId(
+																						"llm",
+																						"base-url",
+																						selectedLlmProvider.id,
+																					)}
+																				>
+																					{selectedLlmFieldIssues.baseUrl}
+																				</span>
 																			) : null}
 																		</div>
-																		<span
-																			className="settings-help-text settings-help-text-tight"
-																			id="llm-provider-model-help"
-																		>
-																			{selectedLlmProviderIsBuiltin
-																				? (selectedBuiltinLlmTemplateModel?.summary ??
-																					"请选择模板白名单中的模型。")
-																				: isLoadingSelectedLlmProviderModels
-																					? "正在从当前 Base URL 拉取模型列表。"
-																					: selectedLlmProviderModelsError
-																						? selectedLlmProviderModelsError
-																						: selectedLlmProviderModels.length > 0
-																							? `已拉取 ${selectedLlmProviderModels.length} 个模型。右侧下拉按钮可直接选，输入框仍可手填列表里没有的模型。`
-																							: "先填写 Base URL 和 API Key，再点右侧下拉按钮请求 /models；如果服务不要求鉴权，API Key 可以留空。"}
-																		</span>
-																		{selectedLlmFieldIssues.model ? (
-																			<span
-																				className="settings-field-error"
-																				id={buildFieldIssueId(
-																					"llm",
-																					"model",
-																					selectedLlmProvider.id,
-																				)}
-																			>
-																				{selectedLlmFieldIssues.model}
-																			</span>
-																		) : null}
-																	</div>
-																</div>
-															</div>
-															<div className="settings-llm-editor-side">
-																<div className="settings-llm-usage-card">
-																	<div className="settings-acp-detail-copy">
-																		<span className="settings-section-kicker">用途</span>
-																		<strong className="settings-agent-name">
-																			{providerIsEmbeddingModel(selectedLlmProvider)
-																				? "RAG Embedding"
-																				: "通用 LLM"}
-																		</strong>
-																		<span className="settings-agent-meta">
-																			{getLlmProviderUsageDescription(selectedLlmProvider)}
-																		</span>
-																	</div>
-																	<div className="settings-llm-usage-badges">
-																		{getLlmProviderUsageBadges(selectedLlmProvider).map((badge) => (
-																			<span className="settings-status-chip" key={badge}>
-																				{badge}
-																			</span>
-																		))}
-																	</div>
-																</div>
 
-																{selectedBuiltinLlmTemplate ? (
+																		<div className="settings-item settings-item-stacked">
+																			<label
+																				className="settings-label settings-label-stacked"
+																				htmlFor="llm-provider-api-key"
+																			>
+																				<span>API Key</span>
+																			</label>
+																			<input
+																				autoComplete="off"
+																				className="settings-input settings-input-wide settings-input-mono"
+																				disabled={savingLlm}
+																				id="llm-provider-api-key"
+																				onChange={(event) =>
+																					handleLlmProviderFieldChange(
+																						selectedLlmProvider.id,
+																						"apiKey",
+																						event.target.value,
+																					)
+																				}
+																				placeholder="sk-..."
+																				type="password"
+																				value={selectedLlmProvider.apiKey}
+																			/>
+																		</div>
+
+																		<div
+																			className="settings-item settings-item-stacked"
+																			ref={llmModelMenuRef}
+																		>
+																			<label
+																				className="settings-label settings-label-stacked"
+																				htmlFor="llm-provider-model"
+																			>
+																				<span>模型名</span>
+																			</label>
+																			<div className="settings-llm-model-picker">
+																				<div className="settings-llm-model-input-row">
+																					<input
+																						aria-describedby={joinDescribedByIds(
+																							selectedLlmFieldIssues.model
+																								? buildFieldIssueId(
+																										"llm",
+																										"model",
+																										selectedLlmProvider.id,
+																									)
+																								: undefined,
+																							"llm-provider-model-help",
+																						)}
+																						aria-invalid={
+																							selectedLlmFieldIssues.model ? true : undefined
+																						}
+																						aria-controls={
+																							openLlmModelPickerId ===
+																							buildLlmModelPickerId(selectedLlmProvider.id, "model")
+																								? "llm-provider-model-menu"
+																								: undefined
+																						}
+																						aria-expanded={
+																							openLlmModelPickerId ===
+																							buildLlmModelPickerId(selectedLlmProvider.id, "model")
+																						}
+																						aria-haspopup="listbox"
+																						className="settings-input settings-input-wide settings-input-mono"
+																						disabled={savingLlm}
+																						id="llm-provider-model"
+																						onChange={
+																							selectedLlmProviderIsBuiltin
+																								? undefined
+																								: (event) =>
+																										handleLlmProviderFieldChange(
+																											selectedLlmProvider.id,
+																											"model",
+																											event.target.value,
+																										)
+																						}
+																						onKeyDown={(event) =>
+																							handleLlmModelInputKeyDown(
+																								event,
+																								selectedLlmProvider,
+																								"model",
+																							)
+																						}
+																						placeholder={getLlmProviderModelPlaceholder(
+																							selectedLlmProvider,
+																						)}
+																						readOnly={selectedLlmProviderIsBuiltin}
+																						ref={bindLlmFieldRef(selectedLlmProvider.id, "model")}
+																						type="text"
+																						value={selectedLlmProvider.model}
+																					/>
+																					<button
+																						aria-expanded={
+																							openLlmModelPickerId ===
+																							buildLlmModelPickerId(selectedLlmProvider.id, "model")
+																						}
+																						aria-haspopup="listbox"
+																						aria-label={
+																							selectedLlmProviderIsBuiltin
+																								? "展开模板白名单模型"
+																								: selectedLlmProviderModels.length > 0
+																									? "展开模型列表"
+																									: "通过 /models 拉取模型列表"
+																						}
+																						className="settings-button settings-llm-model-toggle"
+																						disabled={
+																							savingLlm ||
+																							(!selectedLlmProviderIsBuiltin &&
+																								!selectedLlmProvider.baseUrl.trim())
+																						}
+																						onClick={() =>
+																							void handleToggleLlmModelMenu(
+																								selectedLlmProvider,
+																								"model",
+																							)
+																						}
+																						type="button"
+																					>
+																						{isLoadingSelectedLlmProviderModels ? "..." : "▾"}
+																					</button>
+																				</div>
+																				{openLlmModelPickerId ===
+																				buildLlmModelPickerId(selectedLlmProvider.id, "model") ? (
+																					<div
+																						className="settings-combobox-panel settings-llm-model-panel"
+																						id="llm-provider-model-menu"
+																						role="listbox"
+																					>
+																						<div className="settings-llm-model-panel-header">
+																							<span className="settings-combobox-option-meta">
+																								{selectedLlmProviderIsBuiltin
+																									? `目录可选 ${selectedBuiltinLlmSelectableModels.length} 个模型`
+																									: `已拉取 ${selectedLlmProviderModels.length} 个模型`}
+																							</span>
+																							{selectedLlmProviderIsBuiltin ? null : (
+																								<button
+																									className="settings-button settings-llm-model-refresh"
+																									disabled={
+																										savingLlm || isLoadingSelectedLlmProviderModels
+																									}
+																									onClick={() =>
+																										void handleFetchLlmProviderModels(
+																											selectedLlmProvider,
+																											{
+																												openField: "model",
+																											},
+																										)
+																									}
+																									type="button"
+																								>
+																									刷新
+																								</button>
+																							)}
+																						</div>
+																						{selectedLlmProviderIsBuiltin
+																							? selectedBuiltinLlmSelectableModels.map((model) => (
+																									<button
+																										aria-selected={
+																											selectedLlmProvider.builtinPresetModelId ===
+																											model.id
+																										}
+																										className={`settings-combobox-option ${
+																											selectedLlmProvider.builtinPresetModelId ===
+																											model.id
+																												? "settings-combobox-option-active"
+																												: ""
+																										}`}
+																										key={model.id}
+																										onClick={() =>
+																											handleBuiltinTemplateModelChange(
+																												selectedLlmProvider.id,
+																												model.id,
+																											)
+																										}
+																										role="option"
+																										type="button"
+																									>
+																										<span className="settings-combobox-option-label">
+																											{model.displayName}
+																										</span>
+																										<span className="settings-combobox-option-meta">
+																											{model.summary}
+																										</span>
+																									</button>
+																								))
+																							: selectedLlmProviderModels.map((model) => (
+																									<button
+																										aria-selected={
+																											selectedLlmProvider.model === model.id
+																										}
+																										className={`settings-combobox-option ${
+																											selectedLlmProvider.model === model.id
+																												? "settings-combobox-option-active"
+																												: ""
+																										}`}
+																										key={model.id}
+																										onClick={() =>
+																											handleLlmModelOptionClick(
+																												selectedLlmProvider.id,
+																												"model",
+																												model,
+																											)
+																										}
+																										role="option"
+																										type="button"
+																									>
+																										<span className="settings-combobox-option-label">
+																											{model.id}
+																										</span>
+																										<span className="settings-combobox-option-meta">
+																											{selectedLlmProvider.model === model.id
+																												? "当前已选"
+																												: "点击填入输入框"}
+																										</span>
+																									</button>
+																								))}
+																					</div>
+																				) : null}
+																			</div>
+																			<span
+																				className="settings-help-text settings-help-text-tight"
+																				id="llm-provider-model-help"
+																			>
+																				{selectedLlmProviderIsBuiltin
+																					? (selectedBuiltinLlmTemplateModel?.summary ??
+																						"请选择模板白名单中的模型。")
+																					: isLoadingSelectedLlmProviderModels
+																						? "正在从当前 Base URL 拉取模型列表。"
+																						: selectedLlmProviderModelsError
+																							? selectedLlmProviderModelsError
+																							: selectedLlmProviderModels.length > 0
+																								? `已拉取 ${selectedLlmProviderModels.length} 个模型。右侧下拉按钮可直接选，输入框仍可手填列表里没有的模型。`
+																								: "先填写 Base URL 和 API Key，再点右侧下拉按钮请求 /models；如果服务不要求鉴权，API Key 可以留空。"}
+																			</span>
+																			{selectedLlmFieldIssues.model ? (
+																				<span
+																					className="settings-field-error"
+																					id={buildFieldIssueId(
+																						"llm",
+																						"model",
+																						selectedLlmProvider.id,
+																					)}
+																				>
+																					{selectedLlmFieldIssues.model}
+																				</span>
+																			) : null}
+																		</div>
+																	</div>
+																</div>
+																<div className="settings-llm-editor-side">
 																	<div className="settings-llm-usage-card">
 																		<div className="settings-acp-detail-copy">
-																			<span className="settings-section-kicker">内置模板</span>
+																			<span className="settings-section-kicker">用途</span>
 																			<strong className="settings-agent-name">
-																				{selectedBuiltinLlmTemplate.displayName}
+																				{providerIsEmbeddingModel(selectedLlmProvider)
+																					? "RAG Embedding"
+																					: "通用 LLM"}
 																			</strong>
 																			<span className="settings-agent-meta">
-																				{selectedBuiltinLlmTemplate.description}
+																				{getLlmProviderUsageDescription(selectedLlmProvider)}
 																			</span>
 																		</div>
 																		<div className="settings-llm-usage-badges">
-																			<button
-																				className="settings-text-link"
-																				onClick={() =>
-																					void openUrl(selectedBuiltinLlmTemplate.registrationUrl)
-																				}
-																				type="button"
-																			>
-																				注册 / 登录
-																			</button>
-																			<button
-																				className="settings-text-link"
-																				onClick={() =>
-																					void openUrl(selectedBuiltinLlmTemplate.apiKeyUrl)
-																				}
-																				type="button"
-																			>
-																				API Key 页面
-																			</button>
-																			<button
-																				className="settings-text-link"
-																				onClick={() =>
-																					void openUrl(selectedBuiltinLlmTemplate.docsUrl)
-																				}
-																				type="button"
-																			>
-																				官方文档
-																			</button>
+																			{getLlmProviderUsageBadges(selectedLlmProvider).map(
+																				(badge) => (
+																					<span className="settings-status-chip" key={badge}>
+																						{badge}
+																					</span>
+																				),
+																			)}
 																		</div>
 																	</div>
-																) : null}
 
-																{providerIsLlmModel(selectedLlmProvider) ? (
-																	<div className="settings-llm-capability-panel">
-																		<div className="settings-acp-detail-copy">
-																			<span className="settings-section-kicker">能力</span>
-																			<strong className="settings-agent-name">
-																				{getLlmProviderKindLabel(
-																					selectedLlmProviderKind ?? "embedding",
-																				)}
-																			</strong>
-																			<span className="settings-agent-meta">
-																				{selectedLlmProviderKind === "llm_responses_stateful"
-																					? "当前是 responses 的 stateful 页面；续问时会优先复用上一轮 response_id。"
-																					: selectedLlmProviderKind === "llm_responses_stateless"
-																						? "当前是 responses 的 stateless 页面；续问时固定回退到显式历史。"
-																						: "chat/completions 页面不支持 response_id 续链，可用于翻译和问答，但不会进入 OCR 列表。"}
-																			</span>
-																		</div>
-																		{selectedLlmProviderKind === "llm_chat_completions" ? (
+																	{selectedBuiltinLlmTemplate ? (
+																		<div className="settings-llm-usage-card">
 																			<div className="settings-acp-detail-copy">
+																				<span className="settings-section-kicker">内置模板</span>
+																				<strong className="settings-agent-name">
+																					{selectedBuiltinLlmTemplate.displayName}
+																				</strong>
 																				<span className="settings-agent-meta">
-																					这个页面没有额外能力开关。翻译和问答都会固定走
-																					chat/completions；继续追问时回退到显式历史。
+																					{selectedBuiltinLlmTemplate.description}
 																				</span>
 																			</div>
-																		) : (
-																			<div className="settings-llm-capability-grid">
-																				<label className="settings-llm-capability-card">
-																					<div className="settings-llm-capability-copy">
-																						<strong>多模态</strong>
-																						<span className="settings-agent-meta">
-																							启用后条目才会进入 OCR 可选列表。
-																						</span>
-																					</div>
-																					<input
-																						checked={selectedLlmProvider.supportsMultimodal}
-																						className="settings-toggle"
-																						disabled={
-																							savingLlm ||
-																							!providerHasResponsesModel(selectedLlmProvider)
-																						}
-																						onChange={(event) =>
-																							handleLlmProviderFieldChange(
-																								selectedLlmProvider.id,
-																								"supportsMultimodal",
-																								event.target.checked,
-																							)
-																						}
-																						type="checkbox"
-																					/>
-																				</label>
+																			<div className="settings-llm-usage-badges">
+																				<button
+																					className="settings-text-link"
+																					onClick={() =>
+																						void openUrl(selectedBuiltinLlmTemplate.registrationUrl)
+																					}
+																					type="button"
+																				>
+																					注册 / 登录
+																				</button>
+																				<button
+																					className="settings-text-link"
+																					onClick={() =>
+																						void openUrl(selectedBuiltinLlmTemplate.apiKeyUrl)
+																					}
+																					type="button"
+																				>
+																					API Key 页面
+																				</button>
+																				<button
+																					className="settings-text-link"
+																					onClick={() =>
+																						void openUrl(selectedBuiltinLlmTemplate.docsUrl)
+																					}
+																					type="button"
+																				>
+																					官方文档
+																				</button>
 																			</div>
-																		)}
-																	</div>
-																) : (
-																	<div className="settings-llm-capability-panel settings-llm-capability-panel-passive">
-																		<div className="settings-acp-detail-copy">
-																			<span className="settings-section-kicker">能力</span>
-																			<strong className="settings-agent-name">
-																				Embedding 约束
-																			</strong>
-																			<span className="settings-agent-meta">
-																				Embedding 条目不会出现在翻译 LLM、问答 LLM 或 OCR
-																				列表，也不会启用多模态或 stateful 续链。
-																			</span>
 																		</div>
-																	</div>
-																)}
+																	) : null}
 
-																{selectedBuiltinLlmTemplate ? (
-																	<div className="settings-llm-capability-panel">
-																		<div className="settings-acp-detail-copy">
-																			<span className="settings-section-kicker">目录模型</span>
-																			<strong className="settings-agent-name">
-																				{selectedBuiltinLlmTemplate.models.length} 个模型
-																			</strong>
-																			<span className="settings-agent-meta">
-																				目录会列出模板里的全部模型；只有当前应用支持的模型会进入选择下拉框。
-																			</span>
-																		</div>
-																		<div className="settings-llm-model-card-grid">
-																			{selectedBuiltinLlmTemplate.models.map((model) => (
-																				<div className="settings-llm-model-card" key={model.id}>
-																					<div className="settings-llm-model-card-header">
-																						<strong className="settings-llm-model-card-title">
-																							{model.displayName}
-																						</strong>
-																						<span className="settings-status-chip">
-																							{model.selectableInCurrentApp ? "可选" : "暂不支持"}
-																						</span>
-																					</div>
-																					<span className="settings-agent-command-preview">
-																						{model.model}
-																					</span>
+																	{providerIsLlmModel(selectedLlmProvider) ? (
+																		<div className="settings-llm-capability-panel">
+																			<div className="settings-acp-detail-copy">
+																				<span className="settings-section-kicker">能力</span>
+																				<strong className="settings-agent-name">
+																					{getLlmProviderKindLabel(
+																						selectedLlmProviderKind ?? "embedding",
+																					)}
+																				</strong>
+																				<span className="settings-agent-meta">
+																					{selectedLlmProviderKind === "llm_responses_stateful"
+																						? "当前是 responses 的 stateful 页面；续问时会优先复用上一轮 response_id。"
+																						: selectedLlmProviderKind === "llm_responses_stateless"
+																							? "当前是 responses 的 stateless 页面；续问时固定回退到显式历史。"
+																							: "chat/completions 页面不支持 response_id 续链，可用于翻译和问答，但不会进入 OCR 列表。"}
+																				</span>
+																			</div>
+																			{selectedLlmProviderKind === "llm_chat_completions" ? (
+																				<div className="settings-acp-detail-copy">
 																					<span className="settings-agent-meta">
-																						{model.summary}
+																						这个页面没有额外能力开关。翻译和问答都会固定走
+																						chat/completions；继续追问时回退到显式历史。
 																					</span>
-																					{model.disabledReason ? (
-																						<span className="settings-help-text settings-help-text-tight">
-																							{model.disabledReason}
-																						</span>
-																					) : null}
 																				</div>
-																			))}
+																			) : (
+																				<div className="settings-llm-capability-grid">
+																					<label className="settings-llm-capability-card">
+																						<div className="settings-llm-capability-copy">
+																							<strong>多模态</strong>
+																							<span className="settings-agent-meta">
+																								启用后条目才会进入 OCR 可选列表。
+																							</span>
+																						</div>
+																						<input
+																							checked={selectedLlmProvider.supportsMultimodal}
+																							className="settings-toggle"
+																							disabled={
+																								savingLlm ||
+																								!providerHasResponsesModel(selectedLlmProvider)
+																							}
+																							onChange={(event) =>
+																								handleLlmProviderFieldChange(
+																									selectedLlmProvider.id,
+																									"supportsMultimodal",
+																									event.target.checked,
+																								)
+																							}
+																							type="checkbox"
+																						/>
+																					</label>
+																				</div>
+																			)}
 																		</div>
-																	</div>
-																) : null}
-
-																{selectedLlmProviderTriggersRagReindex ? (
-																	<div className="settings-validation-box settings-banner-warn">
-																		{selectedLlmProviderUsedByPersistedRag
-																			? "这个条目当前正被 RAG 用作 embedding。修改 Base URL 或模型并保存 LLM 配置后，现有文档向量会按新的建索引目标重新生成。"
-																			: "当前 RAG 草稿引用了这个 embedding 条目。后续保存并应用该 RAG 配置时，如果这里的 Base URL 或模型发生变化，会按新的建索引目标重新生成文档向量。"}
-																	</div>
-																) : null}
-															</div>
-														</div>
-
-														{selectedLlmIssueCount > 0 ? (
-															<div className="settings-validation-box settings-banner-error">
-																<ul className="settings-issue-list">
-																	{(llmValidation.providerIssues[selectedLlmProvider.id] ?? []).map(
-																		(issue) => (
-																			<li key={issue}>{issue}</li>
-																		),
+																	) : (
+																		<div className="settings-llm-capability-panel settings-llm-capability-panel-passive">
+																			<div className="settings-acp-detail-copy">
+																				<span className="settings-section-kicker">能力</span>
+																				<strong className="settings-agent-name">
+																					Embedding 约束
+																				</strong>
+																				<span className="settings-agent-meta">
+																					Embedding 条目不会出现在翻译 LLM、问答 LLM 或 OCR
+																					列表，也不会启用多模态或 stateful 续链。
+																				</span>
+																			</div>
+																		</div>
 																	)}
-																</ul>
+
+																	{selectedBuiltinLlmTemplate ? (
+																		<div className="settings-llm-capability-panel">
+																			<div className="settings-acp-detail-copy">
+																				<span className="settings-section-kicker">目录模型</span>
+																				<strong className="settings-agent-name">
+																					{selectedBuiltinLlmTemplate.models.length} 个模型
+																				</strong>
+																				<span className="settings-agent-meta">
+																					目录会列出模板里的全部模型；只有当前应用支持的模型会进入选择下拉框。
+																				</span>
+																			</div>
+																			<div className="settings-llm-model-card-grid">
+																				{selectedBuiltinLlmTemplate.models.map((model) => (
+																					<div className="settings-llm-model-card" key={model.id}>
+																						<div className="settings-llm-model-card-header">
+																							<strong className="settings-llm-model-card-title">
+																								{model.displayName}
+																							</strong>
+																							<span className="settings-status-chip">
+																								{model.selectableInCurrentApp ? "可选" : "暂不支持"}
+																							</span>
+																						</div>
+																						<span className="settings-agent-command-preview">
+																							{model.model}
+																						</span>
+																						<span className="settings-agent-meta">
+																							{model.summary}
+																						</span>
+																						{model.disabledReason ? (
+																							<span className="settings-help-text settings-help-text-tight">
+																								{model.disabledReason}
+																							</span>
+																						) : null}
+																					</div>
+																				))}
+																			</div>
+																		</div>
+																	) : null}
+
+																	{selectedLlmProviderTriggersRagReindex ? (
+																		<div className="settings-validation-box settings-banner-warn">
+																			{selectedLlmProviderUsedByPersistedRag
+																				? "这个条目当前正被 RAG 用作 embedding。修改 Base URL 或模型并保存 LLM 配置后，现有文档向量会按新的建索引目标重新生成。"
+																				: "当前 RAG 草稿引用了这个 embedding 条目。后续保存并应用该 RAG 配置时，如果这里的 Base URL 或模型发生变化，会按新的建索引目标重新生成文档向量。"}
+																		</div>
+																	) : null}
+																</div>
 															</div>
-														) : null}
-													</>
-												) : (
-													<div className="settings-empty-panel">
-														<strong className="settings-empty-title">没有可编辑的 LLM 条目</strong>
-														<span className="settings-help-text settings-help-text-tight">
-															左侧新增一个条目后，先选配置类型，再补全名称、Base URL 和模型名。
-														</span>
-													</div>
-												)}
-											</>
+
+															{selectedLlmIssueCount > 0 ? (
+																<div className="settings-validation-box settings-banner-error">
+																	<ul className="settings-issue-list">
+																		{(
+																			llmValidation.providerIssues[selectedLlmProvider.id] ?? []
+																		).map((issue) => (
+																			<li key={issue}>{issue}</li>
+																		))}
+																	</ul>
+																</div>
+															) : null}
+														</>
+													) : (
+														<div className="settings-empty-panel">
+															<strong className="settings-empty-title">
+																没有可编辑的 LLM 条目
+															</strong>
+															<span className="settings-help-text settings-help-text-tight">
+																左侧新增一个条目后，先选配置类型，再补全名称、Base URL 和模型名。
+															</span>
+														</div>
+													)}
+												</>
+											</div>
 										</div>
-									</div>
+									)}
 								</section>
 							) : null}
 
@@ -5247,7 +5519,6 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 									role="tabpanel"
 									tabIndex={0}
 								>
-									<h2 className="settings-section-title">RAG</h2>
 									<div className="settings-acp-form-layout settings-rag-layout">
 										<aside
 											className="settings-acp-sidebar settings-acp-sidebar-secondary settings-rag-sidebar"
@@ -5714,7 +5985,6 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 									role="tabpanel"
 									tabIndex={0}
 								>
-									<h2 className="settings-section-title">ACP Agent</h2>
 									{acpNotice ? (
 										<div className={`settings-banner settings-banner-${acpNotice.tone}`}>
 											{acpNotice.text}
@@ -6095,7 +6365,6 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 									role="tabpanel"
 									tabIndex={0}
 								>
-									<h2 className="settings-section-title">MCP</h2>
 									{mcpNotice ? (
 										<div className={`settings-banner settings-banner-${mcpNotice.tone}`}>
 											{mcpNotice.text}
@@ -6631,7 +6900,6 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 									role="tabpanel"
 									tabIndex={0}
 								>
-									<h2 className="settings-section-title">Skill</h2>
 									{skillError ? (
 										<div className="settings-banner settings-banner-error">{skillError}</div>
 									) : null}
@@ -6836,7 +7104,6 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 									role="tabpanel"
 									tabIndex={0}
 								>
-									<h2 className="settings-section-title">关于</h2>
 									<div
 										className="settings-editor-card settings-editor-card-subtle"
 										id="about-overview"

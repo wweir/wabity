@@ -1,5 +1,5 @@
 [package]
-name = "wabity"
+name = "Wabity"
 version = "0.1.0"
 description = "A desktop launcher focused on input to action workflows"
 authors = ["wweir"]
@@ -47,11 +47,13 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "time"]
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+tauri-plugin-notification = "2"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-autostart = "2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+mac-notification-sys = "0.6.12"
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSPasteboard", "NSResponder"] }
 objc2-core-graphics = "0.3.2"

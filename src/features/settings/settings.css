@@ -1908,13 +1908,27 @@
 
 .settings-shortcut-field {
 	display: grid;
-	gap: 10px;
+	grid-template-columns: minmax(0, 1fr) minmax(220px, 272px);
+	gap: 16px;
+	align-items: center;
+	width: 100%;
 }
 
 .settings-shortcut-copy {
 	display: grid;
-	gap: 4px;
+	gap: 6px;
 	min-width: 0;
+}
+
+.settings-shortcut-item {
+	align-items: stretch;
+}
+
+.settings-shortcut-label {
+	color: var(--text-primary);
+	font-size: var(--text-md);
+	font-weight: 600;
+	line-height: 1.35;
 }
 
 .settings-shortcut-trigger {
@@ -1943,11 +1957,16 @@
 	font-weight: 600;
 }
 
+.settings-editor-card-shortcuts {
+	container-type: inline-size;
+	container-name: settings-shortcuts;
+}
+
 .settings-main {
 	min-width: 0;
 	min-height: 0;
 	display: grid;
-	gap: 16px;
+	gap: 14px;
 	align-content: start;
 	overflow-x: hidden;
 	overflow-y: auto;
@@ -1956,21 +1975,21 @@
 
 .settings-main-header {
 	display: flex;
-	align-items: flex-start;
+	align-items: flex-end;
 	justify-content: space-between;
-	gap: 12px;
+	flex-wrap: wrap;
+	gap: 10px 16px;
 	padding: 0 2px;
 }
 
 .settings-main-header-copy {
 	display: grid;
 	gap: 4px;
+	max-width: 28rem;
 }
 
-.settings-main-jump-bar {
-	display: grid;
-	gap: 10px;
-	padding: 2px 0 0;
+.settings-main-header .settings-jump-list-compact {
+	margin-left: auto;
 }
 
 .settings-main-title {
@@ -2050,8 +2069,8 @@
 
 .settings-section {
 	display: grid;
-	gap: 18px;
-	padding: 2px 0 8px;
+	gap: 16px;
+	padding: 0 0 8px;
 }
 
 .settings-draft-action-card {
@@ -2075,6 +2094,80 @@
 	justify-content: flex-end;
 	gap: 8px;
 	flex-shrink: 0;
+}
+
+.settings-ai-task-grid {
+	display: grid;
+	gap: 16px;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	align-items: start;
+}
+
+.settings-task-card {
+	gap: 0;
+}
+
+.settings-task-card-header {
+	display: grid;
+	gap: 8px;
+	padding-bottom: 16px;
+	border-bottom: 1px solid var(--border-soft);
+}
+
+.settings-task-card-title-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+}
+
+.settings-task-field-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+}
+
+.settings-task-field-header .settings-label {
+	width: auto;
+}
+
+.settings-task-prompt-panel {
+	display: grid;
+	gap: 8px;
+}
+
+.settings-task-prompt-textarea {
+	min-height: 9rem;
+}
+
+.settings-task-card-actions {
+	display: grid;
+	gap: 8px;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.settings-task-card-save {
+	grid-column: 1 / -1;
+}
+
+.settings-llm-empty-state {
+	gap: 16px;
+}
+
+.settings-llm-empty-steps {
+	display: grid;
+	gap: 10px;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.settings-llm-empty-step {
+	display: grid;
+	gap: 4px;
+	padding: 12px 14px;
+	border: 1px solid var(--border-soft);
+	border-radius: var(--radius-control);
+	background: color-mix(in srgb, var(--surface-card) 86%, var(--surface-panel));
 }
 
 .settings-llm-provider-card-main {
@@ -2693,6 +2786,14 @@
 	background: var(--surface-input);
 }
 
+@container settings-shortcuts (max-width: 640px) {
+	.settings-shortcut-field {
+		grid-template-columns: minmax(0, 1fr);
+		gap: 10px;
+		align-items: stretch;
+	}
+}
+
 @media (max-width: 720px) {
 	.settings-layout {
 		grid-template-columns: 1fr;
@@ -2716,15 +2817,13 @@
 		align-items: stretch;
 	}
 
+	.settings-main-header .settings-jump-list-compact {
+		margin-left: 0;
+	}
+
 	.settings-draft-action-actions {
 		flex-direction: column;
 		align-items: stretch;
-	}
-
-	.settings-main-jump-bar {
-		display: grid;
-		gap: 8px;
-		padding: 8px 0 12px;
 	}
 
 	.settings-draft-action-actions {
@@ -2769,8 +2868,10 @@
 
 	.settings-mcp-layout,
 	.settings-mcp-create-grid,
+	.settings-ai-task-grid,
 	.settings-llm-layout,
 	.settings-llm-editor-grid,
+	.settings-llm-empty-steps,
 	.settings-rag-layout,
 	.settings-rag-editor-grid,
 	.settings-rag-summary-metric-grid,
@@ -2806,6 +2907,19 @@
 
 	.settings-inline-field-row {
 		grid-template-columns: 1fr;
+	}
+
+	.settings-task-field-header {
+		flex-direction: column;
+		align-items: stretch;
+	}
+
+	.settings-task-card-actions {
+		grid-template-columns: 1fr;
+	}
+
+	.settings-task-card-save {
+		grid-column: auto;
 	}
 
 	.settings-llm-provider-card-model-grid,

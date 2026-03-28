@@ -26,6 +26,7 @@ use crate::domain::acp::{
     AcpSessionSummary,
 };
 use crate::infrastructure::config::SavedAcpSession;
+use crate::services::notification::NotificationService;
 
 #[derive(Clone)]
 pub struct AcpService {
@@ -36,6 +37,7 @@ pub struct AcpService {
     runtime_event_rx: Arc<StdMutex<Option<mpsc::UnboundedReceiver<RuntimeEvent>>>>,
     session_update_channels: Arc<RwLock<Vec<Channel<AcpSessionDetail>>>>,
     session_removal_channels: Arc<RwLock<Vec<Channel<String>>>>,
+    notification: NotificationService,
 }
 
 struct SessionRecord {
@@ -44,6 +46,7 @@ struct SessionRecord {
     summary: AcpSessionSummary,
     messages: Vec<AcpSessionMessage>,
     next_message_id: u64,
+    prompt_notification_pending: bool,
     command_tx: mpsc::UnboundedSender<SessionCommand>,
 }
 
@@ -115,6 +118,13 @@ struct PromptCompletion {
     error: Option<String>,
 }
 
+struct CompletionNotificationRequest {
+    agent_name: String,
+    response_preview: Option<String>,
+    failure_detail: Option<String>,
+    succeeded: bool,
+}
+
 pub struct RestoreAttemptResult {
     pub restored: Option<AcpSessionDetail>,
     pub keep_snapshot: bool,
@@ -154,7 +164,7 @@ impl acp::Client for AcpRuntimeClient {
 }
 
 impl AcpService {
-    pub fn new() -> Self {
+    pub fn new(notification: NotificationService) -> Self {
         let (runtime_event_tx, runtime_event_rx) = mpsc::unbounded_channel();
 
         Self {
@@ -165,6 +175,7 @@ impl AcpService {
             runtime_event_rx: Arc::new(StdMutex::new(Some(runtime_event_rx))),
             session_update_channels: Arc::new(RwLock::new(Vec::new())),
             session_removal_channels: Arc::new(RwLock::new(Vec::new())),
+            notification,
         }
     }
 
@@ -302,6 +313,7 @@ impl AcpService {
             },
             messages: Vec::new(),
             next_message_id: 0,
+            prompt_notification_pending: false,
             command_tx,
         };
         record.push_system_message(format!(
@@ -434,6 +446,7 @@ impl AcpService {
             },
             messages: Vec::new(),
             next_message_id: 0,
+            prompt_notification_pending: false,
             command_tx,
         };
         record.push_system_message(format!(
@@ -497,6 +510,7 @@ impl AcpService {
             record.summary.last_error = None;
             record.summary.last_updated_at_ms = now_ms();
             record.summary.attention = false;
+            record.prompt_notification_pending = true;
             record.push_message(AcpMessageRole::User, prompt.clone(), false);
             record.start_assistant_message();
             record
@@ -571,6 +585,7 @@ impl AcpService {
 
         tracing::info!(?event, %session_id, "applying runtime event");
 
+        let mut completion_notification: Option<CompletionNotificationRequest> = None;
         let detail = {
             let mut sessions = self.sessions.write().await;
             let Some(record) = sessions.get_mut(&session_id) else {
@@ -616,7 +631,17 @@ impl AcpService {
                     record.summary.status = AcpSessionStatus::Idle;
                     record.summary.error_level = None;
                     record.summary.last_updated_at_ms = now_ms();
+                    let response_preview = record.pending_assistant_content();
                     record.finish_assistant_message();
+                    if record.prompt_notification_pending {
+                        completion_notification = Some(CompletionNotificationRequest {
+                            agent_name: record.summary.agent_name.clone(),
+                            response_preview,
+                            failure_detail: None,
+                            succeeded: true,
+                        });
+                        record.prompt_notification_pending = false;
+                    }
                 }
                 RuntimeEvent::PromptFailed { error, .. } => {
                     record.summary.status = AcpSessionStatus::Error;
@@ -628,8 +653,18 @@ impl AcpService {
                     }
                     record.finish_assistant_message();
                     record.push_system_message(format!("prompt 失败：{error}"));
+                    if record.prompt_notification_pending {
+                        completion_notification = Some(CompletionNotificationRequest {
+                            agent_name: record.summary.agent_name.clone(),
+                            response_preview: None,
+                            failure_detail: Some(error),
+                            succeeded: false,
+                        });
+                        record.prompt_notification_pending = false;
+                    }
                 }
                 RuntimeEvent::SessionExited { error, .. } => {
+                    let failure_detail = error.clone().or_else(|| Some("agent exited".to_string()));
                     record.summary.status = if error.is_some() {
                         AcpSessionStatus::Error
                     } else {
@@ -648,6 +683,15 @@ impl AcpService {
                         record.push_system_message("agent 已退出".to_string());
                     }
                     record.finish_assistant_message();
+                    if record.prompt_notification_pending {
+                        completion_notification = Some(CompletionNotificationRequest {
+                            agent_name: record.summary.agent_name.clone(),
+                            response_preview: None,
+                            failure_detail,
+                            succeeded: false,
+                        });
+                        record.prompt_notification_pending = false;
+                    }
                 }
             }
 
@@ -662,6 +706,23 @@ impl AcpService {
         };
 
         self.broadcast_session_update(detail).await;
+        if let Some(notification) = completion_notification {
+            if notification.succeeded {
+                self.notification
+                    .notify_acp_prompt_success(
+                        &notification.agent_name,
+                        notification.response_preview,
+                    )
+                    .await;
+            } else {
+                self.notification
+                    .notify_acp_prompt_failure(
+                        &notification.agent_name,
+                        notification.failure_detail,
+                    )
+                    .await;
+            }
+        }
         Ok(())
     }
 
@@ -690,6 +751,25 @@ impl SessionRecord {
 
     fn push_system_message(&mut self, content: String) {
         self.push_message(AcpMessageRole::System, content, false);
+    }
+
+    fn pending_assistant_content(&self) -> Option<String> {
+        let message = self.messages.last()?;
+        if message.role != AcpMessageRole::Assistant || !message.pending {
+            return None;
+        }
+
+        message.blocks.iter().find_map(|block| match block {
+            AcpMessageBlock::Content { text } => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            }
+            _ => None,
+        })
     }
 
     fn start_assistant_message(&mut self) {
@@ -1489,6 +1569,7 @@ mod tests {
             },
             messages: Vec::new(),
             next_message_id: 0,
+            prompt_notification_pending: false,
             command_tx: mpsc::unbounded_channel().0,
         }
     }

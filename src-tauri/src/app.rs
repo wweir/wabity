@@ -52,6 +52,7 @@ pub fn run() -> Result<()> {
 
     let builder = builder
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(
             GlobalShortcutBuilder::new()
@@ -83,37 +84,6 @@ pub fn run() -> Result<()> {
                                             "failed to toggle main window from shortcut"
                                         );
                                     }
-                                }
-                                ShortcutAction::OcrCapture => {
-                                    if !shortcut_for_handler.begin_ocr_capture() {
-                                        return;
-                                    }
-
-                                    let app_handle = _app.clone();
-                                    let shortcut_state = shortcut_for_handler.clone();
-                                    tauri::async_runtime::spawn(async move {
-                                        let flow_result =
-                                            handle_ocr_shortcut(app_handle.clone()).await;
-                                        shortcut_state.end_ocr_capture();
-
-                                        if let Err(error) = flow_result {
-                                            tracing::error!(
-                                                ?error,
-                                                "failed to complete OCR capture shortcut"
-                                            );
-                                            if let Err(show_error) =
-                                                window::show_main_window_with_error(
-                                                    &app_handle,
-                                                    &format!("OCR 失败：{error}"),
-                                                )
-                                            {
-                                                tracing::error!(
-                                                    ?show_error,
-                                                    "failed to show launcher after OCR error"
-                                                );
-                                            }
-                                        }
-                                    });
                                 }
                                 ShortcutAction::OcrTranslate => {
                                     if !shortcut_for_handler.begin_ocr_capture() {
@@ -178,7 +148,10 @@ pub fn run() -> Result<()> {
 
     builder
         .setup(move |app| {
+            let app_handle = app.handle().clone();
             let app_state = tauri::async_runtime::block_on(AppState::new(
+                app_handle,
+                shortcut_state.clone(),
                 MatcherService::new(),
                 ExecutorService::new(),
             ))?;
@@ -259,7 +232,6 @@ fn init_tracing() {
 fn shortcut_action_name(action: ShortcutAction) -> &'static str {
     match action {
         ShortcutAction::ToggleLauncher => "toggle_launcher",
-        ShortcutAction::OcrCapture => "ocr_capture",
         ShortcutAction::OcrTranslate => "ocr_translate",
     }
 }
@@ -284,15 +256,6 @@ async fn initialize_shortcuts(
         &config.shortcuts,
         ShortcutKey::ToggleLauncher,
         ShortcutRegistrationMode::Required,
-    )
-    .await?;
-    register_startup_shortcut(
-        app,
-        app_state,
-        shortcut_state,
-        &config.shortcuts,
-        ShortcutKey::OcrCapture,
-        ShortcutRegistrationMode::Optional,
     )
     .await?;
     register_startup_shortcut(
@@ -367,15 +330,6 @@ async fn resolve_configured_shortcut(
     let fallback_shortcut = hotkey::parse_shortcut(fallback_value)
         .with_context(|| format!("default {} shortcut must be valid", key.display_name()))?;
     Ok((fallback_shortcut, fallback_value.to_string()))
-}
-
-async fn handle_ocr_shortcut(app: tauri::AppHandle) -> Result<()> {
-    let Some(ocr_text) = capture_ocr_text(app.clone()).await? else {
-        return Ok(());
-    };
-
-    window::show_main_window_with_ocr_text(&app, ocr_text)?;
-    Ok(())
 }
 
 async fn handle_ocr_translate_shortcut(

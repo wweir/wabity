@@ -3,6 +3,7 @@
 职责：
 
 - `autostart`：同步 `general.autoStart` 与系统登录启动项状态
+- `notification`：封装系统通知后端；当前先落地 macOS，并给其他桌面平台保留 `noop` 扩展口
 - `window`：管理 launcher 主窗口的显示、隐藏、聚焦与平台窗口行为
 - `hotkey`：解析、注册、注销全局快捷键
 - `config`：集中处理本地配置、workspace 历史读写与缓存
@@ -11,10 +12,11 @@
 关键约束：
 
 - `autostart` 只负责把配置态投影到平台登录启动能力，不负责决定“是否应该开启”；开启与关闭仍由设置页和配置模型驱动
+- `notification` 只负责把结构化通知 payload 投影到操作系统通知中心，不负责决定“什么时候该通知”；是否触发、是否只在后台态触发、是否显示响应摘要都由服务层决定。macOS 原生通知样式主要受系统控制，基础设施层只映射标题、正文和发送者应用身份这类稳定字段；当前 macOS backend 会优先把通知发送者绑定到 `Wabity` 的 bundle identifier，让系统尽量使用 `Wabity` 自己的应用图标；如果当前运行方式下系统拒绝绑定，则记录告警后回退到默认发送者，但不能因此把整条通知直接吞掉
 - `autostart` 同步分两条链路：启动时做一次配置与系统状态对账，设置保存时对变更即时生效；启动阶段失败只记日志，不阻塞主窗口拉起
 - `window` 只负责窗口壳层行为，不承载业务状态或动作匹配逻辑
 - `config` 统一将用户配置写入用户配置目录下的 `wabity/config.toml`，其中包含翻译提示词、ACP agent 与全局 MCP 清单；workspace 最近目录历史写入 `wabity/workspace-history.toml`
-- `config` 里的快捷键字段虽然落盘时仍是 `toggle_launcher` / `ocr_capture` / `ocr_translate` 三个稳定键名，但运行时访问统一经 `ShortcutKey + ShortcutConfig::{get,set}`，不要在其他模块重复手写字符串分发
+- `config` 里的快捷键字段当前只保留 `toggle_launcher` / `ocr_translate` 两个稳定键名；运行时访问统一经 `ShortcutKey + ShortcutConfig::{get,set}`，不要在其他模块重复手写字符串分发
 - `config` 负责 TOML 序列化、原子 `safe_write`、磁盘读写和内存缓存；启动时由 `AppState::new` 先读取，再把配置投影到运行时状态
 - `openai_compatible` 只负责公共协议兼容、薄传输 client 和响应解析，不承载业务级 prompt、工具编排或 provider 选择；问答、翻译、OCR、RAG embedding 仍各自保留自己的请求体和重试策略，但只要 provider 返回 SSE，就必须由这里按流读取并归并成统一 payload，而不是让上层先把整段 body 读完再猜协议
 - 配置模型新增字段时必须保持向后兼容；旧版 `config.toml` 缺字段时应通过 `serde(default)` 回填，而不是在启动阶段直接解析失败
@@ -36,10 +38,9 @@
 - 任意 `resize_main_window` 调用都必须先按当前窗口所在显示器的 `work_area` 裁剪目标宽高；如果 resize 后当前位置会越界，还要继续把窗口位置钳回可见区域，不能只改尺寸不改位置
 - 运行时平台特性配置必须在主线程执行，避免直接从普通线程调用 AppKit
 - macOS 下命中 `NSPanel` 的显隐、置前和尺寸调整统一通过 Tauri `run_on_main_thread` 调度；后台 OCR 任务结束后也只能经这条通道回到窗口层
-- launcher 显隐不依赖底层 `is_visible()` 查询，而是维护独立运行时状态；全局快捷键切换仍按“按下一次只触发一次”的门闩处理来避免同一轮组合键重复 toggle，但运行时必须容忍 macOS 丢失 `Released` 事件：若 release 长时间未到，门闩要自动恢复，不能把 launcher / OCR 快捷键永久锁死
-- 当前全局快捷键分成三类：launcher 唤起、截图 OCR 回填，以及“优先翻译当前选中文本；没有选中内容时再截图 OCR 并翻译”；涉及截图的两条链路共享同一个“只允许单次截图流程在跑”的运行时锁，避免并发截图互相踩状态。macOS 下读取选中文本必须留在快捷键处理线程，不能先 `spawn` 到 Tokio worker 再调用输入模拟
+- launcher 显隐不依赖底层 `is_visible()` 查询，而是维护独立运行时状态；全局快捷键切换仍按“按下一次只触发一次”的门闩处理来避免同一轮组合键重复 toggle，但运行时必须容忍 macOS 丢失 `Released` 事件：若 release 长时间未到，门闩要自动恢复，不能把 launcher / 翻译快捷键永久锁死
+- 当前全局快捷键分成两类：launcher 唤起，以及“优先翻译当前选中文本；没有选中内容时再截图 OCR 并翻译”。涉及截图的这条翻译回退链路继续和其它 OCR 调用共享同一个“只允许单次截图流程在跑”的运行时锁，避免并发截图互相踩状态。macOS 下读取选中文本必须留在快捷键处理线程，不能先 `spawn` 到 Tokio worker 再调用输入模拟
 - 前端驱动的内部窗口尺寸同步也必须显式包进 `begin/end_transient_window_interaction`；否则问答结果或长文本回填触发的 resize 抖动会被错误识别成真实离焦
 - 但这条自动尺寸同步在 QA 结果展示期不能继续自由 shrink；前端会把 `useAutoResizeWindow` 切到“只增不减”的受限模式，让后续 Markdown / 高亮 / Mermaid 等异步内容仍能把窗口撑开，同时避免短时测量回退把 `NSPanel.set_content_size` 又缩回去截断内容
 - `resize_main_window(...)` 的调用时间必须保持可观测；排查 macOS 失焦问题时，日志里应该能直接看到每次原生 resize 的请求尺寸与实际尺寸，不能把关键窗口事件只埋在 `debug` 级别
-- 纯 OCR 回填不再复用泛化的 `selected-text` 事件；窗口层会单独发 `ocr-captured-text`，把 `sourceMode=ocr` 和识别文本一起带给前端，避免输入来源语义丢失
 - 快捷翻译窗口事件拆成“开始”和“结果”两段：拿到原文后窗口层先发 `ocr-translation-started` 并立即显示 launcher，等后台翻译完成后再发 `ocr-translation-result`；结果回填不应再次依赖首次显示窗口来驱动 UI

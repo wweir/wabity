@@ -19,6 +19,7 @@ use crate::services::{
     executor::ExecutorService,
     file_search::FileSearchService,
     matcher::MatcherService,
+    notification::NotificationService,
     ocr::{OcrProvider, OpenAiCompatibleOcrProvider, UnavailableOcrProvider},
     question_answer_backend,
     rag::RagIndexService,
@@ -65,6 +66,7 @@ pub struct AppState {
     executor: ExecutorService,
     application: ApplicationService,
     file_search: FileSearchService,
+    notification: NotificationService,
     acp: AcpService,
     ocr_provider: Arc<StdRwLock<Arc<dyn OcrProvider>>>,
     rag_index: RagIndexService,
@@ -74,7 +76,12 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub async fn new(matcher: MatcherService, executor: ExecutorService) -> Result<Self> {
+    pub async fn new(
+        app_handle: tauri::AppHandle,
+        shortcut_state: ShortcutRuntimeState,
+        matcher: MatcherService,
+        executor: ExecutorService,
+    ) -> Result<Self> {
         let config_store = Arc::new(AsyncRwLock::new(ConfigStore::new()?));
         let (config, history) = {
             let store = config_store.read().await;
@@ -100,13 +107,16 @@ impl AppState {
             .await;
         let rag_mcp = RagMcpServerService::new(ConfigStore::data_dir()?, config_store.clone());
         rag_mcp.start().await;
+        let notification =
+            NotificationService::new(app_handle, shortcut_state, config_store.clone());
 
         Ok(Self {
             matcher,
             executor,
             application: ApplicationService::new()?,
             file_search: FileSearchService::new()?,
-            acp: AcpService::new(),
+            notification: notification.clone(),
+            acp: AcpService::new(notification),
             ocr_provider: Arc::new(StdRwLock::new(build_ocr_provider(&config.ocr, &config.llm))),
             rag_index,
             rag_mcp,
@@ -143,7 +153,7 @@ impl AppState {
             let workspace = self.workspace().await?;
             let workspace_root = normalize_workspace_root(&workspace.root_path)?;
             let mcp_servers = self.acp_mcp_servers().await?.servers;
-            return question_answer_backend::answer_question(
+            let result = question_answer_backend::answer_question(
                 question_answer_backend::QuestionAnswerBackendRequest {
                     data_dir: &data_dir,
                     workspace_root: &workspace_root,
@@ -158,6 +168,19 @@ impl AppState {
                 },
             )
             .await;
+            match &result {
+                Ok(output) => {
+                    self.notification
+                        .notify_question_answer_success(output.primary_text.clone())
+                        .await;
+                }
+                Err(error) => {
+                    self.notification
+                        .notify_question_answer_failure(Some(error.to_string()))
+                        .await;
+                }
+            }
+            return result;
         }
 
         self.executor.execute(&request)
@@ -211,6 +234,7 @@ impl AppState {
         let config = self.app_config().await?;
         Ok(AppSettings {
             general: config.general,
+            notification: config.notification,
             appearance: config.appearance,
             prompts: config.prompts,
             llm: config.llm,
@@ -306,6 +330,7 @@ impl AppState {
         let store = self.config_store.write().await;
         let mut config = store.load().await?;
         config.general = settings.general.clone();
+        config.notification = settings.notification.clone();
         config.appearance = settings.appearance.clone();
         config.prompts = settings.prompts.clone();
         config.llm = settings.llm.clone();
@@ -319,6 +344,7 @@ impl AppState {
             .await;
         Ok(AppSettings {
             general: config.general,
+            notification: config.notification,
             appearance: config.appearance,
             prompts: config.prompts,
             llm: config.llm,
@@ -979,7 +1005,6 @@ fn normalize_name_value_pairs(
 #[derive(Clone)]
 pub struct ShortcutRuntimeState {
     launcher_shortcut: Arc<StdRwLock<Option<Shortcut>>>,
-    ocr_shortcut: Arc<StdRwLock<Option<Shortcut>>>,
     ocr_translate_shortcut: Arc<StdRwLock<Option<Shortcut>>>,
     launcher_visible: Arc<AtomicBool>,
     launcher_blur_auto_hide_enabled: Arc<AtomicBool>,
@@ -987,7 +1012,6 @@ pub struct ShortcutRuntimeState {
     launcher_blur_auto_hide_suppressed_until: Arc<StdRwLock<Option<Instant>>>,
     launcher_blur_auto_hide_sequence: Arc<AtomicUsize>,
     launcher_shortcut_pressed: Arc<StdRwLock<ShortcutPressGate>>,
-    ocr_shortcut_pressed: Arc<StdRwLock<ShortcutPressGate>>,
     ocr_translate_shortcut_pressed: Arc<StdRwLock<ShortcutPressGate>>,
     ocr_capture_active: Arc<AtomicBool>,
     transient_window_interactions: Arc<AtomicUsize>,
@@ -997,7 +1021,6 @@ impl Default for ShortcutRuntimeState {
     fn default() -> Self {
         Self {
             launcher_shortcut: Arc::new(StdRwLock::new(None)),
-            ocr_shortcut: Arc::new(StdRwLock::new(None)),
             ocr_translate_shortcut: Arc::new(StdRwLock::new(None)),
             launcher_visible: Arc::new(AtomicBool::new(false)),
             launcher_blur_auto_hide_enabled: Arc::new(AtomicBool::new(true)),
@@ -1005,7 +1028,6 @@ impl Default for ShortcutRuntimeState {
             launcher_blur_auto_hide_suppressed_until: Arc::new(StdRwLock::new(None)),
             launcher_blur_auto_hide_sequence: Arc::new(AtomicUsize::new(0)),
             launcher_shortcut_pressed: Arc::new(StdRwLock::new(ShortcutPressGate::default())),
-            ocr_shortcut_pressed: Arc::new(StdRwLock::new(ShortcutPressGate::default())),
             ocr_translate_shortcut_pressed: Arc::new(StdRwLock::new(ShortcutPressGate::default())),
             ocr_capture_active: Arc::new(AtomicBool::new(false)),
             transient_window_interactions: Arc::new(AtomicUsize::new(0)),
@@ -1016,7 +1038,6 @@ impl Default for ShortcutRuntimeState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShortcutAction {
     ToggleLauncher,
-    OcrCapture,
     OcrTranslate,
 }
 
@@ -1024,7 +1045,6 @@ impl ShortcutRuntimeState {
     pub fn shortcut_action(&self, shortcut: Shortcut) -> Option<ShortcutAction> {
         for (key, action) in [
             (ShortcutKey::ToggleLauncher, ShortcutAction::ToggleLauncher),
-            (ShortcutKey::OcrCapture, ShortcutAction::OcrCapture),
             (ShortcutKey::OcrTranslate, ShortcutAction::OcrTranslate),
         ] {
             if self.current_shortcut(key) == Some(shortcut) {
@@ -1038,7 +1058,6 @@ impl ShortcutRuntimeState {
     pub fn current_shortcut(&self, key: ShortcutKey) -> Option<Shortcut> {
         match key {
             ShortcutKey::ToggleLauncher => *self.launcher_shortcut.read().unwrap(),
-            ShortcutKey::OcrCapture => *self.ocr_shortcut.read().unwrap(),
             ShortcutKey::OcrTranslate => *self.ocr_translate_shortcut.read().unwrap(),
         }
     }
@@ -1046,7 +1065,6 @@ impl ShortcutRuntimeState {
     pub fn set_shortcut(&self, key: ShortcutKey, shortcut: Option<Shortcut>) {
         match key {
             ShortcutKey::ToggleLauncher => *self.launcher_shortcut.write().unwrap() = shortcut,
-            ShortcutKey::OcrCapture => *self.ocr_shortcut.write().unwrap() = shortcut,
             ShortcutKey::OcrTranslate => {
                 *self.ocr_translate_shortcut.write().unwrap() = shortcut;
             }
@@ -1131,7 +1149,6 @@ impl ShortcutRuntimeState {
     pub fn begin_shortcut_press(&self, action: ShortcutAction) -> bool {
         Self::begin_shortcut_press_gate(match action {
             ShortcutAction::ToggleLauncher => &self.launcher_shortcut_pressed,
-            ShortcutAction::OcrCapture => &self.ocr_shortcut_pressed,
             ShortcutAction::OcrTranslate => &self.ocr_translate_shortcut_pressed,
         })
     }
@@ -1139,7 +1156,6 @@ impl ShortcutRuntimeState {
     pub fn end_shortcut_press(&self, action: ShortcutAction) {
         Self::end_shortcut_press_gate(match action {
             ShortcutAction::ToggleLauncher => &self.launcher_shortcut_pressed,
-            ShortcutAction::OcrCapture => &self.ocr_shortcut_pressed,
             ShortcutAction::OcrTranslate => &self.ocr_translate_shortcut_pressed,
         });
     }

@@ -5,6 +5,7 @@
 - `acp`：启动本地 `stdio` ACP agent、维护 session 生命周期并投影消息流
 - `application`：扫描已安装应用、缓存索引并执行应用启动
 - `matcher`：根据输入上下文筛选并排序动作
+- `notification`：根据通知设置、launcher 前后台态和完成事件语义，决定是否发系统通知，并把问答/ACP 的最终响应压缩成受控摘要
 - `executor`：执行动作并返回结构化结果
 - `file_search`：基于当前 workspace 做模糊文件搜索
 - `ocr`：定义 OCR provider 抽象、macOS Vision provider、OpenAI 兼容多模态 provider，以及交互式截图 OCR 所需的临时文件与命中点模型
@@ -33,7 +34,7 @@
 - `matcher` / `executor` 对 `base64_text` 额外支持 `/base64 <payload>`；执行时会先尝试把载荷识别为 UTF-8 Base64 文本，命中则解码，否则编码；当前与其他纯文本 slash 动作一样，支持 `inline`、`multiline`、`ocr`、`clipboard`、`selection`
 - `matcher` / `executor` 当前额外内建一组纯文本处理 slash 动作：`/upper`、`/title`、`/lower`、`/camel`、`/snake`、`/trim`、`/unique`、`/sort`、`/words`、`/lines`
 - `matcher` / `translate` 额外支持 `/translate`、`/fy`、`/tr`；执行时会读取 AI 功能页里的翻译提示词，并严格使用翻译 LLM 条目声明的当前协议：`responses` 走 `/responses`，`chat/completions` 走 `/chat/completions`。默认提示词把英文和简体中文视为核心语言对；未指定目标语言时按“简中->英文、英文->简中、其他语言->简中”处理，并要求保留原文语气、风格和格式，只返回译文。翻译请求无论命中哪个模型，都会显式关闭 `thinking` 并以流式方式消费 provider 的 SSE 输出
-- 全局快捷键除了“截图 OCR 回填”外，还支持“优先翻译当前应用选中文本；如果没有选中内容，再截图 OCR 并翻译”；后者会先在快捷键处理线程尝试读取选中文本，只有在选中文本缺失时才会走截图与 OCR provider 链路；一旦拿到待翻译文本，窗口层会先发出“翻译开始”事件并立即显示 launcher，翻译请求再在后台 blocking worker 中复用 `translate` 服务送进翻译 LLM，完成后只回填结果事件
+- 全局快捷键当前支持“优先翻译当前应用选中文本；如果没有选中内容，再截图 OCR 并翻译”；这条链路会先在快捷键处理线程尝试读取选中文本，只有在选中文本缺失时才会走截图与 OCR provider 链路；一旦拿到待翻译文本，窗口层会先发出“翻译开始”事件并立即显示 launcher，翻译请求再在后台 blocking worker 中复用 `translate` 服务送进翻译 LLM，完成后只回填结果事件
 - `ocr` 在远程多模态 provider 下固定内置一条“只返回图片文字并保留换行”的 OCR prompt；服务会把截图字节编码成 data URL，并用 `responses` 的 `input_text + input_image` 结构发送，避免前端再拼装临时图片协议
 - `camel_case_text` / `snake_case_text` 逐行做命名风格转换；单词拆分会同时识别空白、常见分隔符和 `camelCase` / `HTTPServer` 这类大小写边界
 - `unique_lines` / `sort_lines` 按行处理文本：`/unique` 保留首次出现的行，`/sort` 做字典序排序；它们不会顺手裁剪空白，清理空白仍由 `/trim` 负责
@@ -67,6 +68,7 @@
 - `rag` 不再在每个小批次增量更新后立刻重建 LanceDB 向量索引；新建表会立即建索引，已有表则按累计 chunk / delete 阈值延迟重建，把 CPU 开销从“每次保存都可能触发”收敛到“积累到足够规模再做”
 - `rag` 运行态除了 `phase/scanned/pending` 外，还会维护当前重建任务的 `completed_file_count` 与 `total_file_count`，供 launcher 状态栏直接显示文件级进度；这里的 `completed` 表示当前轮里已经确认可用的文件（沿用 active 或完成重建），不是单纯“已经扫描到”
 - `rag_answer` 和 `translate` 一样走运行时调度，而不是塞进纯本地 `executor`
+- 轻量问答完成通知挂在 `rag_answer` 的最终返回边界；ACP 完成通知挂在 `PromptFinished` / `PromptFailed` / 运行中异常退出的终态事件，不能让前端根据投影后的 session update 自己猜
 - 问答后端的稳定公开入口在 `question_answer_backend`；`AppState` 和 `src-tauri/tests/` 都通过这一层调用，集成测试不需要启动 Tauri 命令分发或伪造完整 `AppState`
 - `rag_answer` 不再自动前置 RAG 查询结果；模型必须显式调用 `wabity.rag.query` 才能拿到向量检索命中，再按需继续调用 `wabity.read_file_lines`
 - `rag_answer` 的 `wabity.read_file_lines` 不是任意本地文件读取口子；它只允许访问当前 workspace 根目录和显式配置的 RAG source roots，citation 打开链路也复用同一套路径白名单。对 `docx`，工具不会直接返回原始 ZIP/XML，而是复用索引同款抽取逻辑返回规范化后的可读文本行

@@ -1,6 +1,5 @@
 export interface ShortcutConfig {
 	toggle_launcher: string;
-	ocr_capture: string;
 	ocr_translate: string;
 }
 
@@ -8,6 +7,14 @@ export interface GeneralSettings {
 	autoStart: boolean;
 	showInDock: boolean;
 	language: string;
+}
+
+export interface NotificationSettings {
+	enabled: boolean;
+	notifyQuestionAnswerCompletion: boolean;
+	notifyAcpPromptCompletion: boolean;
+	onlyWhenLauncherInBackground: boolean;
+	contentPreview: "hidden" | "brief";
 }
 
 export interface AppearanceSettings {
@@ -125,6 +132,7 @@ export interface BuiltinRagMcpServerStatus {
 
 export interface AppSettings {
 	general: GeneralSettings;
+	notification: NotificationSettings;
 	appearance: AppearanceSettings;
 	prompts: PromptsSettings;
 	llm: LlmSettings;

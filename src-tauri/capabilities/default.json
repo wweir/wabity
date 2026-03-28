@@ -8,6 +8,7 @@
 		"core:window:allow-start-dragging",
 		"dialog:default",
 		"opener:default",
-		"global-shortcut:default"
+		"global-shortcut:default",
+		"notification:default"
 	]
 }
