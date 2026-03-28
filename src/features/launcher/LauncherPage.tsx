@@ -19,7 +19,6 @@ import {
 	isDesktopRuntimeAvailable,
 	launchApp,
 	onExecutionProgress,
-	onOcrCapturedText,
 	listAcpSessions,
 	matchActions,
 	onOcrError,
@@ -339,6 +338,9 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 	const qaBlurAutoHideRestoreTimeoutRef = useRef<number | null>(null);
 	const launcherBlurAutoHideEnabledRef = useRef(true);
 	const suspendReactiveLauncherInputFocusRef = useRef(false);
+	const launcherResetEpochRef = useRef(0);
+	const activeTrackedRequestEpochRef = useRef<number | null>(null);
+	const shortcutTranslationEpochRef = useRef<number | null>(null);
 	const completionListRef = useRef<HTMLUListElement | null>(null);
 	const sessionLogRef = useRef<HTMLDivElement | null>(null);
 	const pendingSelectionRef = useRef<number | null>(null);
@@ -718,7 +720,6 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		shouldShowQaMessages,
 		workspace,
 	]);
-	const showAgentAction = agentConfigured && !activeSessionId;
 	const showTranslateAction = launcherMode;
 	const showCancelActiveSession = Boolean(activeSessionId) && activeSessionBusy;
 	const primaryActionDependsOnSuggestions =
@@ -747,6 +748,18 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		!creatingSession &&
 		!fileMode &&
 		rawText.trim().length > 0;
+	const showAgentActionButton = launcherMode;
+	const canRunAgentAction = agentConfigured
+		? canTriggerAgentAction
+		: Boolean(onOpenSettings) &&
+			!operationPending &&
+			!shortcutTranslationPending &&
+			!creatingSession;
+	const agentActionLabel = "ACP Agent";
+	const agentActionTitle = agentConfigured
+		? `${agentActionLabel} (${agentActionShortcutLabel})`
+		: "打开 ACP Agent 设置";
+	const showAgentActionShortcut = agentConfigured;
 
 	const clearScheduledLauncherInputFocus = useCallback(() => {
 		if (typeof window !== "undefined" && pendingFocusAnimationFrameRef.current !== null) {
@@ -873,6 +886,22 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		});
 	}, [clearScheduledLauncherInputFocus, focusLauncherInput]);
 
+	function beginTrackedLauncherRequest() {
+		const requestEpoch = launcherResetEpochRef.current;
+		activeTrackedRequestEpochRef.current = requestEpoch;
+		return requestEpoch;
+	}
+
+	function isTrackedLauncherRequestCurrent(requestEpoch: number) {
+		return launcherResetEpochRef.current === requestEpoch;
+	}
+
+	function endTrackedLauncherRequest(requestEpoch: number) {
+		if (activeTrackedRequestEpochRef.current === requestEpoch) {
+			activeTrackedRequestEpochRef.current = null;
+		}
+	}
+
 	const resetQaConversation = useCallback(() => {
 		setQaAutoResizeFrozen(false);
 		restoreLauncherBlurAutoHide(
@@ -883,6 +912,55 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		setRagConversation([]);
 		setQaRetrieval(null);
 	}, [restoreLauncherBlurAutoHide]);
+
+	const resetLauncherStateForExplicitDismiss = useCallback(() => {
+		const resetEpoch = launcherResetEpochRef.current + 1;
+		launcherResetEpochRef.current = resetEpoch;
+		activeTrackedRequestEpochRef.current = null;
+		shortcutTranslationEpochRef.current = resetEpoch - 1;
+		clearScheduledLauncherInputFocus();
+		pendingSelectionRef.current = null;
+		setInputMode(defaultInputMode);
+		setRawText("");
+		setCaretIndex(0);
+		setResult(null);
+		setError(null);
+		setActiveSlashAction(null);
+		setSuggestionsHidden(false);
+		resetSuggestions(true);
+		setLatestSubmittedText(null);
+		setOperationStatusText(null);
+		setOperationPending(false);
+		setAgentActionPending(false);
+		setShortcutTranslationPending(false);
+		setCreatingSession(false);
+		setSessionPanelOpen(false);
+		setWorkspacePickerOpen(false);
+		setAgentPickerOpen(false);
+		setActiveSessionId(null);
+		setSessionSummaries((current) =>
+			current.map((session) => (session.isActive ? { ...session, isActive: false } : session)),
+		);
+		resetQaConversation();
+
+		if (!activeSessionId) {
+			return;
+		}
+
+		void activateAcpSession(null)
+			.then((summaries) => {
+				if (!isTrackedLauncherRequestCurrent(resetEpoch)) {
+					return;
+				}
+
+				setSessionSummaries(summaries);
+			})
+			.catch((error: unknown) => {
+				if (isTrackedLauncherRequestCurrent(resetEpoch)) {
+					console.warn("failed to clear active ACP session while dismissing launcher", error);
+				}
+			});
+	}, [activeSessionId, clearScheduledLauncherInputFocus, resetQaConversation]);
 
 	const dismissLauncher = useCallback(
 		async (options?: { resetQaConversation?: boolean }) => {
@@ -1289,22 +1367,36 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			setWorkspaceState(nextWorkspace);
 			resetQaConversation();
 		});
-		const ocrCapturedTextUnlistenPromise = onOcrCapturedText((payload) => {
-			applyInjectedSourceText(payload.sourceMode, payload.sourceText);
-		});
 		const ocrErrorUnlistenPromise = onOcrError((message) => {
+			if (
+				shortcutTranslationEpochRef.current !== null &&
+				shortcutTranslationEpochRef.current !== launcherResetEpochRef.current
+			) {
+				return;
+			}
+
+			shortcutTranslationEpochRef.current = null;
 			setShortcutTranslationPending(false);
 			setOperationStatusText(null);
 			setError(message);
 			scheduleLauncherInputFocus();
 		});
 		const ocrTranslationStartedUnlistenPromise = onOcrTranslationStarted((payload) => {
+			shortcutTranslationEpochRef.current = launcherResetEpochRef.current;
 			setShortcutTranslationPending(true);
 			setOperationStatusText("模型请求中 · 正在翻译文本");
 			applyInjectedSourceText(payload.sourceMode, payload.sourceText);
 			setLatestSubmittedText(payload.sourceText.trim() || "快捷翻译");
 		});
 		const ocrTranslationUnlistenPromise = onOcrTranslationResult((payload) => {
+			if (
+				shortcutTranslationEpochRef.current === null ||
+				shortcutTranslationEpochRef.current !== launcherResetEpochRef.current
+			) {
+				return;
+			}
+
+			shortcutTranslationEpochRef.current = null;
 			setShortcutTranslationPending(false);
 			setOperationStatusText(null);
 			applyInjectedSourceText(payload.sourceMode, payload.sourceText);
@@ -1312,6 +1404,13 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			setResult(payload.result);
 		});
 		const executionProgressUnlistenPromise = onExecutionProgress((payload) => {
+			if (
+				activeTrackedRequestEpochRef.current === null ||
+				activeTrackedRequestEpochRef.current !== launcherResetEpochRef.current
+			) {
+				return;
+			}
+
 			setOperationStatusText(payload.statusText);
 		});
 		void subscribeAcpSessionUpdates((detail) => {
@@ -1333,7 +1432,6 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 
 		return () => {
 			void workspaceUnlistenPromise.then((unlisten) => unlisten?.());
-			void ocrCapturedTextUnlistenPromise.then((unlisten) => unlisten?.());
 			void ocrErrorUnlistenPromise.then((unlisten) => unlisten?.());
 			void ocrTranslationStartedUnlistenPromise.then((unlisten) => unlisten?.());
 			void ocrTranslationUnlistenPromise.then((unlisten) => unlisten?.());
@@ -1572,6 +1670,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			onSuccess?: () => void;
 		},
 	) {
+		const requestEpoch = beginTrackedLauncherRequest();
 		const nextOperationStatus = resolveLauncherOperationStatus(descriptor.id);
 		if (nextOperationStatus) {
 			setOperationStatusText(nextOperationStatus);
@@ -1584,6 +1683,10 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 				conversation: descriptor.id === "rag_answer" ? ragConversation : undefined,
 				conversationState: descriptor.id === "rag_answer" ? qaConversationState : undefined,
 			});
+
+			if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
+				return false;
+			}
 
 			setLatestSubmittedText(query.rawText.trim() || descriptor.title);
 			options?.onSuccess?.();
@@ -1608,13 +1711,21 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 
 			return true;
 		} catch (executionError) {
+			if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
+				return false;
+			}
+
 			setError(getErrorMessage(executionError, "动作执行失败"));
 			return false;
 		} finally {
-			if (nextOperationStatus) {
+			const requestStillCurrent = isTrackedLauncherRequestCurrent(requestEpoch);
+			endTrackedLauncherRequest(requestEpoch);
+			if (requestStillCurrent && nextOperationStatus) {
 				setOperationStatusText(null);
 			}
-			setOperationPending(false);
+			if (requestStillCurrent) {
+				setOperationPending(false);
+			}
 		}
 	}
 
@@ -1814,9 +1925,13 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			return;
 		}
 
+		const requestEpoch = beginTrackedLauncherRequest();
 		setOperationPending(true);
 		try {
 			const executionResult = await launchApp(selected.path);
+			if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
+				return;
+			}
 			setLatestSubmittedText(rawText.trim() || selected.name);
 			setResult(executionResult);
 			setError(null);
@@ -1825,9 +1940,16 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 				await dismissLauncher();
 			}
 		} catch (launchError) {
+			if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
+				return;
+			}
 			setError(getErrorMessage(launchError, "应用启动失败"));
 		} finally {
-			setOperationPending(false);
+			const requestStillCurrent = isTrackedLauncherRequestCurrent(requestEpoch);
+			endTrackedLauncherRequest(requestEpoch);
+			if (requestStillCurrent) {
+				setOperationPending(false);
+			}
 		}
 	}
 
@@ -1841,20 +1963,31 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			return;
 		}
 
+		const requestEpoch = beginTrackedLauncherRequest();
 		setOperationStatusText("Agent 执行中 · 正在等待响应");
 		setOperationPending(true);
 		setAgentActionPending(true);
 		try {
 			const detail = await sendAcpPrompt(activeSessionId, prompt);
+			if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
+				return;
+			}
 			setLatestSubmittedText(prompt);
 			applySessionDetail(detail);
 			resetComposer();
 		} catch (promptError) {
+			if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
+				return;
+			}
 			setError(getErrorMessage(promptError, "ACP prompt 发送失败"));
 		} finally {
-			setOperationStatusText(null);
-			setAgentActionPending(false);
-			setOperationPending(false);
+			const requestStillCurrent = isTrackedLauncherRequestCurrent(requestEpoch);
+			endTrackedLauncherRequest(requestEpoch);
+			if (requestStillCurrent) {
+				setOperationStatusText(null);
+				setAgentActionPending(false);
+				setOperationPending(false);
+			}
 		}
 	}
 
@@ -1864,6 +1997,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			return;
 		}
 
+		const requestEpoch = beginTrackedLauncherRequest();
 		setOperationStatusText("Agent 执行中 · 正在等待响应");
 		setOperationPending(true);
 		setAgentActionPending(true);
@@ -1871,7 +2005,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			let targetSessionId = activeSessionId;
 
 			if (!targetSessionId) {
-				const createdDetail = await createAndActivateSession();
+				const createdDetail = await createAndActivateSession(requestEpoch);
 				targetSessionId = createdDetail.session.sessionId;
 			}
 
@@ -1880,15 +2014,25 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			}
 
 			const detail = await sendAcpPrompt(targetSessionId, prompt);
+			if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
+				return;
+			}
 			setLatestSubmittedText(prompt);
 			applySessionDetail(detail);
 			resetComposer();
 		} catch (agentError) {
+			if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
+				return;
+			}
 			setError(getErrorMessage(agentError, "Agent 执行失败"));
 		} finally {
-			setOperationStatusText(null);
-			setAgentActionPending(false);
-			setOperationPending(false);
+			const requestStillCurrent = isTrackedLauncherRequestCurrent(requestEpoch);
+			endTrackedLauncherRequest(requestEpoch);
+			if (requestStillCurrent) {
+				setOperationStatusText(null);
+				setAgentActionPending(false);
+				setOperationPending(false);
+			}
 		}
 	}
 
@@ -1992,7 +2136,8 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 				return;
 			}
 
-			await dismissLauncher({ resetQaConversation: true });
+			resetLauncherStateForExplicitDismiss();
+			await dismissLauncher();
 			return;
 		}
 
@@ -2089,26 +2234,43 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		setError(null);
 	}
 
-	async function createAndActivateSession() {
+	async function createAndActivateSession(requestEpoch: number = launcherResetEpochRef.current) {
 		const detail = await createAcpSession(selectedAgent?.id ?? null);
+		if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
+			throw new Error("launcher reset while creating ACP session");
+		}
 		setSessionDetails((current) => upsertSessionDetailRecord(current, detail));
 		const summaries = await activateAcpSession(detail.session.sessionId);
+		if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
+			throw new Error("launcher reset while activating ACP session");
+		}
 		setSessionSummaries(summaries);
 		setActiveSessionId(detail.session.sessionId);
 		return detail;
 	}
 
 	async function handleCreateSession() {
+		const requestEpoch = beginTrackedLauncherRequest();
 		setCreatingSession(true);
 		try {
-			await createAndActivateSession();
+			await createAndActivateSession(requestEpoch);
+			if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
+				return;
+			}
 			setSessionPanelOpen(true);
 			setResult(null);
 			setError(null);
 		} catch (sessionError) {
+			if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
+				return;
+			}
 			setError(getErrorMessage(sessionError, "创建 ACP session 失败"));
 		} finally {
-			setCreatingSession(false);
+			const requestStillCurrent = isTrackedLauncherRequestCurrent(requestEpoch);
+			endTrackedLauncherRequest(requestEpoch);
+			if (requestStillCurrent) {
+				setCreatingSession(false);
+			}
 		}
 	}
 
@@ -2239,9 +2401,12 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 					completionPopupId={launcherCompletionPopupId}
 					activeCompletionOptionId={activeCompletionOptionId}
 					onAcceptCompletion={acceptCompletion}
-					creatingSession={creatingSession}
 					agentActionPending={agentActionPending}
-					showAgentAction={showAgentAction}
+					showAgentAction={showAgentActionButton}
+					agentActionLabel={agentActionLabel}
+					agentActionTitle={agentActionTitle}
+					canRunAgentAction={canRunAgentAction}
+					showAgentActionShortcut={showAgentActionShortcut}
 					showTranslateAction={showTranslateAction}
 					primaryActionShortcutLabel={primaryActionShortcutLabel}
 					primaryActionLabel={primaryActionState.label}
@@ -2249,7 +2414,14 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 					canRunPrimaryAction={canRunPrimaryAction}
 					canRunTranslateAction={canRunTranslateAction}
 					agentActionShortcutLabel={agentActionShortcutLabel}
-					onAgentExecute={() => void handleAgentExecute()}
+					onAgentExecute={() => {
+						if (agentConfigured) {
+							void handleAgentExecute();
+							return;
+						}
+
+						onOpenSettings?.();
+					}}
 					onRunTranslateAction={() => void handleTranslateAction()}
 					showCancelActiveSession={showCancelActiveSession}
 					onCancelActiveSession={() => void handleCancelActiveSession()}
@@ -2295,7 +2467,6 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 				sessionRunningCount={sessionRunningCount}
 				sessionAttentionCount={sessionAttentionCount}
 				activeSessionId={activeSessionId}
-				activeSessionSummary={activeSessionSummary}
 				workspace={workspace}
 				onSelectSession={(sessionId) => void handleSessionPanelSelect(sessionId)}
 				onCloseSession={(sessionId) => void handleCloseSession(sessionId)}

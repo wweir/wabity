@@ -74,6 +74,25 @@ export function formatSessionStatus(session: AcpSessionSummary) {
 	}
 }
 
+export function buildSessionStatusClassName(session: AcpSessionSummary) {
+	switch (session.status) {
+		case "starting":
+			return "session-panel-status-starting";
+		case "idle":
+			return "session-panel-status-idle";
+		case "running":
+			return "session-panel-status-running";
+		case "error":
+			return session.errorLevel === "fatal"
+				? "session-panel-status-fatal"
+				: "session-panel-status-recoverable";
+		case "exited":
+			return "session-panel-status-disconnected";
+		default:
+			return "session-panel-status-idle";
+	}
+}
+
 export function buildSessionTriggerSummary(
 	sessionSummaries: AcpSessionSummary[],
 	activeSession: AcpSessionSummary | null,

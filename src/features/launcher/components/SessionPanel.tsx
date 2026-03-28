@@ -1,7 +1,7 @@
 import type { RefObject } from "react";
 import type { AcpSessionSummary, WorkspaceState } from "../../../lib/tauri/types";
 import type { FloatingPanelOffset } from "../types";
-import { formatSessionStatus } from "../sessions";
+import { buildSessionStatusClassName, formatSessionStatus } from "../sessions";
 import { formatWorkspacePath } from "../workspace";
 
 interface SessionPanelProps {
@@ -13,7 +13,6 @@ interface SessionPanelProps {
 	sessionRunningCount: number;
 	sessionAttentionCount: number;
 	activeSessionId: string | null;
-	activeSessionSummary: AcpSessionSummary | null;
 	workspace: WorkspaceState;
 	onSelectSession: (sessionId: string) => void;
 	onCloseSession: (sessionId: string) => void;
@@ -28,7 +27,6 @@ export function SessionPanel({
 	sessionRunningCount,
 	sessionAttentionCount,
 	activeSessionId,
-	activeSessionSummary,
 	workspace,
 	onSelectSession,
 	onCloseSession,
@@ -60,9 +58,6 @@ export function SessionPanel({
 							: `共 ${sessionSummaries.length} 个，运行中 ${sessionRunningCount} 个，待处理更新 ${sessionAttentionCount} 个`}
 					</span>
 				</div>
-				{activeSessionSummary ? (
-					<span className="session-panel-active-pill">当前：{activeSessionSummary.title}</span>
-				) : null}
 			</header>
 			{sessionSummaries.length === 0 ? (
 				<p className="session-panel-empty">
@@ -71,7 +66,7 @@ export function SessionPanel({
 						: "还没有 ACP session。先在设置里配置 agent。"}
 				</p>
 			) : (
-				<div className="session-panel-list">
+				<div className="session-panel-list" role="list">
 					{sessionSummaries.map((session) => (
 						<article
 							className={
@@ -80,32 +75,45 @@ export function SessionPanel({
 									: "session-panel-item"
 							}
 							key={session.sessionId}
+							role="listitem"
 						>
 							<button
 								className="session-panel-main"
 								onClick={() => onSelectSession(session.sessionId)}
+								title={`${session.title} · ${formatSessionStatus(session)}`}
 								type="button"
 							>
+								{session.sessionId === activeSessionId ? (
+									<span className="session-panel-kicker">当前会话</span>
+								) : null}
 								<span className="session-panel-title-row">
 									<span className="session-panel-title">{session.title}</span>
-									{session.sessionId === activeSessionId ? (
-										<span className="session-panel-badge">当前</span>
-									) : null}
 								</span>
-								<span className="session-panel-meta-row">
-									<span className="session-panel-status">{formatSessionStatus(session)}</span>
-									<span className="session-panel-meta">{session.agentName}</span>
-									<span className="session-panel-meta">
-										{formatWorkspacePath(session.workspaceRoot, workspace)}
+								<span className="session-panel-detail-row">
+									<span className={`session-panel-status ${buildSessionStatusClassName(session)}`}>
+										{formatSessionStatus(session)}
 									</span>
+									{session.attention ? (
+										<span className="session-panel-status session-panel-status-attention">
+											待处理更新
+										</span>
+									) : null}
+									<span className="session-panel-agent">{session.agentName}</span>
+								</span>
+								<span className="session-panel-path">
+									{formatWorkspacePath(session.workspaceRoot, workspace)}
 								</span>
 							</button>
 							<button
 								className="session-panel-close"
+								aria-label={`关闭会话 ${session.title}`}
 								onClick={() => onCloseSession(session.sessionId)}
+								title={`关闭会话 ${session.title}`}
 								type="button"
 							>
-								关闭
+								<span aria-hidden="true" className="session-panel-close-icon">
+									×
+								</span>
 							</button>
 						</article>
 					))}

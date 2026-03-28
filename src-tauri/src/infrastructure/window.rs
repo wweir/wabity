@@ -16,7 +16,6 @@ use crate::{
     state::{AppState, ShortcutRuntimeState},
 };
 
-const OCR_CAPTURED_TEXT_EVENT: &str = "ocr-captured-text";
 const OCR_ERROR_EVENT: &str = "ocr-error";
 const OCR_TRANSLATION_STARTED_EVENT: &str = "ocr-translation-started";
 const OCR_TRANSLATION_RESULT_EVENT: &str = "ocr-translation-result";
@@ -107,13 +106,6 @@ fn macos_panel_toggle_reveal_reason(
     }
 
     None
-}
-
-#[derive(Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct OcrCapturedTextPayload {
-    source_mode: ShortcutTranslationSourceMode,
-    source_text: String,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -464,29 +456,29 @@ pub fn toggle_main_window(app: &AppHandle) -> Result<()> {
     Ok(())
 }
 
-pub fn show_main_window_with_ocr_text(app: &AppHandle, text: String) -> Result<()> {
+pub fn launcher_is_effectively_foreground(
+    app: &AppHandle,
+    shortcut_state: &ShortcutRuntimeState,
+) -> Result<bool> {
+    if !shortcut_state.is_launcher_visible() {
+        return Ok(false);
+    }
+
     let window = main_window(app)?;
-    let shortcut_state = app.state::<ShortcutRuntimeState>();
-    window
-        .emit(
-            OCR_CAPTURED_TEXT_EVENT,
-            OcrCapturedTextPayload {
-                source_mode: ShortcutTranslationSourceMode::Ocr,
-                source_text: text,
-            },
-        )
-        .context("failed to emit OCR captured text event")?;
-    prepare_main_window_for_show(&window)?;
-    shortcut_state.cancel_launcher_blur_auto_hide_confirmation();
-    shortcut_state.set_launcher_blur_auto_hide_enabled(true);
-    shortcut_state.arm_launcher_resize_reposition(LAUNCHER_SHOW_RESIZE_REPOSITION_GRACE_PERIOD);
-    shortcut_state
-        .arm_launcher_blur_auto_hide_suppression(LAUNCHER_SHOW_BLUR_AUTO_HIDE_SUPPRESSION_PERIOD);
-    set_default_window_position(&window)?;
-    show_window(&window)?;
-    order_main_window_front(&window)?;
-    shortcut_state.set_launcher_visible(true);
-    Ok(())
+    let launcher_focused = window
+        .is_focused()
+        .context("failed to inspect launcher focus state for notification")?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let panel_state = inspect_macos_panel_state(&window)?;
+        Ok(macos_panel_toggle_reveal_reason(launcher_focused, Some(panel_state)).is_none())
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(launcher_focused)
+    }
 }
 
 pub fn show_main_window_with_error(app: &AppHandle, error_message: &str) -> Result<()> {
@@ -1108,8 +1100,8 @@ where
 mod tests {
     use super::{
         clamp_window_size_to_work_area, compute_default_window_position,
-        compute_visible_window_position, LogicalPosition, LogicalSize, OcrCapturedTextPayload,
-        OcrTranslationResultPayload, OcrTranslationStartedPayload, ShortcutTranslationSourceMode,
+        compute_visible_window_position, LogicalPosition, LogicalSize, OcrTranslationResultPayload,
+        OcrTranslationStartedPayload, ShortcutTranslationSourceMode,
         LAUNCHER_VERTICAL_CENTER_RATIO,
     };
     use crate::domain::execution::ExecutionResult;
@@ -1128,23 +1120,6 @@ mod tests {
             json!({
                 "sourceMode": "selection",
                 "sourceText": "hello",
-            })
-        );
-    }
-
-    #[test]
-    fn ocr_captured_text_payload_uses_expected_wire_shape() {
-        let payload = serde_json::to_value(OcrCapturedTextPayload {
-            source_mode: ShortcutTranslationSourceMode::Ocr,
-            source_text: "captured text".to_string(),
-        })
-        .expect("payload should serialize");
-
-        assert_eq!(
-            payload,
-            json!({
-                "sourceMode": "ocr",
-                "sourceText": "captured text",
             })
         );
     }

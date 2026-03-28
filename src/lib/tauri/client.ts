@@ -67,11 +67,6 @@ export interface OcrTranslationResultEvent {
 	result: ExecutionResult;
 }
 
-export interface OcrCapturedTextEvent {
-	sourceMode: "ocr";
-	sourceText: string;
-}
-
 export interface OcrTranslationStartedEvent {
 	sourceMode: "ocr" | "selection";
 	sourceText: string;
@@ -608,12 +603,6 @@ export async function resizeLauncherWindow(size: { width: number; height: number
 	lastLauncherWindowSize = { width: nextWidth, height: nextHeight };
 
 	await invokeDesktop<void>("resize_launcher_window", { width: nextWidth, height: nextHeight });
-}
-
-export async function onOcrCapturedText(
-	callback: (payload: OcrCapturedTextEvent) => void,
-): Promise<UnlistenFn | null> {
-	return listenIfDesktop("ocr-captured-text", callback);
 }
 
 export async function onOcrError(callback: (message: string) => void): Promise<UnlistenFn | null> {

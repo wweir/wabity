@@ -14,7 +14,7 @@
 - `MarkdownRenderer.tsx`：统一承接 launcher 内的 Markdown 渲染，补 GFM、Mermaid、MDX 安全兼容和 Obsidian 风格 wiki link / callout / highlight
 - `SessionTimeline.tsx`：渲染 ACP 会话消息流与 launcher 轻量问答历史；对 assistant message 会先把同一 turn 内零散的 `thought` / `actions` / `content` block 归并成稳定结构，但阅读顺序必须保持 answer-first：正文先于 action trail，thought 继续作为更次级的折叠信息；thought 入口位于正文后的消息元信息区，只提供简短预览，展开内容使用普通阅读排版而不是日志式 `pre`
 - `CompletionPopup.tsx`：渲染文件、动作、应用建议列表
-- `SessionPanel.tsx`：渲染全部 session 浮层
+- `SessionPanel.tsx`：渲染全部 session 浮层；列表项靠单一激活高亮、语义状态标签和明确关闭按钮建立层级，不重复堆叠“当前”提示
 - `WorkspacePickerPanel.tsx`：渲染 workspace 选择浮层
 - `AgentPickerPanel.tsx`：渲染 agent 选择浮层
 

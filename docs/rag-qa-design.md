@@ -11,7 +11,7 @@
 - 点击引用会通过 `open_document_reference(path)` 打开本地文件
 - v2 起，问答不再自动预注入 RAG 命中片段，而是给模型注入内置 `wabity.rag.query` / `wabity.read_file_lines` 和全局 HTTP/SSE MCP server，由模型自己发起工具调用；其中 `wabity.read_file_lines` 只允许读取当前 workspace 和显式配置的 RAG source roots
 - v2 起，launcher 会把最近几轮问答的 user/assistant 文本显式回传给后端，形成轻量多轮上下文；这仍然不是 ACP session
-- `Esc` 显式隐藏 launcher 时会重置这份轻量多轮上下文；其它隐藏路径只隐藏窗口，继续保留上下文
+- `Esc` 显式隐藏 launcher 时会把这份轻量多轮上下文连同当前输入、内联结果和当前激活 session 选择一起清掉，回到干净的 launcher 初始态；其它隐藏路径只隐藏窗口，继续保留上下文
 - v2 起，问答请求会显式打开 `parallel_tool_calls`，并在模型返回多个本地 function call 时并发执行，再把 tool output 回填给下一轮 `responses`
 - v2.1 起，问答同时支持 `chat/completions`、`responses stateless` 和 `responses stateful`；只有 `responses` 会继续注入 HTTP/SSE MCP server
 - v2.2 起，问答后端新增独立模块 `question_answer_backend` 作为稳定函数入口；`AppState` 只负责装配依赖，`src-tauri/tests/` 可直接用该模块做集成测试

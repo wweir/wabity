@@ -31,9 +31,12 @@ interface LauncherComposerProps {
 	completionPopupId?: string;
 	activeCompletionOptionId?: string;
 	onAcceptCompletion: () => void;
-	creatingSession: boolean;
 	agentActionPending: boolean;
 	showAgentAction: boolean;
+	agentActionLabel: string;
+	agentActionTitle: string;
+	canRunAgentAction: boolean;
+	showAgentActionShortcut: boolean;
 	showTranslateAction: boolean;
 	primaryActionShortcutLabel: string;
 	primaryActionLabel: string;
@@ -185,9 +188,12 @@ export function LauncherComposer({
 	completionPopupId,
 	activeCompletionOptionId,
 	onAcceptCompletion,
-	creatingSession,
 	agentActionPending,
 	showAgentAction,
+	agentActionLabel,
+	agentActionTitle,
+	canRunAgentAction,
+	showAgentActionShortcut,
 	showTranslateAction,
 	primaryActionShortcutLabel,
 	primaryActionLabel,
@@ -321,13 +327,13 @@ export function LauncherComposer({
 					{showAgentAction ? (
 						<button
 							className="control-button agent-execute-button"
-							disabled={agentActionPending || creatingSession || rawText.trim().length === 0}
+							disabled={!canRunAgentAction}
 							onClick={onAgentExecute}
-							title={`Agent 执行 (${agentActionShortcutLabel})`}
+							title={agentActionTitle}
 							type="button"
 						>
 							<svg
-								aria-label="Agent"
+								aria-label={agentActionLabel}
 								className="control-button-icon"
 								fill="currentColor"
 								role="img"
@@ -338,8 +344,8 @@ export function LauncherComposer({
 								<circle cx="10.5" cy="7.5" r="1" fill="var(--button-background, #fff)" />
 								<path d="M6 10h4v1H6z" fill="var(--button-background, #fff)" />
 							</svg>
-							<span>{agentActionPending ? "执行中..." : "Agent"}</span>
-							{agentActionPending ? null : (
+							<span>{agentActionPending ? "执行中..." : agentActionLabel}</span>
+							{agentActionPending || !showAgentActionShortcut ? null : (
 								<span className="control-button-shortcut">{agentActionShortcutLabel}</span>
 							)}
 						</button>

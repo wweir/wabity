@@ -14,6 +14,7 @@
 - ACP 会话时间线里的 `user / assistant / system` 消息卡片底色必须基于全局 token 组合，禁止在 `launcher.css` 里直接写死只适合浅色主题的消息背景
 - `MarkdownRenderer` 衍生出来的 Mermaid 状态文本、错误文案和 highlight.js 语法色同样必须走全局 code token；浅色和深色都不能继续保留私有 code palette 或只适合浅底块的 hex 色
 - session panel、restore notice、Markdown 辅助元素和轻量问答元信息区都必须复用全局 surface / text / status token；不要再靠 feature 私有的乳白半透明面和浅描边硬编码制造层级
+- session panel 列表项的激活态只保留单一高亮语义，禁止在触发器、面板头和条目内部重复堆叠“当前” pill；状态标签必须和 session dot 复用同一套运行中 / 更新 / 错误 / 断开语义颜色，关闭动作要保持明确按钮命中区和具体可访问名称
 - ACP 输出区的阅读优先级固定为“答案正文 > 操作轨迹 > 思考过程 > 角色元信息”；assistant message 内的 block 顺序必须先渲染正文，再渲染操作轨迹，最后才是 thought disclosure；tool detail 只作为消息内部次级展开区，不能继续做成比答案更抢眼的大黑面板；`chat/completions` 返回的 reasoning 也必须沿用同一原则，不能再直接冒充正文；兼容层若把 thinking 混进 `message.content`，也必须先在后端归一化拆出次级 thought，再交给前端
 - `Agent` 行只保留身份标识；thought 入口降到正文后的消息元信息区，保持紧凑次级，不得继续占据 assistant 卡片的首个视觉落点；assistant 正文的字号和前景权重必须显著高于 thought / action 元信息
 - `actionCatalog.ts`：集中维护 launcher/browser fallback 共用的动作描述符和 slash alias，避免页面层与 fallback 重复声明动作元数据
@@ -58,13 +59,13 @@
 - 主输入框必须带稳定的程序化名称；单行模式下补全关系按 `combobox + listbox + option` 暴露，active option 通过 `aria-activedescendant` 跟随选中项
 - 多行输入框按内容自动增高，但会基于屏幕可用高度收敛到固定上限；超出部分交给输入框内滚动，避免 Tauri 窗口被长文本继续撑高
 - 主输入区在“本地 launcher 模式”和“ACP session 模式”之间切换
-- 配置好 ACP agent 后，底部操作条会提供 `Agent 执行` 入口；仅在未激活 session 时显示，点击会自动创建或复用 ACP session，并在下方会话面板展示 agent 输出；该入口额外绑定 `Alt+Enter`
+- 底部操作条在未激活 session 时固定保留 `ACP Agent` 入口：已配置 agent 时点击会自动创建或复用 ACP session，并在下方会话面板展示 agent 输出；未配置时按钮不再整颗消失，而是直接打开设置页；真正执行 agent 的快捷键仍是 `Alt+Enter`
 - 顶部支持为“下一次新建 session”选择当前 agent；同一时刻可以并存多个不同 agent 的 session
 - 结果改为内联反馈；ACP 激活时下方改为消息流面板
 - 内联结果卡和 ACP 消息流都带固定高度上限与内部滚动，不允许单次长输出把 launcher 主窗口顶出屏幕
 - `/format`、`/fmt`、`/json` 的预览、`/md` / `/markdown` 的 markdown 预览，以及 `/base64` 等快捷命令执行结果统一落在内联结果卡片；结果卡片自带复制按钮，JSON 走语法高亮，Markdown 走共享渲染器
 - 文本处理 slash 命令当前内建 `/upper`、`/title`、`/lower`、`/camel`、`/snake`、`/trim`、`/unique`、`/sort`、`/words`、`/lines`，以及走默认 LLM provider 的 `/translate`、`/fy`、`/tr`；其中 `/title` 会把每个词的首字母转为大写，`/unique` 和 `/sort` 都按行处理，翻译默认在未指定目标语言时按“简中->英文、英文->简中、其他语言->简中”处理，并保留原文风格与格式
-- 底部操作条只保留当前状态真正可执行的动作：未激活 session 时主链路顺序固定为 `设置 -> 翻译 -> Agent 执行 -> 主按钮`；主按钮的文案、色调、禁用态和 Enter 行为共用同一套状态机：普通场景默认显示 `执行`，RAG 回退显示 `问答`，session 内显示 `发送`，文件 token 选中候选后显示 `插入路径`；显式 slash 动作优先显示动作本名（例如 `翻译`、`转大写`），`@token` 尚无候选时显示 `搜索路径` 且保持禁用。`补全` 只作为尾部辅助按钮出现；当前 session 的关闭统一收敛到顶部会话区和会话面板，不再在底部重复放一个“关闭会话”
+- 底部操作条只保留当前状态真正可执行的动作：未激活 session 时主链路顺序固定为 `设置 -> 翻译 -> ACP Agent -> 主按钮`；主按钮的文案、色调、禁用态和 Enter 行为共用同一套状态机：普通场景默认显示 `执行`，RAG 回退显示 `问答`，session 内显示 `发送`，文件 token 选中候选后显示 `插入路径`；显式 slash 动作优先显示动作本名（例如 `翻译`、`转大写`），`@token` 尚无候选时显示 `搜索路径` 且保持禁用。`补全` 只作为尾部辅助按钮出现；当前 session 的关闭统一收敛到顶部会话区和会话面板，不再在底部重复放一个“关闭会话”
 - ACP `Agent` 按钮和主按钮共用同一套会话状态，但不能复用“候选搜索加载”这类辅助态；补全查询、普通动作执行、Agent prompt 发送必须分别建模，否则按钮文案和禁用态会被串错
 - 底部 `设置` 入口继续保持 icon-only 次级按钮，但图标语义改成三滑杆调参 glyph，而不是密集的实心齿轮；这种小尺寸下的识别度更高，也更贴近“配置当前行为”的语义
 - 动作条在深色主题下不再额外包一层浅底胶囊容器；主按钮、翻译按钮和设置按钮直接用语义 token 区分强弱状态，避免“按钮上再贴按钮”的贴纸感
@@ -112,7 +113,7 @@
 - thought block 默认折叠，但用户手动展开后，在同一条消息继续流式追加时必须尽量保留展开状态；不要每次增量更新就把用户已打开的内容重新折回去
 - session 更新合并以 `lastUpdatedAtMs` 和消息权重单调收敛，避免旧快照覆盖异步事件流
 - session 恢复完全依赖 agent 自身能力；agent 不支持 `session/load` 时，只提示，不伪装恢复成功
-- 全局快捷键默认使用 `Alt+Space` 唤起 launcher，`Alt+R` 做截图 OCR 回填，`Alt+D` 会先翻译当前应用选中文本；若没有选中内容，再回退到截图 OCR 并翻译
+- 全局快捷键默认使用 `Alt+Space` 唤起 launcher；`Alt+D` 会优先翻译当前应用选中文本，未选中时再回退到截图 OCR 并翻译
 
 约束：
 
@@ -124,7 +125,7 @@
 - RAG 问答采用双入口：显式 slash 动作 `/ask` / `/qa` / `/docs` 可以强制进入；普通文本模式下，如果应用搜索没有弹出补全框，则默认主动作回退到 RAG 问答
 - 只要应用搜索存在可见候选，主动作仍保持应用启动优先级；不要把所有普通自然语言都无条件送进问答
 - launcher 会在本地同时保留最近几轮问答的 user/assistant 文本，以及一份显式 `conversationState`：其中包含上一轮 `responses` 的 `response_id`、续链 scope、累计 citation、累计 action 轨迹和累计工具摘要。后端只在 scope 与当前 provider + workspace 一致时继续沿用它；当当前问答协议是 `responses stateful` 时，继续追问优先把 `previous_response_id` 交给后端，只发送当前问题；如果首轮续问被 provider 以预算或上下文过大拒绝，后端会自动丢弃旧 `response_id`，改用最近历史重试一次；`responses stateless` 和 `chat/completions` 则统一回退到显式回传最近历史。这仍只是轻量多轮上下文，不是 ACP session
-- `Esc` 在收起 launcher 本体时会显式清空这份轻量问答上下文；其它隐藏路径例如 blur auto-hide、打开引用前的临时隐藏、执行结果要求关闭 launcher 或全局快捷键 toggle 隐藏都保留当前问答上下文，避免把“临时收起窗口”和“主动结束本轮问答”混成同一个动作
+- `Esc` 显式收起 launcher 时，现在按“结束当前这一轮 launcher 本地交互”处理：除了清空轻量问答上下文，还要同步清掉当前输入、内联结果展示、pending slash 动作和当前激活 session 选择，重新回到干净的 launcher 初始态；其它隐藏路径例如 blur auto-hide、打开引用前的临时隐藏、执行结果要求关闭 launcher 或全局快捷键 toggle 隐藏都保留当前上下文，避免把“临时收起窗口”和“主动结束本轮交互”混成同一个动作
 - 轻量问答的结构化 payload 除了 `conversationState`、citation、action 和 tool 摘要外，还允许带一段可选 `reasoning`；只有在 provider 同时给出明确正文和 reasoning 时，前端才把这段 reasoning 接成次级 thought 折叠块，绝不能再把 reasoning 当主答案兜底展示；`chat/completions` 兼容层若把 thinking 作为 `content` 数组项或 `<think>...</think>` 片段返回，后端也必须先拆成 `primary_text + reasoning`
 - 问答成功后，反馈区优先切到轻量对话历史，而不是只显示最后一张结果卡；assistant 内容仍走 Markdown 渲染，便于继续追问
 - 问答请求会显式携带工具列表：无论 `responses` 还是 `chat/completions`，都会注入内置 `wabity.read_file_lines` 和 `wabity.rag.query`；只有 `responses` 额外注入全局 MCP 里的 HTTP/SSE server。模型可以在单轮里并发调用多个工具，页面不再只显示压缩摘要，而是直接复用 `SessionTimeline` 的 action bar 渲染“第 N 步”、tool call 输入和 tool result 输出
