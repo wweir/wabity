@@ -1,4 +1,5 @@
 use std::{
+    path::Path,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, RwLock as StdRwLock,
@@ -21,6 +22,7 @@ use crate::services::{
     matcher::MatcherService,
     notification::NotificationService,
     ocr::{OcrProvider, OpenAiCompatibleOcrProvider, UnavailableOcrProvider},
+    open_target::OpenTargetService,
     question_answer_backend,
     rag::RagIndexService,
     rag_mcp::RagMcpServerService,
@@ -64,6 +66,7 @@ struct ShortcutPressGate {
 pub struct AppState {
     matcher: MatcherService,
     executor: ExecutorService,
+    open_target: OpenTargetService,
     application: ApplicationService,
     file_search: FileSearchService,
     notification: NotificationService,
@@ -113,6 +116,7 @@ impl AppState {
         Ok(Self {
             matcher,
             executor,
+            open_target: OpenTargetService::new(),
             application: ApplicationService::new()?,
             file_search: FileSearchService::new()?,
             notification: notification.clone(),
@@ -134,56 +138,65 @@ impl AppState {
         request: ExecutionRequest,
         progress_event_tx: Option<Arc<dyn Fn(ExecutionProgressEvent) + Send + Sync>>,
     ) -> Result<ExecutionResult> {
-        if request.action_id == "translate_text" {
-            let settings = self.app_settings().await?;
-            return tokio::task::spawn_blocking(move || {
-                translate::execute_translation(
-                    &request.query.raw_text,
-                    &settings.prompts,
-                    &settings.llm,
-                )
-            })
-            .await
-            .context("failed to join translation task")?;
-        }
-
-        if request.action_id == "rag_answer" {
-            let settings = self.app_settings().await?;
-            let data_dir = ConfigStore::data_dir()?;
-            let workspace = self.workspace().await?;
-            let workspace_root = normalize_workspace_root(&workspace.root_path)?;
-            let mcp_servers = self.acp_mcp_servers().await?.servers;
-            let result = question_answer_backend::answer_question(
-                question_answer_backend::QuestionAnswerBackendRequest {
-                    data_dir: &data_dir,
-                    workspace_root: &workspace_root,
-                    raw_text: &request.query.raw_text,
-                    conversation: &request.conversation,
-                    conversation_state: request.conversation_state.as_ref(),
-                    prompts_settings: &settings.prompts,
-                    rag_settings: &settings.rag,
-                    llm_settings: &settings.llm,
-                    mcp_servers: &mcp_servers,
-                    progress_event_tx,
-                },
-            )
-            .await;
-            match &result {
-                Ok(output) => {
-                    self.notification
-                        .notify_question_answer_success(output.primary_text.clone())
-                        .await;
-                }
-                Err(error) => {
-                    self.notification
-                        .notify_question_answer_failure(Some(error.to_string()))
-                        .await;
-                }
+        match request.action_id.as_str() {
+            "open_target" | "open_url" => {
+                let workspace_root = self
+                    .workspace()
+                    .await
+                    .ok()
+                    .and_then(|workspace| normalize_workspace_root(&workspace.root_path).ok());
+                self.open_target
+                    .open_action(&request.query.raw_text, workspace_root.as_deref())
             }
-            return result;
+            "translate_text" => {
+                let settings = self.app_settings().await?;
+                tokio::task::spawn_blocking(move || {
+                    translate::execute_translation(
+                        &request.query.raw_text,
+                        &settings.prompts,
+                        &settings.llm,
+                    )
+                })
+                .await
+                .context("failed to join translation task")?
+            }
+            "rag_answer" => {
+                let settings = self.app_settings().await?;
+                let data_dir = ConfigStore::data_dir()?;
+                let workspace = self.workspace().await?;
+                let workspace_root = normalize_workspace_root(&workspace.root_path)?;
+                let mcp_servers = self.acp_mcp_servers().await?.servers;
+                let result = question_answer_backend::answer_question(
+                    question_answer_backend::QuestionAnswerBackendRequest {
+                        data_dir: &data_dir,
+                        workspace_root: &workspace_root,
+                        raw_text: &request.query.raw_text,
+                        conversation: &request.conversation,
+                        conversation_state: request.conversation_state.as_ref(),
+                        prompts_settings: &settings.prompts,
+                        rag_settings: &settings.rag,
+                        llm_settings: &settings.llm,
+                        mcp_servers: &mcp_servers,
+                        progress_event_tx,
+                    },
+                )
+                .await;
+                match &result {
+                    Ok(output) => {
+                        self.notification
+                            .notify_question_answer_success(output.primary_text.clone())
+                            .await;
+                    }
+                    Err(error) => {
+                        self.notification
+                            .notify_question_answer_failure(Some(error.to_string()))
+                            .await;
+                    }
+                }
+                result
+            }
+            _ => self.executor.execute(&request),
         }
-
-        self.executor.execute(&request)
     }
 
     pub fn file_search(&self) -> &FileSearchService {
@@ -192,6 +205,10 @@ impl AppState {
 
     pub fn application(&self) -> &ApplicationService {
         &self.application
+    }
+
+    pub fn open_document_path(&self, path: &Path) -> Result<()> {
+        self.open_target.open_path(path)
     }
 
     pub fn acp(&self) -> &AcpService {

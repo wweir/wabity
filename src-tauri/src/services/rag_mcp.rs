@@ -363,14 +363,18 @@ async fn handle_post(
                                                 "sourceRoot": { "type": "string" },
                                                 "absolutePath": { "type": "string" },
                                                 "path": { "type": "string" },
+                                                "documentKind": { "type": "string" },
                                                 "chunkIndex": { "type": "integer" },
-                                                "lineStart": { "type": "integer" },
-                                                "lineEnd": { "type": "integer" },
-                                                "paragraphLineStart": { "type": "integer" },
+                                                "lineStart": { "type": ["integer", "null"] },
+                                                "lineEnd": { "type": ["integer", "null"] },
+                                                "paragraphLineStart": { "type": ["integer", "null"] },
+                                                "pageStart": { "type": ["integer", "null"] },
+                                                "pageEnd": { "type": ["integer", "null"] },
                                                 "headingPath": {
                                                     "type": "array",
                                                     "items": { "type": "string" }
                                                 },
+                                                "anchorLabel": { "type": ["string", "null"] },
                                                 "text": { "type": "string" },
                                                 "distance": { "type": "number" },
                                                 "score": { "type": "number" }
@@ -379,11 +383,15 @@ async fn handle_post(
                                                 "sourceRoot",
                                                 "absolutePath",
                                                 "path",
+                                                "documentKind",
                                                 "chunkIndex",
                                                 "lineStart",
                                                 "lineEnd",
                                                 "paragraphLineStart",
+                                                "pageStart",
+                                                "pageEnd",
                                                 "headingPath",
+                                                "anchorLabel",
                                                 "text",
                                                 "distance",
                                                 "score"
@@ -792,15 +800,28 @@ fn build_search_summary_text(result: &RagSearchResult) -> String {
     }
 
     for (index, hit) in result.hits.iter().enumerate() {
+        let location = if let (Some(page_start), Some(page_end)) = (hit.page_start, hit.page_end) {
+            if page_start == page_end {
+                format!("page {page_start}")
+            } else {
+                format!("pages {page_start}-{page_end}")
+            }
+        } else if let (Some(line_start), Some(line_end)) = (hit.line_start, hit.line_end) {
+            let paragraph = hit
+                .paragraph_line_start
+                .map(|line| format!(", paragraph {line}"))
+                .unwrap_or_default();
+            format!("lines {line_start}-{line_end}{paragraph}")
+        } else {
+            format!("chunk {}", hit.chunk_index)
+        };
         let _ = writeln!(
             text,
-            "\n[{}] {} (chunk {}, lines {}-{}, paragraph {}, score {:.4}, distance {:.4})\n{}",
+            "\n[{}] {} (chunk {}, {}, score {:.4}, distance {:.4})\n{}",
             index + 1,
             hit.path,
             hit.chunk_index,
-            hit.line_start,
-            hit.line_end,
-            hit.paragraph_line_start,
+            location,
             hit.score,
             hit.distance,
             hit.text
@@ -885,8 +906,32 @@ mod tests {
         build_search_summary_text, build_tool_pending_result, parse_rag_search_tool_input,
         select_initialize_protocol, RagSearchResult, RAG_MCP_TOOL_NAME,
     };
+    use crate::services::document_extract::DocumentKind;
     use crate::services::rag_query::RagSearchHit;
     use serde_json::json;
+
+    fn test_search_hit() -> RagSearchHit {
+        RagSearchHit {
+            source_root: "/docs".to_string(),
+            absolute_path: "/docs/ARCHITECTURE.md".to_string(),
+            path: "~/docs/ARCHITECTURE.md".to_string(),
+            document_kind: DocumentKind::Markdown,
+            chunk_index: 2,
+            line_start: Some(10),
+            line_end: Some(18),
+            paragraph_line_start: Some(9),
+            page_start: None,
+            page_end: None,
+            heading_path: vec!["Architecture".to_string()],
+            anchor_label: None,
+            text: "launcher and MCP".to_string(),
+            distance: 0.2,
+            score: 0.8,
+            vector_score: 0.8,
+            lexical_score: 0.0,
+            has_vector_signal: true,
+        }
+    }
 
     #[test]
     fn initialize_accepts_supported_versions() {
@@ -916,19 +961,7 @@ mod tests {
             query: "settings".to_string(),
             hit_count: 1,
             pending_indexing: false,
-            hits: vec![RagSearchHit {
-                source_root: "/docs".to_string(),
-                absolute_path: "/docs/ARCHITECTURE.md".to_string(),
-                path: "~/docs/ARCHITECTURE.md".to_string(),
-                chunk_index: 2,
-                line_start: 10,
-                line_end: 18,
-                paragraph_line_start: 9,
-                heading_path: vec!["Architecture".to_string()],
-                text: "launcher and MCP".to_string(),
-                distance: 0.2,
-                score: 0.8,
-            }],
+            hits: vec![test_search_hit()],
         });
 
         assert!(summary.contains("ARCHITECTURE.md"));
@@ -943,19 +976,7 @@ mod tests {
             query: "settings".to_string(),
             hit_count: 1,
             pending_indexing: true,
-            hits: vec![RagSearchHit {
-                source_root: "/docs".to_string(),
-                absolute_path: "/docs/ARCHITECTURE.md".to_string(),
-                path: "~/docs/ARCHITECTURE.md".to_string(),
-                chunk_index: 2,
-                line_start: 10,
-                line_end: 18,
-                paragraph_line_start: 9,
-                heading_path: vec!["Architecture".to_string()],
-                text: "launcher and MCP".to_string(),
-                distance: 0.2,
-                score: 0.8,
-            }],
+            hits: vec![test_search_hit()],
         });
 
         assert_eq!(payload["isError"], true);

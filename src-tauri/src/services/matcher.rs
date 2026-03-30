@@ -1,8 +1,11 @@
 use anyhow::Result;
 
-use crate::domain::{
-    actions::{ActionDescriptor, ActionMatch},
-    query::{InputMode, QueryPayload},
+use crate::{
+    domain::{
+        actions::{ActionDescriptor, ActionMatch},
+        query::{InputMode, QueryPayload},
+    },
+    services::command_prefix::extract_prefixed_payload,
 };
 
 const JSON_FORMAT_COMMAND_ALIASES: [&str; 3] = ["/format", "/fmt", "/json"];
@@ -87,7 +90,7 @@ fn score_action(
         matched = true;
     }
 
-    if normalized_query.starts_with("http") && action.id == "open_url" {
+    if normalized_query.starts_with("http") && action.id == "open_target" {
         score += 60;
         matched = true;
     }
@@ -140,15 +143,18 @@ fn builtin_actions() -> Vec<ActionDescriptor> {
 
     vec![
         ActionDescriptor {
-            id: "open_url".to_string(),
-            title: "打开链接".to_string(),
-            summary: "打开当前输入的链接".to_string(),
+            id: "open_target".to_string(),
+            title: "打开目标".to_string(),
+            summary: "打开当前输入的链接、文件或目录".to_string(),
             aliases: vec!["/open".to_string()],
             keywords: vec![
                 "url".to_string(),
                 "browser".to_string(),
                 "link".to_string(),
                 "open".to_string(),
+                "file".to_string(),
+                "folder".to_string(),
+                "path".to_string(),
             ],
             supported_input_modes: vec![Inline, Clipboard, Selection],
             category: "system".to_string(),
@@ -415,55 +421,6 @@ fn extract_rag_answer_payload(raw_text: &str) -> Option<&str> {
     extract_prefixed_payload(raw_text, &RAG_ANSWER_COMMAND_ALIASES)
 }
 
-fn extract_prefixed_payload<'a>(raw_text: &'a str, aliases: &[&str]) -> Option<&'a str> {
-    let trimmed = raw_text.trim_start();
-
-    for alias in aliases {
-        let Some(remainder) = trimmed.strip_prefix(alias) else {
-            continue;
-        };
-
-        if remainder.is_empty() {
-            return None;
-        }
-
-        let next_character = remainder.chars().next();
-        if !matches!(next_character, Some(character) if character.is_whitespace()) {
-            continue;
-        }
-
-        let payload = remainder.trim();
-        return (!payload.is_empty()).then_some(payload);
-    }
-
-    for alias in aliases {
-        let max_prefix_length = alias.len().min(trimmed.len().saturating_sub(1));
-        for prefix_length in (2..=max_prefix_length).rev() {
-            let Some(alias_prefix) = alias.get(..prefix_length) else {
-                continue;
-            };
-            let Some(candidate_prefix) = trimmed.get(..prefix_length) else {
-                continue;
-            };
-            if !candidate_prefix.eq_ignore_ascii_case(alias_prefix) {
-                continue;
-            }
-
-            let Some(remainder) = trimmed.get(prefix_length..) else {
-                continue;
-            };
-            let payload = remainder.trim();
-            if payload.is_empty() {
-                continue;
-            }
-
-            return Some(payload);
-        }
-    }
-
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::MatcherService;
@@ -483,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn url_query_prefers_open_url_action() {
+    fn url_query_prefers_open_target_action() {
         let service = MatcherService::new();
         let matches = service
             .match_actions(&query(InputMode::Inline, "https://tauri.app"))
@@ -491,7 +448,7 @@ mod tests {
 
         assert_eq!(
             matches.first().map(|item| item.descriptor.id.as_str()),
-            Some("open_url")
+            Some("open_target")
         );
     }
 

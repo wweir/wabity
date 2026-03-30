@@ -12,7 +12,10 @@ use fuzzy_matcher::{skim::SkimMatcherV2, FuzzyMatcher};
 use ignore::{WalkBuilder, WalkState};
 use tokio::task;
 
-use crate::domain::{application::InstalledAppMatch, execution::ExecutionResult};
+use crate::{
+    domain::{application::InstalledAppMatch, execution::ExecutionResult},
+    infrastructure::opener,
+};
 
 pub const APPLICATION_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 pub const APPLICATION_CACHE_STALE_AFTER: Duration = Duration::from_secs(10 * 60);
@@ -65,13 +68,7 @@ impl ApplicationService {
     pub fn launch(&self, path: &str) -> Result<ExecutionResult> {
         let target = validate_app_bundle_path(path)?;
         let app_name = localized_app_name(&target).unwrap_or_else(|| normalize_app_name(&target));
-        let status = Command::new("open")
-            .arg(&target)
-            .status()
-            .with_context(|| format!("failed to spawn `open` for {}", target.display()))?;
-        if !status.success() {
-            anyhow::bail!("`open` exited with status {status}");
-        }
+        opener::open_path(&target)?;
 
         Ok(ExecutionResult::success(
             Some(app_name),

@@ -1,11 +1,13 @@
 pub mod acp;
 pub mod application;
+pub mod command_prefix;
 pub mod document_extract;
 pub mod executor;
 pub mod file_search;
 pub mod matcher;
 pub mod notification;
 pub mod ocr;
+pub mod open_target;
 pub mod public_skills;
 pub mod question_answer_backend;
 pub mod rag;

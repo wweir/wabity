@@ -50,11 +50,11 @@ export const ragAnswerActionDescriptor = action(
 
 export const actionCatalog: ActionDescriptor[] = [
 	action(
-		"open_url",
-		"打开链接",
-		"打开当前输入的链接",
+		"open_target",
+		"打开目标",
+		"打开当前输入的链接、文件或目录",
 		["/open"],
-		["url", "browser", "link", "open"],
+		["url", "browser", "link", "open", "file", "folder", "path"],
 		["inline", "clipboard", "selection"],
 		"system",
 		120,

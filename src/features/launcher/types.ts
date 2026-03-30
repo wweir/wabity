@@ -81,11 +81,15 @@ export interface RagCitation {
 	id: number;
 	absolutePath: string;
 	path: string;
+	documentKind: "plain_text" | "markdown" | "pdf" | "docx";
 	chunkIndex: number;
-	lineStart: number;
-	lineEnd: number;
-	paragraphLineStart: number;
+	lineStart: number | null;
+	lineEnd: number | null;
+	paragraphLineStart: number | null;
+	pageStart: number | null;
+	pageEnd: number | null;
 	headingPath: string[];
+	anchorLabel: string | null;
 	score: number;
 	distance: number;
 	snippet: string;
@@ -138,12 +142,19 @@ function isRagCitation(value: unknown): value is RagCitation {
 		typeof candidate.id === "number" &&
 		typeof candidate.absolutePath === "string" &&
 		typeof candidate.path === "string" &&
+		(candidate.documentKind === "plain_text" ||
+			candidate.documentKind === "markdown" ||
+			candidate.documentKind === "pdf" ||
+			candidate.documentKind === "docx") &&
 		typeof candidate.chunkIndex === "number" &&
-		typeof candidate.lineStart === "number" &&
-		typeof candidate.lineEnd === "number" &&
-		typeof candidate.paragraphLineStart === "number" &&
+		(candidate.lineStart === null || typeof candidate.lineStart === "number") &&
+		(candidate.lineEnd === null || typeof candidate.lineEnd === "number") &&
+		(candidate.paragraphLineStart === null || typeof candidate.paragraphLineStart === "number") &&
+		(candidate.pageStart === null || typeof candidate.pageStart === "number") &&
+		(candidate.pageEnd === null || typeof candidate.pageEnd === "number") &&
 		Array.isArray(candidate.headingPath) &&
 		candidate.headingPath.every((item) => typeof item === "string") &&
+		(candidate.anchorLabel === null || typeof candidate.anchorLabel === "string") &&
 		typeof candidate.score === "number" &&
 		typeof candidate.distance === "number" &&
 		typeof candidate.snippet === "string"

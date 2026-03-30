@@ -381,3 +381,38 @@ async fn rag_retrieval_filters_noise_for_strong_chinese_entity_query() {
     assert!(result.hits[0].absolute_path.ends_with("/国富论.md"));
     assert!(result.hits[0].text.contains("亚当·斯密"));
 }
+
+#[tokio::test]
+async fn rag_retrieval_recovers_exact_path_match_when_embeddings_are_flat_noise() {
+    let docs = [
+        (
+            "billing-timeout-playbook.md",
+            "Recovery checklist and escalation notes for incident response.",
+        ),
+        (
+            "operations-runbook.md",
+            "Recovery checklist and escalation notes for incident response.",
+        ),
+        (
+            "platform-summary.md",
+            "General platform summary without the requested document name.",
+        ),
+    ];
+    let (result, _requests, server_handle) = build_index_and_search(
+        EmbeddingScenario::UniformNoise,
+        &docs,
+        "billing timeout playbook",
+        3,
+    )
+    .await;
+
+    server_handle.abort();
+
+    assert!(!result.hits.is_empty());
+    assert!(
+        result.hits[0]
+            .absolute_path
+            .ends_with("/billing-timeout-playbook.md"),
+        "混合召回应能在向量信号失效时通过 BM25 路径匹配找回精确文档"
+    );
+}
