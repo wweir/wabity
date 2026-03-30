@@ -1,9 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import type {
-	KeyboardEvent as ReactKeyboardEvent,
-	MouseEvent as ReactMouseEvent,
-	ReactNode,
-} from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -27,12 +23,9 @@ import {
 	defaultRagIgnoreGlobs,
 } from "../../lib/tauri/client";
 import type {
-	AcpAgentConfig,
-	AcpMcpServerConfig,
 	AppSettings,
 	AppearanceSettings,
 	BuiltinLlmProviderTemplate,
-	BuiltinLlmProviderTemplateModel,
 	BuiltinRagMcpServerStatus,
 	GeneralSettings,
 	LlmProviderConfig,
@@ -45,11 +38,121 @@ import type {
 	RagScanResult,
 	RagSettings,
 	ShortcutConfig,
-	SkillTreeNode,
 	WorkspaceState,
 } from "../../lib/tauri/types";
 import { useSettingsWindowFrame } from "./useSettingsWindowFrame";
-import { applyAppearanceSettings } from "../../app/appearance";
+import { applyAppearanceSettings, defaultAppearanceSettings } from "../../app/appearance";
+import {
+	AboutSettingsSection,
+	AcpSettingsSection,
+	GeneralSettingsSection,
+	LlmSettingsSection,
+	McpSettingsSection,
+	PromptsSettingsSection,
+	RagSettingsSection,
+	SkillsSettingsSection,
+} from "./SettingsSectionViews";
+import {
+	SettingsQuickJumpList,
+	acpAgentOptions,
+	getMcpTransportMeta,
+	getSettingsPanelId,
+	getSettingsTabId,
+	settingsQuickLinks,
+	settingsSections,
+} from "./settingsShared";
+import {
+	AcpAgentDraft,
+	AcpFieldKey,
+	AcpInlineNotice,
+	AcpMcpServerDraft,
+	LlmFieldKey,
+	LlmModelFieldKey,
+	LlmProviderKind,
+	McpFieldKey,
+	McpPanelMode,
+	McpTransport,
+	PendingMcpFocusTarget,
+	RagFieldKey,
+	SavedAcpDraftState,
+	SavedLlmDraftState,
+	SavedMcpDraftState,
+	SavedRagDraftState,
+	SettingsSectionId,
+	defaultPromptsSettings,
+} from "./settingsTypes";
+import {
+	applyLlmProviderKind,
+	applyBuiltinTemplateModelToProvider,
+	applyBuiltinTemplateToProvider,
+	buildAcpDraftSnapshot,
+	buildAgentCommand,
+	buildLlmDraftSnapshot,
+	buildMcpDraftSnapshot,
+	buildPromptsDraftSnapshot,
+	buildQuestionAnswerTaskDraftSnapshot,
+	buildRagDraftSnapshot,
+	buildSavedAcpDraftState,
+	buildSavedLlmDraftState,
+	buildSavedMcpDraftState,
+	buildSavedRagDraftState,
+	buildTranslationTaskDraftSnapshot,
+	cloneLlmProviderDraft,
+	cloneSavedAcpDraftState,
+	cloneSavedMcpDraftState,
+	createAgentDraft,
+	createDefaultAppSettings,
+	createDefaultGeneralSettings,
+	createDefaultLlmSettings,
+	createDefaultNotificationSettings,
+	createDefaultOcrSettings,
+	createDefaultRagSettings,
+	createDefaultShortcutSettings,
+	createDefaultWorkspaceState,
+	createLlmProviderDraft,
+	createMcpServerDraft,
+	createMcpServerDraftFromConfig,
+	deriveProgramFromCommand,
+	detachBuiltinTemplateFromProvider,
+	extraRagIgnoreGlobPlaceholder,
+	findBuiltinTemplate,
+	findBuiltinTemplateModel,
+	findFirstAcpIssue,
+	findFirstLlmIssue,
+	findFirstMcpIssue,
+	formatTextLines,
+	getErrorMessage,
+	getFirstSelectableBuiltinTemplateModel,
+	getLlmProviderKind,
+	getLlmProviderKindLabel,
+	getLlmProviderModelPlaceholder,
+	getLlmProviderUsageBadges,
+	getLlmProviderUsageDescription,
+	getSelectableBuiltinTemplateModels,
+	normalizeRagIgnoreGlobs,
+	normalizeRecordedShortcutKey,
+	parseTextLines,
+	ragSupportedFileExtensions,
+	providerCanHandleAiTask,
+	providerCanHandleOcr,
+	providerCanHandleRagEmbedding,
+	providerHasResponsesModel,
+	providerIsLlmModel,
+	providerUsesBuiltinTemplate,
+	resolveDocumentsDirectoryPath,
+	reconcileLlmSettings,
+	reconcileOcrSettings,
+	reconcileRagSettings,
+	resolveRagDirectoryPickerDefaultPath,
+	selectExistingIdOrFirst,
+	serializeMcpServerDraft,
+	splitExtraRagIgnoreGlobs,
+	summarizeLlmProviderProfile,
+	validateAcpAgents,
+	validateLlmSettings,
+	validateMcpServers,
+	validateRagSettings,
+} from "./settingsState";
 import "./settings.css";
 
 interface SettingsPageProps {
@@ -57,1817 +160,26 @@ interface SettingsPageProps {
 	onAppearanceChange?: (appearance: AppearanceSettings) => void;
 }
 
-type SettingsSectionId = "general" | "prompts" | "llm" | "rag" | "acp" | "mcp" | "skills" | "about";
-type McpPanelMode = "edit" | "create";
-
-interface SettingsQuickLink {
-	id: string;
-	label: string;
-	hint: string;
-}
-
-interface SettingsQuickJumpListProps {
-	activeBlockId: string | null;
-	compact?: boolean;
-	links: readonly SettingsQuickLink[];
-	onSelect: (blockId: string) => void;
-}
-
-const acpAgentOptions = [
-	{
-		id: "opencode",
-		label: "OpenCode",
-		command: "opencode acp",
-		summary:
-			"OpenCode 是开源 AI coding agent，支持终端、桌面端和 IDE；这里预填的是它的 ACP 启动命令。",
-		installCommand: "curl -fsSL https://opencode.ai/install | bash",
-		installHint:
-			"也可以用 `brew install opencode` 或 `npm install -g opencode-ai`；安装后确认 `opencode acp` 可以直接执行。",
-		links: [
-			{ label: "官网", url: "https://opencode.ai" },
-			{ label: "安装文档", url: "https://opencode.ai/docs" },
-			{ label: "GitHub", url: "https://github.com/sst/opencode" },
-		],
-	},
-	{
-		id: "claude-agent",
-		label: "Claude Agent",
-		command: "claude-agent-acp",
-		summary:
-			"Claude Agent ACP 是 Zed 维护的 ACP 适配器，用来把 Claude Agent SDK 暴露给 ACP 客户端。",
-		installCommand: "npm install -g @zed-industries/claude-agent-acp",
-		installHint:
-			"也可以从 GitHub Releases 下载单文件可执行程序；安装后确认 `claude-agent-acp` 可以直接执行。",
-		links: [
-			{
-				label: "README",
-				url: "https://github.com/zed-industries/claude-agent-acp#readme",
-			},
-			{
-				label: "Releases",
-				url: "https://github.com/zed-industries/claude-agent-acp/releases",
-			},
-			{
-				label: "npm",
-				url: "https://www.npmjs.com/package/@zed-industries/claude-agent-acp",
-			},
-		],
-	},
-	{
-		id: "codex",
-		label: "Codex",
-		command: "codex-acp",
-		summary:
-			"Codex ACP 是 Zed 维护的 ACP 适配器，负责把 Codex CLI 暴露成可被 ACP 客户端调用的 Agent。",
-		installCommand: "npm install -g @zed-industries/codex-acp",
-		installHint:
-			"官方 README 主推 GitHub Releases 或 `npx @zed-industries/codex-acp`；这里给出常驻安装命令，目标是装完后能直接执行 `codex-acp`。",
-		links: [
-			{
-				label: "README",
-				url: "https://github.com/zed-industries/codex-acp#readme",
-			},
-			{
-				label: "Releases",
-				url: "https://github.com/zed-industries/codex-acp/releases",
-			},
-			{
-				label: "npm",
-				url: "https://www.npmjs.com/package/@zed-industries/codex-acp",
-			},
-		],
-	},
-] as const;
-
-const fixedRagIgnoreGlobSet = new Set<string>(defaultRagIgnoreGlobs);
-const extraRagIgnoreGlobPlaceholder = "可选：每行一个额外 glob，例如 **/storybook-static/**";
-const shortcutModifierCodes = new Set([
-	"MetaLeft",
-	"MetaRight",
-	"ControlLeft",
-	"ControlRight",
-	"AltLeft",
-	"AltRight",
-	"ShiftLeft",
-	"ShiftRight",
-]);
-
-const shortcutCodeKeyMap: Record<string, string> = {
-	Space: "Space",
-	Enter: "Enter",
-	NumpadEnter: "Enter",
-	Escape: "Escape",
-	Tab: "Tab",
-	Backspace: "Backspace",
-	Delete: "Delete",
-	ArrowUp: "ArrowUp",
-	ArrowDown: "ArrowDown",
-	ArrowLeft: "ArrowLeft",
-	ArrowRight: "ArrowRight",
-	Home: "Home",
-	End: "End",
-	PageUp: "PageUp",
-	PageDown: "PageDown",
-	Backquote: "Backquote",
-	Minus: "Minus",
-	Equal: "Equal",
-	BracketLeft: "BracketLeft",
-	BracketRight: "BracketRight",
-	Backslash: "Backslash",
-	Semicolon: "Semicolon",
-	Quote: "Quote",
-	Comma: "Comma",
-	Period: "Period",
-	Slash: "Slash",
-};
-
-function normalizeRecordedShortcutKey(code: string, key: string) {
-	if (shortcutModifierCodes.has(code)) {
-		return null;
-	}
-
-	if (/^Key[A-Z]$/.test(code)) {
-		return code.slice(3);
-	}
-
-	if (/^Digit[0-9]$/.test(code)) {
-		return code.slice(5);
-	}
-
-	if (/^F([1-9]|1[0-2])$/.test(code)) {
-		return code;
-	}
-
-	if (code in shortcutCodeKeyMap) {
-		return shortcutCodeKeyMap[code];
-	}
-
-	// Prefer physical key codes so Alt/Option combinations still record the base key on macOS.
-	if (key === " ") {
-		return "Space";
-	}
-
-	if (key.length === 1) {
-		return key.toUpperCase();
-	}
-
-	if (key.length > 1) {
-		return key.charAt(0).toUpperCase() + key.slice(1);
-	}
-
-	return null;
-}
-
-function normalizeRagIgnoreGlobs(ignoreGlobs: string[]) {
-	const seen = new Set<string>();
-	const extras = ignoreGlobs.filter((pattern) => {
-		if (fixedRagIgnoreGlobSet.has(pattern) || seen.has(pattern)) {
-			return false;
-		}
-		seen.add(pattern);
-		return true;
-	});
-	return [...defaultRagIgnoreGlobs, ...extras];
-}
-
-function splitExtraRagIgnoreGlobs(ignoreGlobs: string[]) {
-	return ignoreGlobs.filter((pattern) => !fixedRagIgnoreGlobSet.has(pattern));
-}
-
-function formatAcpAgentOptionLabel(
-	option: (typeof acpAgentOptions)[number],
-	alreadyAdded: boolean,
-): string {
-	return `${option.label} · ${option.command}${alreadyAdded ? " · 已配置" : ""}`;
-}
-
-function renderPresetInstallGuide(
-	selectedPresetInstallOption: (typeof acpAgentOptions)[number] | null,
-	selectedPresetOptionId: string,
-) {
-	if (selectedPresetInstallOption) {
-		return (
-			<>
-				<span className="settings-acp-preset-kicker">安装指引</span>
-				<span className="settings-agent-meta">安装 {selectedPresetInstallOption.label}</span>
-				<p className="settings-install-guide-summary">
-					{selectedPresetInstallOption.summary} 相关入口：
-					{selectedPresetInstallOption.links.map((link, index) => (
-						<span key={link.url}>
-							{index === 0
-								? " "
-								: index === selectedPresetInstallOption.links.length - 1
-									? " 和 "
-									: "、"}
-							<button
-								className="settings-text-link"
-								onClick={() => void openUrl(link.url)}
-								type="button"
-							>
-								{link.label}
-							</button>
-						</span>
-					))}
-					。
-				</p>
-				<code className="settings-install-guide-command">
-					{selectedPresetInstallOption.installCommand}
-				</code>
-				<span className="settings-help-text settings-help-text-tight">
-					{selectedPresetInstallOption.installHint}
-				</span>
-			</>
-		);
-	}
-
-	if (selectedPresetOptionId === "__custom__") {
-		return (
-			<>
-				<span className="settings-acp-preset-kicker">安装指引</span>
-				<span className="settings-agent-meta">自定义 Agent</span>
-				<span className="settings-help-text settings-help-text-tight">
-					自定义 Agent 不提供预设安装提示。
-				</span>
-			</>
-		);
-	}
-
-	return (
-		<>
-			<span className="settings-acp-preset-kicker">安装指引</span>
-			<span className="settings-help-text settings-help-text-tight">
-				选择 Agent 后显示对应介绍、安装命令和官方链接。
-			</span>
-		</>
-	);
-}
-
-function renderMcpTransportGuide(selectedTransport: McpTransport) {
-	const transportMeta = getMcpTransportMeta(selectedTransport);
-
-	return (
-		<>
-			<span className="settings-acp-preset-kicker">连接说明</span>
-			<p className="settings-install-guide-summary">{transportMeta.summary}</p>
-			<span className="settings-help-text settings-help-text-tight">
-				{transportMeta.fieldsHint}
-			</span>
-			<code className="settings-install-guide-command">{transportMeta.example}</code>
-		</>
-	);
-}
-
-function renderSkillTreeNode(node: SkillTreeNode) {
-	if (node.kind === "file") {
-		return (
-			<div className="settings-skill-tree-file" key={node.relativePath || node.name}>
-				<span className="settings-skill-tree-bullet" aria-hidden="true">
-					•
-				</span>
-				<span>{node.name}</span>
-			</div>
-		);
-	}
-
-	return (
-		<details className="settings-skill-tree-directory" key={node.relativePath || node.name} open>
-			<summary className="settings-skill-tree-summary">
-				<span className="settings-skill-tree-caret" aria-hidden="true">
-					▾
-				</span>
-				<span>{node.name}</span>
-			</summary>
-			<div className="settings-skill-tree-children">
-				{node.children.length > 0 ? (
-					node.children.map((child) => renderSkillTreeNode(child))
-				) : (
-					<span className="settings-help-text settings-help-text-tight">空目录</span>
-				)}
-			</div>
-		</details>
-	);
-}
-
-function getErrorMessage(error: unknown, fallbackMessage: string) {
-	return error instanceof Error ? error.message : fallbackMessage;
-}
-
-const validMcpRemoteUrlProtocols = new Set(["http:", "https:"]);
-
-interface AcpAgentDraft {
-	id: string;
-	name: string;
-	command: string;
-}
-
-type McpTransport = AcpMcpServerConfig["transport"];
-type AcpFieldKey = "name" | "command";
-type McpFieldKey = "name" | "command" | "url" | "envText" | "headersText";
-type LlmFieldKey = "name" | "baseUrl" | "model";
-type LlmModelFieldKey = "model";
-type RagFieldKey = "embeddingProviderId" | "sourceDirectories" | "ignoreGlobs";
-type LlmProviderKind =
-	| "llm_responses_stateless"
-	| "llm_responses_stateful"
-	| "llm_chat_completions"
-	| "embedding";
-
-type FieldIssueMap<FieldKey extends string> = Partial<Record<FieldKey, string>>;
-
-interface AcpMcpServerDraft {
-	id: string;
-	transport: McpTransport;
-	name: string;
-	command: string;
-	url: string;
-	argsText: string;
-	envText: string;
-	headersText: string;
-}
-
-interface AcpDraftValidation {
-	totalIssues: number;
-	agentIssues: Record<string, string[]>;
-	agentFieldIssues: Record<string, FieldIssueMap<AcpFieldKey>>;
-}
-
-interface SavedAcpDraftState {
-	agents: AcpAgentDraft[];
-	defaultAgentId: string | null;
-}
-
-interface SavedMcpDraftState {
-	servers: AcpMcpServerDraft[];
-}
-
-interface LlmDraftValidation {
-	totalIssues: number;
-	providerIssues: Record<string, string[]>;
-	providerFieldIssues: Record<string, FieldIssueMap<LlmFieldKey>>;
-}
-
-interface SavedLlmDraftState {
-	providers: LlmProviderConfig[];
-}
-
-interface RagDraftValidation {
-	totalIssues: number;
-	issues: string[];
-	fieldIssues: FieldIssueMap<RagFieldKey>;
-}
-
-interface SavedRagDraftState {
-	sourceDirectories: string[];
-	ignoreGlobs: string[];
-	embeddingProviderId: string | null;
-}
-
-const defaultPromptsSettings: PromptsSettings = {
-	translationPrompt: [
-		"You are an expert translation engine specialized in English ↔ Simplified Chinese.",
-		"",
-		"Translate the following text accurately, naturally, and fluently.",
-		"",
-		"Rules:",
-		"- If the user specifies a target language, follow it exactly.",
-		"- If no target language is specified:",
-		"  - Primarily Simplified Chinese → English",
-		"  - Primarily English → Simplified Chinese",
-		"  - Other languages → Simplified Chinese",
-		"- Preserve original meaning, tone, style, and all formatting (Markdown, code blocks, URLs, proper nouns, etc.).",
-		"- Return ONLY the translation. No explanations, notes, or extra text.",
-	].join("\n"),
-	ragAnswerSystemPrompt: [
-		"You are a precise tool-augmented assistant. Answer questions using only the tools available.",
-		"",
-		"Core Rules:",
-		"- Always ground your answers in tool results. Never assert repository-specific, document-specific, or system-specific facts without first using RAG/search/file-reading/MCP tools to gather evidence.",
-		"- Use tools in multiple rounds if needed: start broad, then drill down to exact files and line ranges until evidence is sufficient.",
-		"- For exact file content, always call the file reading tool with the precise path and line window. Do not guess.",
-		"- For broader context, use RAG or MCP tools instead of assuming.",
-		"- In your final answer, cite concrete file paths and line numbers when tool results provide them.",
-		"- Clearly distinguish facts from inferences. Label any inference explicitly.",
-		"- You may add concise general background knowledge when helpful, but never fabricate file paths, APIs, behaviors, code, or configuration values.",
-		"- If tool results are conflicting, incomplete, or insufficient, state it clearly and explain what is missing.",
-		"",
-		"Return Markdown only.",
-	].join("\n"),
-};
-
-interface McpDraftValidation {
-	totalIssues: number;
-	serverIssues: Record<string, string[]>;
-	serverFieldIssues: Record<string, FieldIssueMap<McpFieldKey>>;
-}
-
-interface AcpInlineNotice {
-	tone: "info" | "warn";
-	text: string;
-}
-
-interface PendingMcpFocusTarget {
-	serverId: string;
-	fieldKey: McpFieldKey;
-	scrollToForm: boolean;
-}
-
-interface AcpIssueFocusTarget {
-	agentId: string;
-	fieldKey: AcpFieldKey;
-}
-
-interface McpIssueFocusTarget {
-	serverId: string;
-	serverFieldKey: McpFieldKey;
-}
-
-interface LlmIssueFocusTarget {
-	providerId: string;
-	fieldKey: LlmFieldKey;
-}
-
-const settingsSections: ReadonlyArray<{
-	id: SettingsSectionId;
-	label: string;
-}> = [
-	{ id: "general", label: "通用" },
-	{ id: "prompts", label: "AI 功能" },
-	{ id: "llm", label: "LLM" },
-	{ id: "rag", label: "RAG" },
-	{ id: "acp", label: "ACP Agent" },
-	{ id: "mcp", label: "MCP" },
-	{ id: "skills", label: "Skill" },
-	{ id: "about", label: "关于" },
-] as const;
-
-const settingsQuickLinks: Readonly<Record<SettingsSectionId, readonly SettingsQuickLink[]>> = {
-	general: [
-		{ id: "general-shortcuts", label: "快捷键", hint: "启动、截图、翻译" },
-		{ id: "general-notifications", label: "通知", hint: "后台完成提醒" },
-		{ id: "general-appearance", label: "外观", hint: "主题与字号" },
-		{ id: "general-ocr", label: "OCR", hint: "截图识别" },
-	],
-	prompts: [
-		{ id: "prompts-translation", label: "翻译配置", hint: "模型与提示词" },
-		{ id: "prompts-rag-answer", label: "文档问答配置", hint: "模型与提示词" },
-	],
-	llm: [
-		{ id: "llm-catalog", label: "模型列表", hint: "已配置条目" },
-		{ id: "llm-editor", label: "当前编辑", hint: "连接信息与能力" },
-	],
-	rag: [
-		{ id: "rag-summary", label: "当前配置", hint: "摘要与约束" },
-		{ id: "rag-pipeline", label: "索引流程", hint: "Embedding 与目录" },
-		{ id: "rag-scan-result", label: "扫描结果", hint: "最近一次重建" },
-	],
-	acp: [
-		{ id: "acp-catalog", label: "已配置", hint: "Agent 列表" },
-		{ id: "acp-presets", label: "快速填充", hint: "预设与安装提示" },
-		{ id: "acp-form", label: "当前表单", hint: "名称与命令" },
-	],
-	mcp: [],
-	skills: [],
-	about: [{ id: "about-overview", label: "关于 Wabity", hint: "版本与定位" }],
-} as const;
-
-function getSettingsTabId(sectionId: SettingsSectionId) {
-	return `settings-tab-${sectionId}`;
-}
-
-function getSettingsPanelId(sectionId: SettingsSectionId) {
-	return `settings-panel-${sectionId}`;
-}
-
-function joinDescribedByIds(...ids: Array<string | null | undefined | false>) {
-	const joinedIds = ids.filter((id): id is string => Boolean(id)).join(" ");
-	return joinedIds || undefined;
-}
-
-function buildFieldIssueId(sectionId: string, fieldKey: string, itemId?: string) {
-	return itemId
-		? `settings-${sectionId}-${itemId}-${fieldKey}-error`
-		: `settings-${sectionId}-${fieldKey}-error`;
-}
-
-const DISCARD_DRAFT_BUTTON_LABEL = "恢复已保存版本";
-
-function SettingsDraftActionCard({
-	title,
-	description,
-	actions,
-}: {
-	title: string;
-	description: string;
-	actions?: ReactNode;
-}) {
-	return (
-		<div className="settings-editor-card settings-editor-card-subtle settings-draft-action-card">
-			<div className="settings-editor-card-header">
-				<div className="settings-draft-action-copy">
-					<span className="settings-section-kicker">草稿状态</span>
-					<strong className="settings-draft-action-title">{title}</strong>
-					<span className="settings-help-text settings-help-text-tight">{description}</span>
-				</div>
-				{actions ? <div className="settings-draft-action-actions">{actions}</div> : null}
-			</div>
-		</div>
-	);
-}
-
-function SettingsQuickJumpList({
-	activeBlockId,
-	compact = false,
-	links,
-	onSelect,
-}: SettingsQuickJumpListProps) {
-	return (
-		<div className={`settings-jump-list ${compact ? "settings-jump-list-compact" : ""}`}>
-			{links.map((link) => {
-				const isActive = activeBlockId === link.id;
-				return (
-					<button
-						aria-current={isActive ? "location" : undefined}
-						className={`settings-jump-button ${compact ? "settings-jump-button-compact" : ""} ${isActive ? "settings-jump-button-active" : ""}`}
-						key={link.id}
-						onClick={() => onSelect(link.id)}
-						type="button"
-					>
-						<span className="settings-jump-button-label">{link.label}</span>
-						{compact ? null : <span className="settings-jump-button-meta">{link.hint}</span>}
-					</button>
-				);
-			})}
-		</div>
-	);
-}
-
-function ShortcutRecorderField({
-	instructionsId,
-	isRecording,
-	isSaving,
-	label,
-	onActivate,
-	shortcutValue,
-	statusId,
-	triggerId,
-}: {
-	instructionsId: string;
-	isRecording: boolean;
-	isSaving: boolean;
-	label: string;
-	onActivate: () => void;
-	shortcutValue: string;
-	statusId: string;
-	triggerId: string;
-}) {
-	const statusText = isRecording
-		? "正在录制，直接按下目标快捷键，按 Escape 取消。"
-		: isSaving
-			? "正在保存快捷键。"
-			: "";
-	const actionLabel = isRecording
-		? "正在录制"
-		: isSaving
-			? "保存中"
-			: shortcutValue.trim()
-				? "重新录制"
-				: "开始录制";
-	const describedBy = [instructionsId, statusId].join(" ");
-
-	return (
-		<div className="settings-item settings-shortcut-item">
-			<div className="settings-shortcut-field">
-				<div className="settings-shortcut-copy">
-					<span className="settings-shortcut-label">{label}</span>
-					<span
-						aria-live="polite"
-						className={`settings-help-text settings-help-text-tight ${statusText ? "" : "sr-only"}`}
-						id={statusId}
-						role="status"
-					>
-						{statusText}
-					</span>
-				</div>
-				<button
-					aria-describedby={describedBy}
-					aria-pressed={isRecording}
-					className={`settings-input settings-shortcut-trigger ${isRecording ? "recording" : ""}`}
-					disabled={isSaving}
-					id={triggerId}
-					onClick={onActivate}
-					type="button"
-				>
-					<span className="settings-shortcut-trigger-value">
-						{shortcutValue.trim() || "未设置"}
-					</span>
-					<span className="settings-shortcut-trigger-action">{actionLabel}</span>
-				</button>
-			</div>
-		</div>
-	);
-}
-
-const ragSupportedFileExtensions = ["md", "mdx", "txt", "markdown", "rst", "adoc"] as const;
-const emptyWorkspaceState: WorkspaceState = {
-	rootPath: "",
-	recentRoots: [],
-	homePath: null,
-	displayHomeAsTilde: false,
-};
-
-const mcpTransportOptions: ReadonlyArray<{
-	transport: McpTransport;
-	label: string;
-	description: string;
-	summary: string;
-	fieldsHint: string;
-	example: string;
-}> = [
-	{
-		transport: "stdio",
-		label: "本地进程",
-		description: "通过命令启动 MCP server",
-		summary:
-			"适合本机已有命令行 MCP server 的场景，Wabity 会把命令、参数和环境变量作为全局 MCP 条目保存。",
-		fieldsHint: "需要填写命令；可选填写参数和环境变量。",
-		example: "npx -y @modelcontextprotocol/server-filesystem ~/Desktop",
-	},
-	{
-		transport: "http",
-		label: "HTTP",
-		description: "通过 URL 连接远程 MCP server",
-		summary: "适合已经部署好的远程 MCP 服务，保存后会把 URL 和请求头随会话一起交给当前 Agent。",
-		fieldsHint: "需要填写 URL；可选填写请求头。",
-		example: "https://example.com/mcp",
-	},
-	{
-		transport: "sse",
-		label: "SSE",
-		description: "通过 SSE 流连接远程 MCP server",
-		summary: "适合使用服务端事件流暴露能力的远程 MCP 服务，字段和 HTTP 类似，但连接语义是 SSE。",
-		fieldsHint: "需要填写 URL；可选填写请求头。",
-		example: "https://example.com/sse",
-	},
-];
-
-function formatDirectCommand(program: string, args: string[]) {
-	return [program, ...args]
-		.filter((value) => value.trim().length > 0)
-		.map((value) => (/[\s"]/u.test(value) ? JSON.stringify(value) : value))
-		.join(" ");
-}
-
-function deriveProgramFromCommand(command: string) {
-	const normalized = command.trim();
-	if (!normalized) {
-		return "";
-	}
-
-	const [program] = normalized.split(/\s+/, 1);
-	return program ?? "";
-}
-
-function buildAgentCommand(agent: Pick<AcpAgentConfig, "program" | "args" | "shellCommand">) {
-	return agent.shellCommand?.trim() || formatDirectCommand(agent.program, agent.args);
-}
-
-function nextDraftId() {
-	return `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function nextServerDraftId() {
-	return `mcp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function nextLlmDraftId() {
-	return `llm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function parseTextLines(value: string) {
-	return value
-		.split("\n")
-		.map((line) => line.trim())
-		.filter((line) => line.length > 0);
-}
-
-function detectPathSeparator(paths: Array<string | null | undefined>) {
-	return paths.some((path) => path?.includes("\\")) ? "\\" : "/";
-}
-
-function trimTrailingPathSeparators(path: string) {
-	return path.replace(/[\\/]+$/u, "");
-}
-
-function joinPathForDisplay(basePath: string, childPath: string) {
-	const trimmedBasePath = trimTrailingPathSeparators(basePath.trim());
-	if (!trimmedBasePath) {
-		return childPath;
-	}
-
-	const separator = detectPathSeparator([trimmedBasePath]);
-	return `${trimmedBasePath}${separator}${childPath
-		.split(/[\\/]+/u)
-		.filter((segment) => segment.length > 0)
-		.join(separator)}`;
-}
-
-function resolveDocumentsDirectoryPath(workspace: WorkspaceState) {
-	const homePath = workspace.homePath?.trim() ?? "";
-	if (homePath) {
-		return joinPathForDisplay(homePath, "Documents");
-	}
-
-	return "~/Documents";
-}
-
-function resolveRagDirectoryPickerDefaultPath(workspace: WorkspaceState) {
-	return resolveDocumentsDirectoryPath(workspace);
-}
-
-function formatTextLines(lines: string[]) {
-	return lines.join("\n");
-}
-
-function parseKeyValueLines(value: string, label: string) {
-	return value
-		.split("\n")
-		.map((line) => line.trim())
-		.filter((line) => line.length > 0)
-		.map((line, index) => {
-			const separatorIndex = line.indexOf("=");
-			if (separatorIndex <= 0) {
-				throw new Error(`${label} 第 ${index + 1} 行必须是 KEY=VALUE`);
-			}
-
-			return {
-				name: line.slice(0, separatorIndex).trim(),
-				value: line.slice(separatorIndex + 1).trim(),
-			};
-		});
-}
-
-function formatKeyValueLines(items: { name: string; value: string }[]) {
-	return items.map((item) => `${item.name}=${item.value}`).join("\n");
-}
-
-function createMcpServerDraft(transport: McpTransport = "stdio"): AcpMcpServerDraft {
-	return {
-		id: nextServerDraftId(),
-		transport,
-		name: "",
-		command: "",
-		url: "",
-		argsText: "",
-		envText: "",
-		headersText: "",
-	};
-}
-
-function createMcpServerDraftFromConfig(server: AcpMcpServerConfig): AcpMcpServerDraft {
-	switch (server.transport) {
-		case "stdio":
-			return {
-				id: nextServerDraftId(),
-				transport: "stdio",
-				name: server.name,
-				command: server.command,
-				url: "",
-				argsText: formatTextLines(server.args),
-				envText: formatKeyValueLines(server.env),
-				headersText: "",
-			};
-		case "http":
-			return {
-				id: nextServerDraftId(),
-				transport: "http",
-				name: server.name,
-				command: "",
-				url: server.url,
-				argsText: "",
-				envText: "",
-				headersText: formatKeyValueLines(server.headers),
-			};
-		case "sse":
-			return {
-				id: nextServerDraftId(),
-				transport: "sse",
-				name: server.name,
-				command: "",
-				url: server.url,
-				argsText: "",
-				envText: "",
-				headersText: formatKeyValueLines(server.headers),
-			};
-	}
-}
-
-function cloneMcpServerDraft(server: AcpMcpServerDraft): AcpMcpServerDraft {
-	return {
-		...server,
-	};
-}
-
-function cloneAgentDraft(agent: AcpAgentDraft): AcpAgentDraft {
-	return {
-		...agent,
-	};
-}
-
-function cloneSavedAcpDraftState(state: SavedAcpDraftState): SavedAcpDraftState {
-	return {
-		defaultAgentId: state.defaultAgentId,
-		agents: state.agents.map(cloneAgentDraft),
-	};
-}
-
-function cloneSavedMcpDraftState(state: SavedMcpDraftState): SavedMcpDraftState {
-	return {
-		servers: state.servers.map(cloneMcpServerDraft),
-	};
-}
-
-function cloneLlmProviderDraft(provider: LlmProviderConfig): LlmProviderConfig {
-	return {
-		...provider,
-	};
-}
-
-function cloneSavedLlmDraftState(state: SavedLlmDraftState): SavedLlmDraftState {
-	return {
-		providers: state.providers.map(cloneLlmProviderDraft),
-	};
-}
-
-function cloneSavedRagDraftState(state: SavedRagDraftState): SavedRagDraftState {
-	return {
-		sourceDirectories: [...state.sourceDirectories],
-		ignoreGlobs: [...state.ignoreGlobs],
-		embeddingProviderId: state.embeddingProviderId,
-	};
-}
-
-function serializeMcpServerDraft(server: AcpMcpServerDraft): AcpMcpServerConfig {
-	if (server.transport === "stdio") {
-		return {
-			transport: "stdio",
-			name: server.name.trim(),
-			command: server.command.trim(),
-			args: parseTextLines(server.argsText),
-			env: parseKeyValueLines(server.envText, "MCP env"),
-		};
-	}
-
-	if (server.transport === "http") {
-		return {
-			transport: "http",
-			name: server.name.trim(),
-			url: requireValidMcpRemoteUrl(server.url, "http"),
-			headers: parseKeyValueLines(server.headersText, "MCP headers"),
-		};
-	}
-
-	return {
-		transport: "sse",
-		name: server.name.trim(),
-		url: requireValidMcpRemoteUrl(server.url, "sse"),
-		headers: parseKeyValueLines(server.headersText, "MCP headers"),
-	};
-}
-
-function createAgentDraft(name = "", command = ""): AcpAgentDraft {
-	return {
-		id: nextDraftId(),
-		name,
-		command,
-	};
-}
-
-function createLlmProviderDraft(): LlmProviderConfig {
-	return {
-		id: nextLlmDraftId(),
-		name: "",
-		baseUrl: "https://api.openai.com/v1",
-		apiKey: "",
-		modelType: "llm",
-		protocol: "responses",
-		model: "",
-		modelIdentityHint: null,
-		builtinPresetId: null,
-		builtinPresetModelId: null,
-		managedBaseUrl: false,
-		supportsMultimodal: false,
-		supportsStateful: false,
-	};
-}
-
-function findBuiltinTemplate(
-	templates: BuiltinLlmProviderTemplate[],
-	templateId: string | null | undefined,
-) {
-	if (!templateId) {
-		return null;
-	}
-
-	return templates.find((template) => template.id === templateId) ?? null;
-}
-
-function findBuiltinTemplateModel(
-	template: BuiltinLlmProviderTemplate | null,
-	modelId: string | null | undefined,
-) {
-	if (!template || !modelId) {
-		return null;
-	}
-
-	return template.models.find((model) => model.id === modelId) ?? null;
-}
-
-function getSelectableBuiltinTemplateModels(template: BuiltinLlmProviderTemplate | null) {
-	if (!template) {
-		return [];
-	}
-
-	return template.models.filter((model) => model.selectableInCurrentApp);
-}
-
-function getFirstSelectableBuiltinTemplateModel(template: BuiltinLlmProviderTemplate | null) {
-	return getSelectableBuiltinTemplateModels(template)[0] ?? null;
-}
-
-function providerUsesBuiltinTemplate(provider: Pick<LlmProviderConfig, "builtinPresetId">) {
-	return Boolean(provider.builtinPresetId);
-}
-
-function applyBuiltinTemplateModelToProvider(
-	provider: LlmProviderConfig,
-	template: BuiltinLlmProviderTemplate,
-	model: BuiltinLlmProviderTemplateModel,
-) {
-	return sanitizeLlmProviderDraft({
-		...provider,
-		baseUrl: provider.managedBaseUrl ? template.defaultBaseUrl : provider.baseUrl,
-		modelType: model.modelType === "embedding" ? "embedding" : "llm",
-		protocol: model.protocol === "responses" ? "responses" : "chat_completions",
-		model: model.model,
-		modelIdentityHint: null,
-		builtinPresetId: template.id,
-		builtinPresetModelId: model.id,
-		supportsMultimodal: model.protocol === "responses" ? model.supportsMultimodal : false,
-		supportsStateful: model.protocol === "responses" ? model.supportsStateful : false,
-	});
-}
-
-function applyBuiltinTemplateToProvider(
-	provider: LlmProviderConfig,
-	template: BuiltinLlmProviderTemplate,
-	model: BuiltinLlmProviderTemplateModel,
-) {
-	return sanitizeLlmProviderDraft({
-		...provider,
-		name: `${template.displayName} · ${model.displayName}`,
-		baseUrl: template.defaultBaseUrl,
-		modelType: model.modelType === "embedding" ? "embedding" : "llm",
-		protocol: model.protocol === "responses" ? "responses" : "chat_completions",
-		model: model.model,
-		modelIdentityHint: null,
-		builtinPresetId: template.id,
-		builtinPresetModelId: model.id,
-		managedBaseUrl: true,
-		supportsMultimodal: model.protocol === "responses" ? model.supportsMultimodal : false,
-		supportsStateful: model.protocol === "responses" ? model.supportsStateful : false,
-	});
-}
-
-function detachBuiltinTemplateFromProvider(provider: LlmProviderConfig) {
-	return sanitizeLlmProviderDraft({
-		...provider,
-		builtinPresetId: null,
-		builtinPresetModelId: null,
-		managedBaseUrl: false,
-	});
-}
-
-function providerIsLlmModel(provider: Pick<LlmProviderConfig, "modelType">) {
-	return provider.modelType === "llm";
-}
-
-function providerIsEmbeddingModel(provider: Pick<LlmProviderConfig, "modelType">) {
-	return provider.modelType === "embedding";
-}
-
-function providerHasLlmModel(
-	provider: Pick<LlmProviderConfig, "modelType" | "model" | "protocol">,
-) {
-	return providerIsLlmModel(provider) && provider.model.trim().length > 0;
-}
-
-function providerUsesResponsesProtocol(
-	provider: Pick<LlmProviderConfig, "modelType" | "protocol">,
-) {
-	return providerIsLlmModel(provider) && provider.protocol === "responses";
-}
-
-function providerHasResponsesModel(
-	provider: Pick<LlmProviderConfig, "modelType" | "model" | "protocol">,
-) {
-	return providerHasLlmModel(provider) && providerUsesResponsesProtocol(provider);
-}
-
-function providerHasEmbeddingModel(provider: Pick<LlmProviderConfig, "modelType" | "model">) {
-	return providerIsEmbeddingModel(provider) && provider.model.trim().length > 0;
-}
-
-function providerCanHandleAiTask(
-	provider: Pick<LlmProviderConfig, "modelType" | "model" | "protocol">,
-) {
-	return providerHasLlmModel(provider);
-}
-
-function providerCanHandleOcr(
-	provider: Pick<LlmProviderConfig, "modelType" | "model" | "protocol" | "supportsMultimodal">,
-) {
-	return providerHasResponsesModel(provider) && provider.supportsMultimodal;
-}
-
-function providerCanHandleRagEmbedding(provider: Pick<LlmProviderConfig, "modelType" | "model">) {
-	return providerHasEmbeddingModel(provider);
-}
-
-function sanitizeLlmProviderDraft(provider: LlmProviderConfig) {
-	const sanitized = { ...provider };
-	if (!providerUsesResponsesProtocol(sanitized)) {
-		sanitized.supportsMultimodal = false;
-		sanitized.supportsStateful = false;
-	}
-	if (sanitized.supportsMultimodal && !providerCanHandleOcr(sanitized)) {
-		sanitized.supportsMultimodal = false;
-	}
-	if (sanitized.supportsStateful && !providerHasResponsesModel(sanitized)) {
-		sanitized.supportsStateful = false;
-	}
-	if (!sanitized.model.trim()) {
-		sanitized.modelIdentityHint = null;
-	}
-
-	return sanitized;
-}
-
-function resolveLlmRouteProviderId(providers: LlmProviderConfig[], providerId: string | null) {
-	if (
-		providerId &&
-		providers.some((provider) => provider.id === providerId && providerCanHandleAiTask(provider))
-	) {
-		return providerId;
-	}
-
-	return null;
-}
-
-function reconcileLlmSettings(settings: LlmSettings): LlmSettings {
-	const providers = settings.providers.map(sanitizeLlmProviderDraft);
-	return {
-		providers,
-		translationProviderId: resolveLlmRouteProviderId(providers, settings.translationProviderId),
-		questionAnswerProviderId: resolveLlmRouteProviderId(
-			providers,
-			settings.questionAnswerProviderId,
-		),
-	};
-}
-
-function reconcileOcrSettings(settings: OcrSettings, providers: LlmProviderConfig[]): OcrSettings {
-	if (settings.provider !== "llm_ocr" || !settings.llmProviderId) {
-		return settings;
-	}
-
-	if (
-		providers.some(
-			(provider) => provider.id === settings.llmProviderId && providerCanHandleOcr(provider),
-		)
-	) {
-		return settings;
-	}
-
-	return {
-		...settings,
-		llmProviderId: null,
-	};
-}
-
-function reconcileRagSettings(settings: RagSettings, providers: LlmProviderConfig[]): RagSettings {
-	const normalizedIgnoreGlobs = normalizeRagIgnoreGlobs(settings.ignoreGlobs);
-	if (!settings.embeddingProviderId) {
-		return {
-			...settings,
-			ignoreGlobs: normalizedIgnoreGlobs,
-		};
-	}
-
-	if (
-		providers.some(
-			(provider) =>
-				provider.id === settings.embeddingProviderId && providerCanHandleRagEmbedding(provider),
-		)
-	) {
-		return {
-			...settings,
-			ignoreGlobs: normalizedIgnoreGlobs,
-		};
-	}
-
-	return {
-		...settings,
-		ignoreGlobs: normalizedIgnoreGlobs,
-		embeddingProviderId: null,
-	};
-}
-
-function summarizeLlmProviderProfile(provider: LlmProviderConfig) {
-	if (providerHasLlmModel(provider)) {
-		const kindLabel = getLlmProviderKindLabel(getLlmProviderKind(provider));
-		return provider.supportsMultimodal ? `${kindLabel} · 多模态` : kindLabel;
-	}
-	if (providerHasEmbeddingModel(provider)) {
-		return "Embedding";
-	}
-
-	return providerIsEmbeddingModel(provider) ? "Embedding · 未配置模型" : "LLM · 未配置模型";
-}
-
-function getLlmProviderKind(
-	provider: Pick<LlmProviderConfig, "modelType" | "protocol" | "supportsStateful">,
-): LlmProviderKind {
-	if (provider.modelType === "embedding") {
-		return "embedding";
-	}
-
-	if (provider.protocol === "chat_completions") {
-		return "llm_chat_completions";
-	}
-
-	return provider.supportsStateful ? "llm_responses_stateful" : "llm_responses_stateless";
-}
-
-function getLlmProviderKindLabel(kind: LlmProviderKind) {
-	switch (kind) {
-		case "llm_responses_stateless":
-			return "LLM · Responses Stateless";
-		case "llm_responses_stateful":
-			return "LLM · Responses Stateful";
-		case "llm_chat_completions":
-			return "LLM · Chat Completions";
-		case "embedding":
-			return "Embedding";
-	}
-}
-
-function applyLlmProviderKind(
-	provider: LlmProviderConfig,
-	kind: LlmProviderKind,
-): LlmProviderConfig {
-	switch (kind) {
-		case "llm_responses_stateless":
-			return {
-				...provider,
-				modelType: "llm",
-				protocol: "responses",
-				supportsStateful: false,
-			};
-		case "llm_responses_stateful":
-			return {
-				...provider,
-				modelType: "llm",
-				protocol: "responses",
-				supportsStateful: true,
-			};
-		case "llm_chat_completions":
-			return {
-				...provider,
-				modelType: "llm",
-				protocol: "chat_completions",
-				supportsMultimodal: false,
-				supportsStateful: false,
-			};
-		case "embedding":
-			return {
-				...provider,
-				modelType: "embedding",
-				protocol: "responses",
-				supportsMultimodal: false,
-				supportsStateful: false,
-			};
-	}
-}
-
-function getLlmProviderUsageBadges(
-	provider: Pick<
-		LlmProviderConfig,
-		"modelType" | "protocol" | "supportsMultimodal" | "supportsStateful"
-	>,
-) {
-	if (providerIsEmbeddingModel(provider)) {
-		return ["RAG 索引", "RAG 检索"];
-	}
-
-	const providerKind = getLlmProviderKind(provider);
-	const badges =
-		providerKind === "llm_chat_completions"
-			? ["翻译", "RAG 问答", "Chat Completions"]
-			: provider.supportsMultimodal
-				? ["翻译", "RAG 问答", "OCR", "Responses"]
-				: ["翻译", "RAG 问答", "Responses"];
-	if (providerKind === "llm_responses_stateful") {
-		badges.push("Stateful");
-	}
-	if (providerKind === "llm_responses_stateless") {
-		badges.push("Stateless");
-	}
-	return badges;
-}
-
-function getLlmProviderUsageDescription(
-	provider: Pick<
-		LlmProviderConfig,
-		"modelType" | "protocol" | "supportsMultimodal" | "supportsStateful"
-	>,
-) {
-	if (providerIsEmbeddingModel(provider)) {
-		return "Embedding 条目只会出现在 RAG 的 embedding 列表，不会进入翻译 LLM、问答 LLM 或 OCR。";
-	}
-
-	const providerKind = getLlmProviderKind(provider);
-	if (providerKind === "llm_chat_completions") {
-		return "这个条目会走 OpenAI 兼容 chat/completions 协议，当前可供翻译和 RAG 问答复用；继续追问时始终回退到显式历史，不支持 response_id 续链，也不会进入 OCR 列表。";
-	}
-
-	const statefulText =
-		providerKind === "llm_responses_stateful"
-			? "这是 responses 的 stateful 版本，继续追问时会优先复用上一轮 response_id。"
-			: "这是 responses 的 stateless 版本，继续追问时不会复用上一轮 response_id，而是回退到显式历史。";
-	return provider.supportsMultimodal
-		? `这个条目会走 OpenAI 兼容 responses 协议，当前可供翻译、RAG 问答和 OCR 复用。${statefulText}`
-		: `这个条目会走 OpenAI 兼容 responses 协议，当前可供翻译和 RAG 问答复用；启用多模态后才会进入 OCR 列表。${statefulText}`;
-}
-
-function getLlmProviderModelPlaceholder(provider: Pick<LlmProviderConfig, "modelType">) {
-	return provider.modelType === "embedding" ? "text-embedding-3-small" : "gpt-4.1-mini";
-}
-
-function getMcpTransportMeta(transport: McpTransport) {
-	return (
-		mcpTransportOptions.find((option) => option.transport === transport) ?? mcpTransportOptions[0]
-	);
-}
-
-function parseMcpRemoteUrl(url: string) {
-	try {
-		return new URL(url.trim());
-	} catch {
-		return null;
-	}
-}
-
-function validateMcpRemoteUrl(url: string, transport: Exclude<McpTransport, "stdio">) {
-	const trimmed = url.trim();
-	if (!trimmed) {
-		return "请输入服务 URL。";
-	}
-
-	const parsed = parseMcpRemoteUrl(trimmed);
-	if (!parsed) {
-		return `请输入完整 URL，例如 ${getMcpTransportMeta(transport).example}。`;
-	}
-
-	if (!validMcpRemoteUrlProtocols.has(parsed.protocol)) {
-		return "只支持 http:// 或 https://。";
-	}
-
-	return null;
-}
-
-function requireValidMcpRemoteUrl(url: string, transport: Exclude<McpTransport, "stdio">) {
-	const issue = validateMcpRemoteUrl(url, transport);
-	if (issue) {
-		throw new Error(issue);
-	}
-
-	return url.trim();
-}
-
-function getMcpServerDraftTitle(server: AcpMcpServerDraft) {
-	return server.name.trim() || "未命名服务";
-}
-
-function summarizeMcpRemoteUrl(url: string) {
-	const trimmed = url.trim();
-	if (!trimmed) {
-		return "等待填写 URL";
-	}
-
-	const parsed = parseMcpRemoteUrl(trimmed);
-	if (!parsed) {
-		return trimmed;
-	}
-
-	return `${parsed.host}${parsed.pathname === "/" ? "" : parsed.pathname}`;
-}
-
-function summarizeMcpServerDraft(server: AcpMcpServerDraft) {
-	if (server.transport === "stdio") {
-		return server.command.trim() || "等待填写命令";
-	}
-
-	return summarizeMcpRemoteUrl(server.url);
-}
-
-function buildSavedAcpDraftState(
-	agents: AcpAgentDraft[],
-	defaultAgentId: string | null,
-): SavedAcpDraftState {
-	return cloneSavedAcpDraftState({
-		agents,
-		defaultAgentId,
-	});
-}
-
-function buildSavedMcpDraftState(servers: AcpMcpServerDraft[]): SavedMcpDraftState {
-	return cloneSavedMcpDraftState({
-		servers,
-	});
-}
-
-function buildSavedLlmDraftState(providers: LlmProviderConfig[]): SavedLlmDraftState {
-	return cloneSavedLlmDraftState({
-		providers,
-	});
-}
-
-function buildSavedRagDraftState(settings: RagSettings): SavedRagDraftState {
-	return cloneSavedRagDraftState({
-		sourceDirectories: settings.sourceDirectories,
-		ignoreGlobs: settings.ignoreGlobs,
-		embeddingProviderId: settings.embeddingProviderId,
-	});
-}
-
-function buildAcpDraftSnapshot(agents: AcpAgentDraft[]) {
-	return JSON.stringify({
-		agents: agents.map((agent) => ({
-			id: agent.id,
-			name: agent.name,
-			command: agent.command,
-		})),
-	});
-}
-
-function buildMcpDraftSnapshot(servers: AcpMcpServerDraft[]) {
-	return JSON.stringify({
-		servers: servers.map((server) => ({
-			transport: server.transport,
-			name: server.name,
-			command: server.command,
-			url: server.url,
-			argsText: server.argsText,
-			envText: server.envText,
-			headersText: server.headersText,
-		})),
-	});
-}
-
-function buildLlmDraftSnapshot(settings: Pick<LlmSettings, "providers">) {
-	return JSON.stringify({
-		providers: settings.providers.map((provider) => ({
-			id: provider.id,
-			name: provider.name,
-			baseUrl: provider.baseUrl,
-			apiKey: provider.apiKey,
-			modelType: provider.modelType,
-			protocol: provider.protocol,
-			model: provider.model,
-			modelIdentityHint: provider.modelIdentityHint,
-			builtinPresetId: provider.builtinPresetId,
-			builtinPresetModelId: provider.builtinPresetModelId,
-			managedBaseUrl: provider.managedBaseUrl,
-			supportsMultimodal: provider.supportsMultimodal,
-			supportsStateful: provider.supportsStateful,
-		})),
-	});
-}
-
-function buildPromptsDraftSnapshot(
-	settings: PromptsSettings,
-	llmSettings: Pick<LlmSettings, "translationProviderId" | "questionAnswerProviderId">,
-) {
-	return JSON.stringify({
-		translationPrompt: settings.translationPrompt,
-		ragAnswerSystemPrompt: settings.ragAnswerSystemPrompt,
-		translationProviderId: llmSettings.translationProviderId,
-		questionAnswerProviderId: llmSettings.questionAnswerProviderId,
-	});
-}
-
-function buildTranslationTaskDraftSnapshot(
-	settings: Pick<PromptsSettings, "translationPrompt">,
-	llmSettings: Pick<LlmSettings, "translationProviderId">,
-) {
-	return JSON.stringify({
-		translationPrompt: settings.translationPrompt,
-		translationProviderId: llmSettings.translationProviderId,
-	});
-}
-
-function buildQuestionAnswerTaskDraftSnapshot(
-	settings: Pick<PromptsSettings, "ragAnswerSystemPrompt">,
-	llmSettings: Pick<LlmSettings, "questionAnswerProviderId">,
-) {
-	return JSON.stringify({
-		ragAnswerSystemPrompt: settings.ragAnswerSystemPrompt,
-		questionAnswerProviderId: llmSettings.questionAnswerProviderId,
-	});
-}
-
-function buildRagDraftSnapshot(settings: RagSettings) {
-	return JSON.stringify({
-		sourceDirectories: settings.sourceDirectories,
-		ignoreGlobs: settings.ignoreGlobs,
-		embeddingProviderId: settings.embeddingProviderId,
-	});
-}
-
-function findFirstAcpIssue(agents: AcpAgentDraft[]): AcpIssueFocusTarget | null {
-	for (const agent of agents) {
-		if (!agent.name.trim()) {
-			return {
-				agentId: agent.id,
-				fieldKey: "name",
-			};
-		}
-
-		if (!agent.command.trim()) {
-			return {
-				agentId: agent.id,
-				fieldKey: "command",
-			};
-		}
-	}
-
-	return null;
-}
-
-function findFirstMcpIssue(servers: AcpMcpServerDraft[]): McpIssueFocusTarget | null {
-	for (const server of servers) {
-		if (!server.name.trim()) {
-			return {
-				serverId: server.id,
-				serverFieldKey: "name",
-			};
-		}
-
-		if (server.transport === "stdio") {
-			if (!server.command.trim()) {
-				return {
-					serverId: server.id,
-					serverFieldKey: "command",
-				};
-			}
-
-			try {
-				parseKeyValueLines(server.envText, "MCP env");
-			} catch {
-				return {
-					serverId: server.id,
-					serverFieldKey: "envText",
-				};
-			}
-		} else {
-			if (!server.url.trim()) {
-				return {
-					serverId: server.id,
-					serverFieldKey: "url",
-				};
-			}
-
-			try {
-				parseKeyValueLines(server.headersText, "MCP headers");
-			} catch {
-				return {
-					serverId: server.id,
-					serverFieldKey: "headersText",
-				};
-			}
-		}
-	}
-
-	return null;
-}
-
-function findFirstLlmIssue(
-	settings: LlmSettings,
-	builtinTemplates: BuiltinLlmProviderTemplate[],
-): LlmIssueFocusTarget | null {
-	for (const provider of settings.providers) {
-		if (!provider.name.trim()) {
-			return {
-				providerId: provider.id,
-				fieldKey: "name",
-			};
-		}
-
-		if (!provider.baseUrl.trim()) {
-			return {
-				providerId: provider.id,
-				fieldKey: "baseUrl",
-			};
-		}
-
-		if (!provider.model.trim()) {
-			return {
-				providerId: provider.id,
-				fieldKey: "model",
-			};
-		}
-
-		const template = findBuiltinTemplate(builtinTemplates, provider.builtinPresetId);
-		if (provider.builtinPresetId && !template) {
-			return {
-				providerId: provider.id,
-				fieldKey: "model",
-			};
-		}
-
-		const templateModel = findBuiltinTemplateModel(template, provider.builtinPresetModelId);
-		if (provider.builtinPresetId && (!templateModel || !templateModel.selectableInCurrentApp)) {
-			return {
-				providerId: provider.id,
-				fieldKey: "model",
-			};
-		}
-
-		if (
-			template &&
-			provider.managedBaseUrl &&
-			provider.baseUrl.trim() !== template.defaultBaseUrl.trim()
-		) {
-			return {
-				providerId: provider.id,
-				fieldKey: "baseUrl",
-			};
-		}
-	}
-
-	return null;
-}
-
-function validateAcpAgents(agents: AcpAgentDraft[]): AcpDraftValidation {
-	const agentIssues: Record<string, string[]> = {};
-	const agentFieldIssues: Record<string, FieldIssueMap<AcpFieldKey>> = {};
-	let totalIssues = 0;
-
-	agents.forEach((agent, agentIndex) => {
-		const currentAgentIssues: string[] = [];
-		const currentAgentFieldIssues: FieldIssueMap<AcpFieldKey> = {};
-		if (!agent.name.trim()) {
-			currentAgentIssues.push(`第 ${agentIndex + 1} 个 ACP Agent 缺少名称。`);
-			currentAgentFieldIssues.name = "请输入 Agent 名称。";
-		}
-		if (!agent.command.trim()) {
-			currentAgentIssues.push(`第 ${agentIndex + 1} 个 ACP Agent 缺少启动命令。`);
-			currentAgentFieldIssues.command = "请输入启动命令。";
-		}
-
-		if (currentAgentIssues.length > 0) {
-			agentIssues[agent.id] = currentAgentIssues;
-			agentFieldIssues[agent.id] = currentAgentFieldIssues;
-			totalIssues += currentAgentIssues.length;
-		}
-	});
-
-	return {
-		totalIssues,
-		agentIssues,
-		agentFieldIssues,
-	};
-}
-
-function validateLlmSettings(
-	settings: LlmSettings,
-	builtinTemplates: BuiltinLlmProviderTemplate[],
-): LlmDraftValidation {
-	const providerIssues: Record<string, string[]> = {};
-	const providerFieldIssues: Record<string, FieldIssueMap<LlmFieldKey>> = {};
-	let totalIssues = 0;
-
-	settings.providers.forEach((provider, providerIndex) => {
-		const currentProviderIssues: string[] = [];
-		const currentProviderFieldIssues: FieldIssueMap<LlmFieldKey> = {};
-		if (!provider.name.trim()) {
-			currentProviderIssues.push(`第 ${providerIndex + 1} 个 LLM 条目缺少名称。`);
-			currentProviderFieldIssues.name = "请输入条目名称。";
-		}
-		if (!provider.baseUrl.trim()) {
-			currentProviderIssues.push(`第 ${providerIndex + 1} 个 LLM 条目缺少 Base URL。`);
-			currentProviderFieldIssues.baseUrl = "请输入 Base URL。";
-		}
-		if (!provider.model.trim()) {
-			currentProviderIssues.push(`第 ${providerIndex + 1} 个 LLM 条目缺少模型名。`);
-			currentProviderFieldIssues.model = "请输入模型名。";
-		}
-		if (provider.supportsMultimodal && !providerHasResponsesModel(provider)) {
-			currentProviderIssues.push(
-				`第 ${providerIndex + 1} 个 LLM 条目只有 responses 协议才能开启多模态。`,
-			);
-		}
-		if (provider.supportsStateful && !providerHasResponsesModel(provider)) {
-			currentProviderIssues.push(
-				`第 ${providerIndex + 1} 个 LLM 条目只有 responses 协议才能开启 stateful 请求。`,
-			);
-		}
-		const template = findBuiltinTemplate(builtinTemplates, provider.builtinPresetId);
-		if (provider.builtinPresetId && !template) {
-			currentProviderIssues.push(`第 ${providerIndex + 1} 个 LLM 条目引用了未知内置模板。`);
-			currentProviderFieldIssues.model = "当前内置模板不存在，请重新选择模型。";
-		}
-
-		if (template) {
-			const templateModel = findBuiltinTemplateModel(template, provider.builtinPresetModelId);
-			if (!templateModel) {
-				currentProviderIssues.push(`第 ${providerIndex + 1} 个 LLM 条目没有绑定有效的模板模型。`);
-				currentProviderFieldIssues.model = "请选择模板白名单中的模型。";
-			} else {
-				if (!templateModel.selectableInCurrentApp) {
-					currentProviderIssues.push(
-						`第 ${providerIndex + 1} 个 LLM 条目绑定的是当前应用不可用的模板模型。`,
-					);
-					currentProviderFieldIssues.model =
-						templateModel.disabledReason ?? "这个模型当前不能在 Wabity 中使用。";
-				}
-				if (provider.model !== templateModel.model) {
-					currentProviderIssues.push(`第 ${providerIndex + 1} 个 LLM 条目模型不在模板白名单内。`);
-					currentProviderFieldIssues.model = "内置模板条目只能选择白名单模型。";
-				}
-				if (provider.managedBaseUrl && provider.baseUrl.trim() !== template.defaultBaseUrl.trim()) {
-					currentProviderIssues.push(
-						`第 ${providerIndex + 1} 个 LLM 条目仍由模板管理 Base URL，但当前值已偏离模板默认地址。`,
-					);
-					currentProviderFieldIssues.baseUrl = "模板管理模式下 Base URL 必须与模板默认地址一致。";
-				}
-			}
-		}
-
-		if (currentProviderIssues.length > 0) {
-			providerIssues[provider.id] = currentProviderIssues;
-			providerFieldIssues[provider.id] = currentProviderFieldIssues;
-			totalIssues += currentProviderIssues.length;
-		}
-	});
-
-	return {
-		totalIssues,
-		providerIssues,
-		providerFieldIssues,
-	};
-}
-
-function validateRagSettings(settings: RagSettings, llmSettings: LlmSettings): RagDraftValidation {
-	const issues: string[] = [];
-	const fieldIssues: FieldIssueMap<RagFieldKey> = {};
-
-	settings.sourceDirectories.forEach((directory, index) => {
-		if (!directory.trim()) {
-			issues.push(`第 ${index + 1} 个扫描目录不能为空。`);
-			fieldIssues.sourceDirectories ??= "扫描目录里不能有空行。";
-		}
-	});
-
-	settings.ignoreGlobs.forEach((pattern, index) => {
-		if (!pattern.trim()) {
-			issues.push(`第 ${index + 1} 个忽略模式不能为空。`);
-			fieldIssues.ignoreGlobs ??= "忽略规则里不能有空行。";
-		}
-	});
-
-	if (settings.sourceDirectories.length > 0 && !settings.embeddingProviderId) {
-		issues.push("配置扫描目录时，必须选择一个 embedding provider。");
-		fieldIssues.embeddingProviderId ??= "配置扫描目录时，必须先选择一个 Embedding 条目。";
-	}
-
-	if (
-		settings.embeddingProviderId &&
-		!llmSettings.providers.some(
-			(provider) =>
-				provider.id === settings.embeddingProviderId && providerCanHandleRagEmbedding(provider),
-		)
-	) {
-		issues.push("RAG 选择的 embedding provider 不存在，或者没有启用 embedding 能力。");
-		fieldIssues.embeddingProviderId ??= "当前选择的 Embedding 条目不可用于 RAG。";
-	}
-
-	return {
-		totalIssues: issues.length,
-		issues,
-		fieldIssues,
-	};
-}
-
-function selectExistingIdOrFirst<T extends { id: string }>(items: T[], selectedId: string | null) {
-	if (items.length === 0) {
-		return null;
-	}
-
-	if (!selectedId || !items.some((item) => item.id === selectedId)) {
-		return items[0]?.id ?? null;
-	}
-
-	return selectedId;
-}
-
-function validateMcpServers(servers: AcpMcpServerDraft[]): McpDraftValidation {
-	const serverIssues: Record<string, string[]> = {};
-	const serverFieldIssues: Record<string, FieldIssueMap<McpFieldKey>> = {};
-	let totalIssues = 0;
-
-	servers.forEach((server, serverIndex) => {
-		const currentServerIssues: string[] = [];
-		const currentServerFieldIssues: FieldIssueMap<McpFieldKey> = {};
-		if (!server.name.trim()) {
-			currentServerIssues.push(`第 ${serverIndex + 1} 个 MCP 服务缺少名称。`);
-			currentServerFieldIssues.name = "请输入 MCP 服务名称。";
-		}
-
-		if (server.transport === "stdio") {
-			if (!server.command.trim()) {
-				currentServerIssues.push("本地进程模式必须填写命令。");
-				currentServerFieldIssues.command = "本地进程模式必须填写命令。";
-			}
-
-			try {
-				parseKeyValueLines(server.envText, "MCP env");
-			} catch (error: unknown) {
-				currentServerIssues.push(getErrorMessage(error, "MCP env 格式错误。"));
-				currentServerFieldIssues.envText = "环境变量格式错误，请按每行一个 KEY=VALUE 填写。";
-			}
-		} else {
-			const urlIssue = validateMcpRemoteUrl(server.url, server.transport);
-			if (urlIssue) {
-				currentServerIssues.push(urlIssue);
-				currentServerFieldIssues.url = urlIssue;
-			}
-
-			try {
-				parseKeyValueLines(server.headersText, "MCP headers");
-			} catch (error: unknown) {
-				currentServerIssues.push(getErrorMessage(error, "MCP headers 格式错误。"));
-				currentServerFieldIssues.headersText = "请求头格式错误，请按每行一个 KEY=VALUE 填写。";
-			}
-		}
-
-		if (currentServerIssues.length > 0) {
-			serverIssues[server.id] = currentServerIssues;
-			serverFieldIssues[server.id] = currentServerFieldIssues;
-			totalIssues += currentServerIssues.length;
-		}
-	});
-
-	return {
-		totalIssues,
-		serverIssues,
-		serverFieldIssues,
-	};
-}
-
 export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) {
 	const [activeSection, setActiveSection] = useState<SettingsSectionId>("general");
 	const [translationPromptExpanded, setTranslationPromptExpanded] = useState(false);
 	const [questionAnswerPromptExpanded, setQuestionAnswerPromptExpanded] = useState(false);
-	const [generalSettings, setGeneralSettings] = useState<GeneralSettings>({
-		autoStart: false,
-		showInDock: true,
-		language: "zh-CN",
-	});
-	const [notificationSettings, setNotificationSettings] = useState<NotificationSettings>({
-		enabled: false,
-		notifyQuestionAnswerCompletion: true,
-		notifyAcpPromptCompletion: true,
-		onlyWhenLauncherInBackground: true,
-		contentPreview: "brief",
-	});
+	const [generalSettings, setGeneralSettings] = useState<GeneralSettings>(
+		createDefaultGeneralSettings,
+	);
+	const [notificationSettings, setNotificationSettings] = useState<NotificationSettings>(
+		createDefaultNotificationSettings,
+	);
 	const [promptsSettings, setPromptsSettings] = useState<PromptsSettings>(defaultPromptsSettings);
 
-	const [shortcutSettings, setShortcutSettings] = useState<ShortcutConfig>({
-		toggle_launcher: "Alt+Space",
-		ocr_translate: "Alt+D",
-	});
-	const [llmSettings, setLlmSettings] = useState<LlmSettings>({
-		providers: [],
-		translationProviderId: null,
-		questionAnswerProviderId: null,
-	});
+	const [shortcutSettings, setShortcutSettings] = useState<ShortcutConfig>(
+		createDefaultShortcutSettings,
+	);
+	const [llmSettings, setLlmSettings] = useState<LlmSettings>(createDefaultLlmSettings);
 	const [builtinLlmTemplates, setBuiltinLlmTemplates] = useState<BuiltinLlmProviderTemplate[]>([]);
 	const [selectedLlmProviderId, setSelectedLlmProviderId] = useState<string | null>(null);
 	const [savedLlmSnapshot, setSavedLlmSnapshot] = useState(() =>
-		buildLlmDraftSnapshot({
-			providers: [],
-		}),
+		buildLlmDraftSnapshot(createDefaultLlmSettings()),
 	);
 	const [, setSavedLlmState] = useState<SavedLlmDraftState>(() => buildSavedLlmDraftState([]));
 	const [llmModelOptions, setLlmModelOptions] = useState<Record<string, LlmProviderModelEntry[]>>(
@@ -1876,24 +188,12 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 	const [llmModelErrors, setLlmModelErrors] = useState<Record<string, string>>({});
 	const [loadingLlmModelProviderId, setLoadingLlmModelProviderId] = useState<string | null>(null);
 	const [openLlmModelPickerId, setOpenLlmModelPickerId] = useState<string | null>(null);
-	const [ragSettings, setRagSettings] = useState<RagSettings>({
-		sourceDirectories: [],
-		ignoreGlobs: normalizeRagIgnoreGlobs([...defaultRagIgnoreGlobs]),
-		embeddingProviderId: null,
-	});
+	const [ragSettings, setRagSettings] = useState<RagSettings>(createDefaultRagSettings);
 	const [savedRagSnapshot, setSavedRagSnapshot] = useState(() =>
-		buildRagDraftSnapshot({
-			sourceDirectories: [],
-			ignoreGlobs: normalizeRagIgnoreGlobs([...defaultRagIgnoreGlobs]),
-			embeddingProviderId: null,
-		}),
+		buildRagDraftSnapshot(createDefaultRagSettings()),
 	);
 	const [, setSavedRagState] = useState<SavedRagDraftState>(() =>
-		buildSavedRagDraftState({
-			sourceDirectories: [],
-			ignoreGlobs: normalizeRagIgnoreGlobs([...defaultRagIgnoreGlobs]),
-			embeddingProviderId: null,
-		}),
+		buildSavedRagDraftState(createDefaultRagSettings()),
 	);
 	const [ragScanResult, setRagScanResult] = useState<RagScanResult | null>(null);
 	const [acpAgents, setAcpAgentsState] = useState<AcpAgentDraft[]>([]);
@@ -1920,51 +220,17 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		exists: false,
 		skills: [],
 	});
-	const [workspaceContext, setWorkspaceContext] = useState<WorkspaceState>(emptyWorkspaceState);
+	const [workspaceContext, setWorkspaceContext] = useState<WorkspaceState>(
+		createDefaultWorkspaceState,
+	);
 	const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
 	const [skillError, setSkillError] = useState<string | null>(null);
 
-	const [appearanceSettings, setAppearanceSettings] = useState<AppearanceSettings>({
-		theme: "auto",
-		fontSize: "medium",
-	});
-	const [ocrSettings, setOcrSettings] = useState<OcrSettings>({
-		provider: "system",
-		llmProviderId: null,
-	});
-	const [persistedAppSettings, setPersistedAppSettings] = useState<AppSettings>({
-		general: {
-			autoStart: false,
-			showInDock: true,
-			language: "zh-CN",
-		},
-		notification: {
-			enabled: false,
-			notifyQuestionAnswerCompletion: true,
-			notifyAcpPromptCompletion: true,
-			onlyWhenLauncherInBackground: true,
-			contentPreview: "brief",
-		},
-		appearance: {
-			theme: "auto",
-			fontSize: "medium",
-		},
-		prompts: defaultPromptsSettings,
-		llm: {
-			providers: [],
-			translationProviderId: null,
-			questionAnswerProviderId: null,
-		},
-		ocr: {
-			provider: "system",
-			llmProviderId: null,
-		},
-		rag: {
-			sourceDirectories: [],
-			ignoreGlobs: normalizeRagIgnoreGlobs([...defaultRagIgnoreGlobs]),
-			embeddingProviderId: null,
-		},
-	});
+	const [appearanceSettings, setAppearanceSettings] =
+		useState<AppearanceSettings>(defaultAppearanceSettings);
+	const [ocrSettings, setOcrSettings] = useState<OcrSettings>(createDefaultOcrSettings);
+	const [persistedAppSettings, setPersistedAppSettings] =
+		useState<AppSettings>(createDefaultAppSettings);
 
 	// Track which shortcut is being edited
 	const [editingShortcut, setEditingShortcut] = useState<keyof ShortcutConfig | null>(null);
@@ -2212,6 +478,37 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		return `${providerId}:${fieldKey}`;
 	}
 
+	function focusLlmModelOption(
+		providerId: string,
+		target: "selected" | "first" | "last" = "selected",
+	) {
+		requestAnimationFrame(() => {
+			const listbox = document.getElementById(`llm-provider-model-menu-${providerId}`);
+			if (!(listbox instanceof HTMLElement)) {
+				return;
+			}
+
+			const options = Array.from(listbox.querySelectorAll<HTMLButtonElement>('[role="option"]'));
+			if (options.length === 0) {
+				return;
+			}
+
+			if (target === "first") {
+				options[0]?.focus();
+				return;
+			}
+
+			if (target === "last") {
+				options[options.length - 1]?.focus();
+				return;
+			}
+
+			const selectedOption =
+				options.find((option) => option.getAttribute("aria-selected") === "true") ?? options[0];
+			selectedOption?.focus();
+		});
+	}
+
 	function findLlmModelOption(providerId: string, model: string) {
 		return (llmModelOptions[providerId] ?? []).find((option) => option.id === model) ?? null;
 	}
@@ -2324,18 +621,35 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		provider: LlmProviderConfig,
 		fieldKey: LlmModelFieldKey,
 	) {
-		if (event.key === "ArrowDown") {
+		const pickerId = buildLlmModelPickerId(provider.id, fieldKey);
+		if (event.key === "ArrowDown" || event.key === "ArrowUp") {
 			event.preventDefault();
-			void handleToggleLlmModelMenu(provider, fieldKey);
+			const focusTarget = event.key === "ArrowUp" ? "last" : "selected";
+			if (openLlmModelPickerId === pickerId) {
+				focusLlmModelOption(provider.id, focusTarget);
+				return;
+			}
+
+			void (async () => {
+				await handleToggleLlmModelMenu(provider, fieldKey);
+				focusLlmModelOption(provider.id, focusTarget);
+			})();
 			return;
 		}
 
 		if (event.key === "Escape") {
-			setOpenLlmModelPickerId((current) =>
-				current === buildLlmModelPickerId(provider.id, fieldKey) ? null : current,
-			);
+			setOpenLlmModelPickerId((current) => (current === pickerId ? null : current));
 		}
 	}
+
+	const syncAppearanceState = useCallback(
+		(nextAppearance: AppearanceSettings) => {
+			setAppearanceSettings(nextAppearance);
+			applyAppearanceSettings(nextAppearance);
+			onAppearanceChange?.(nextAppearance);
+		},
+		[onAppearanceChange],
+	);
 
 	// Load initial shortcut config
 	useEffect(() => {
@@ -2349,9 +663,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		void getAppSettings().then((settings) => {
 			setGeneralSettings(settings.general);
 			setNotificationSettings(settings.notification);
-			setAppearanceSettings(settings.appearance);
-			applyAppearanceSettings(settings.appearance);
-			onAppearanceChange?.(settings.appearance);
+			syncAppearanceState(settings.appearance);
 			setPromptsSettings(settings.prompts);
 			setLlmSettings(settings.llm);
 			setSelectedLlmProviderId(settings.llm.providers[0]?.id ?? null);
@@ -2421,7 +733,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 				setWorkspaceContext(workspace);
 			})
 			.catch(() => {
-				setWorkspaceContext(emptyWorkspaceState);
+				setWorkspaceContext(createDefaultWorkspaceState());
 			});
 
 		// Listen for shortcut updates from backend
@@ -2432,7 +744,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		return () => {
 			void unlistenPromise.then((unlisten) => unlisten?.());
 		};
-	}, [onAppearanceChange]);
+	}, [syncAppearanceState]);
 
 	// Handle keydown when recording shortcut
 	useEffect(() => {
@@ -2761,11 +1073,23 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		selectedRagEmbeddingProvider?.baseUrl ||
 		"未选择 Embedding";
 	const ragSourceDirectoryCount = ragSettings.sourceDirectories.length;
-	const ragIgnoreGlobCount = ragSettings.ignoreGlobs.length;
 	const ragExtraIgnoreGlobs = splitExtraRagIgnoreGlobs(ragSettings.ignoreGlobs);
+	const ragExtraIgnoreGlobCount = ragExtraIgnoreGlobs.length;
 	const ragSupportedExtensionsLabel = ragSupportedFileExtensions
 		.map((extension) => `.${extension}`)
 		.join("、");
+	const ragStatusTitle = ragHasUnsavedChanges ? "有未保存的更改" : "已同步";
+	const ragStatusDescription = ragHasUnsavedChanges
+		? "保存后写回 Embedding、扫描目录和忽略规则。"
+		: "当前配置已落盘；需要时手动重建索引。";
+	const ragSummaryItems: Array<{ label: string; value: string }> = [
+		{ label: "扫描目录", value: `${ragSourceDirectoryCount} 个` },
+		{ label: "额外忽略", value: `${ragExtraIgnoreGlobCount} 条` },
+		{
+			label: "校验问题",
+			value: ragValidation.totalIssues > 0 ? `${ragValidation.totalIssues} 个` : "无",
+		},
+	];
 	const ragScanSummaryItems = ragScanResult
 		? [
 				{ label: "数据库", value: ragScanResult.databasePath },
@@ -2809,11 +1133,6 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 	};
 	const activeSectionLabel =
 		settingsSections.find((section) => section.id === activeSection)?.label ?? "设置";
-	const selectedPresetInstallOption =
-		acpAgentOptions.find((option) => option.id === selectedPresetOptionId) ?? null;
-	const selectedLlmIssueCount = selectedLlmProvider
-		? (llmValidation.providerIssues[selectedLlmProvider.id]?.length ?? 0)
-		: 0;
 	const selectedAgentIssueCount = selectedAgent
 		? (acpValidation.agentIssues[selectedAgent.id]?.length ?? 0)
 		: 0;
@@ -3325,9 +1644,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 			const saved = await setAppSettings(nextSettings);
 			setGeneralSettings(saved.general);
 			setNotificationSettings(saved.notification);
-			setAppearanceSettings(saved.appearance);
-			applyAppearanceSettings(saved.appearance);
-			onAppearanceChange?.(saved.appearance);
+			syncAppearanceState(saved.appearance);
 			if (options.adoptPromptKeys.length > 0) {
 				setPromptsSettings((current) => ({
 					...current,
@@ -3533,6 +1850,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 				}),
 			}),
 		);
+		setOpenLlmModelPickerId(null);
 		setSettingsError(null);
 	}
 
@@ -3733,62 +2051,6 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		handleRemoveBuiltinRagMcpServer();
 	}
 
-	function renderMcpCreateCard() {
-		return (
-			<div
-				className="settings-editor-card settings-editor-card-subtle settings-mcp-create-card"
-				id="mcp-create"
-				ref={bindSectionBlockRef("mcp-create")}
-			>
-				<div className="settings-editor-card-header">
-					<div className="settings-acp-detail-copy">
-						<strong className="settings-agent-mcp-title">新建服务</strong>
-						<span className="settings-agent-meta">只在需要另一种连接方式时新增</span>
-					</div>
-					{selectedMcpServer ? (
-						<button
-							className="settings-agent-secondary settings-button-compact"
-							onClick={handleReturnToCurrentMcp}
-							type="button"
-						>
-							返回当前服务
-						</button>
-					) : null}
-				</div>
-				<div className="settings-acp-preset-panel settings-mcp-create-panel">
-					<div className="settings-mcp-create-copy">
-						<span className="settings-acp-preset-kicker">空白</span>
-						<strong className="settings-acp-preset-label">创建一个新服务</strong>
-					</div>
-					<label className="settings-label settings-label-stacked">
-						<span className="settings-acp-preset-label">连接类型</span>
-						<select
-							className="settings-select"
-							onChange={(event) => setSelectedMcpTransport(event.target.value as McpTransport)}
-							value={selectedMcpTransport}
-						>
-							{mcpTransportOptions.map((option) => (
-								<option key={option.transport} value={option.transport}>
-									{option.label} · {option.description}
-								</option>
-							))}
-						</select>
-					</label>
-					<div className="settings-mcp-transport-guide">
-						{renderMcpTransportGuide(selectedMcpTransport)}
-					</div>
-					<button
-						className="settings-button settings-button-compact settings-acp-preset-action"
-						onClick={handleApplyMcpTransportSelection}
-						type="button"
-					>
-						新建 {getMcpTransportMeta(selectedMcpTransport).label}
-					</button>
-				</div>
-			</div>
-		);
-	}
-
 	function handleAddPresetAgent(option: (typeof acpAgentOptions)[number]) {
 		const existingAgent = acpAgents.find((agent) => agent.command.trim() === option.command);
 		if (existingAgent) {
@@ -3940,3187 +2202,225 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 							</div>
 
 							{activeSection === "general" ? (
-								<section
-									aria-labelledby={getSettingsTabId("general")}
-									className="settings-section"
-									id={getSettingsPanelId("general")}
-									role="tabpanel"
-									tabIndex={0}
-								>
-									<div className="settings-item">
-										<label className="settings-label">
-											<span>开机自启动</span>
-											<input
-												checked={generalSettings.autoStart}
-												className="settings-toggle"
-												onChange={(e) =>
-													void saveAppSettings(
-														{ ...generalSettings, autoStart: e.target.checked },
-														notificationSettings,
-														appearanceSettings,
-													)
-												}
-												disabled={savingSettings}
-												type="checkbox"
-											/>
-										</label>
-									</div>
-									<div className="settings-item">
-										<label className="settings-label">
-											<span>在 Dock 中显示</span>
-											<input
-												checked={generalSettings.showInDock}
-												className="settings-toggle"
-												onChange={(e) =>
-													void saveAppSettings(
-														{ ...generalSettings, showInDock: e.target.checked },
-														notificationSettings,
-														appearanceSettings,
-													)
-												}
-												disabled={savingSettings}
-												type="checkbox"
-											/>
-										</label>
-									</div>
-									<div className="settings-item">
-										<label className="settings-label">
-											<span>语言</span>
-											<select
-												className="settings-select"
-												value={generalSettings.language}
-												onChange={(e) =>
-													void saveAppSettings(
-														{ ...generalSettings, language: e.target.value },
-														notificationSettings,
-														appearanceSettings,
-													)
-												}
-												disabled={savingSettings}
-											>
-												<option value="zh-CN">简体中文</option>
-												<option value="en-US">English</option>
-											</select>
-										</label>
-									</div>
-
-									<div
-										className="settings-editor-card settings-editor-card-subtle settings-editor-card-shortcuts"
-										id="general-shortcuts"
-										ref={bindSectionBlockRef("general-shortcuts")}
-									>
-										<div className="settings-editor-card-header">
-											<div className="settings-acp-detail-copy">
-												<span className="settings-section-kicker">Shortcuts</span>
-												<h3 className="settings-subsection-title">快捷键</h3>
-												<span
-													className="settings-help-text settings-help-text-tight"
-													id="general-shortcuts-instructions"
-												>
-													快捷键配置并入通用页，但仍然通过独立命令保存，避免和其它设置字段互相覆盖。
-												</span>
-												<span className="settings-help-text settings-help-text-tight">
-													按 Enter 或空格开始录制，再按目标组合键；按 Escape 取消当前录制。
-												</span>
-											</div>
-										</div>
-										<ShortcutRecorderField
-											instructionsId="general-shortcuts-instructions"
-											isRecording={isRecording("toggle_launcher")}
-											isSaving={savingShortcutKey === "toggle_launcher"}
-											label="打开启动器"
-											onActivate={() => handleShortcutClick("toggle_launcher")}
-											shortcutValue={shortcutSettings.toggle_launcher}
-											statusId="shortcut-toggle-launcher-status"
-											triggerId="shortcut-toggle-launcher-trigger"
-										/>
-										<ShortcutRecorderField
-											instructionsId="general-shortcuts-instructions"
-											isRecording={isRecording("ocr_translate")}
-											isSaving={savingShortcutKey === "ocr_translate"}
-											label="翻译选中文本，未选中时 OCR"
-											onActivate={() => handleShortcutClick("ocr_translate")}
-											shortcutValue={shortcutSettings.ocr_translate}
-											statusId="shortcut-ocr-translate-status"
-											triggerId="shortcut-ocr-translate-trigger"
-										/>
-									</div>
-
-									<div
-										className="settings-editor-card settings-editor-card-subtle"
-										id="general-notifications"
-										ref={bindSectionBlockRef("general-notifications")}
-									>
-										<div className="settings-editor-card-header">
-											<div className="settings-acp-detail-copy">
-												<span className="settings-section-kicker">Notifications</span>
-												<h3 className="settings-subsection-title">通知</h3>
-												<span className="settings-help-text settings-help-text-tight">
-													系统通知使用 macOS
-													原生样式，当前可定制空间很小；重点放在结果摘要，而不是应用内自定义皮肤。
-												</span>
-												<span className="settings-help-text settings-help-text-tight">
-													如果系统没有显示通知，请到 macOS 系统设置的“通知”里检查
-													Wabity；当前版本不提供应用内权限请求按钮。
-												</span>
-												<span className="settings-help-text settings-help-text-tight">
-													“简短响应摘要”会自动去掉 Markdown 结构和代码块，只截取前面的有效内容。
-												</span>
-											</div>
-										</div>
-										<div className="settings-item">
-											<label className="settings-label">
-												<span>启用完成通知</span>
-												<input
-													checked={notificationSettings.enabled}
-													className="settings-toggle"
-													onChange={(e) =>
-														void saveNotificationSettings({
-															...notificationSettings,
-															enabled: e.target.checked,
-														})
-													}
-													disabled={savingSettings}
-													type="checkbox"
-												/>
-											</label>
-										</div>
-										<div className="settings-item">
-											<label className="settings-label">
-												<span>通知内容</span>
-												<select
-													className="settings-select"
-													value={notificationSettings.contentPreview}
-													onChange={(e) =>
-														void saveNotificationSettings({
-															...notificationSettings,
-															contentPreview: e.target
-																.value as NotificationSettings["contentPreview"],
-														})
-													}
-													disabled={savingSettings || !notificationSettings.enabled}
-												>
-													<option value="brief">显示简短响应摘要</option>
-													<option value="hidden">只显示完成状态</option>
-												</select>
-											</label>
-										</div>
-										<div className="settings-item">
-											<label className="settings-label">
-												<span>轻量问答完成后通知</span>
-												<input
-													checked={notificationSettings.notifyQuestionAnswerCompletion}
-													className="settings-toggle"
-													onChange={(e) =>
-														void saveNotificationSettings({
-															...notificationSettings,
-															notifyQuestionAnswerCompletion: e.target.checked,
-														})
-													}
-													disabled={savingSettings || !notificationSettings.enabled}
-													type="checkbox"
-												/>
-											</label>
-										</div>
-										<div className="settings-item">
-											<label className="settings-label">
-												<span>ACP Agent 执行完成后通知</span>
-												<input
-													checked={notificationSettings.notifyAcpPromptCompletion}
-													className="settings-toggle"
-													onChange={(e) =>
-														void saveNotificationSettings({
-															...notificationSettings,
-															notifyAcpPromptCompletion: e.target.checked,
-														})
-													}
-													disabled={savingSettings || !notificationSettings.enabled}
-													type="checkbox"
-												/>
-											</label>
-										</div>
-										<div className="settings-item">
-											<label className="settings-label">
-												<span>仅在 launcher 不在前台时通知</span>
-												<input
-													checked={notificationSettings.onlyWhenLauncherInBackground}
-													className="settings-toggle"
-													onChange={(e) =>
-														void saveNotificationSettings({
-															...notificationSettings,
-															onlyWhenLauncherInBackground: e.target.checked,
-														})
-													}
-													disabled={savingSettings || !notificationSettings.enabled}
-													type="checkbox"
-												/>
-											</label>
-										</div>
-									</div>
-
-									<div
-										className="settings-editor-card settings-editor-card-subtle"
-										id="general-appearance"
-										ref={bindSectionBlockRef("general-appearance")}
-									>
-										<div className="settings-editor-card-header">
-											<div className="settings-acp-detail-copy">
-												<span className="settings-section-kicker">Appearance</span>
-												<h3 className="settings-subsection-title">外观</h3>
-												<span className="settings-help-text settings-help-text-tight">
-													外观配置并入通用页，继续使用即时保存，不额外维护草稿。
-												</span>
-											</div>
-										</div>
-										<div className="settings-item">
-											<label className="settings-label">
-												<span>主题</span>
-												<select
-													className="settings-select"
-													value={appearanceSettings.theme}
-													onChange={(e) =>
-														void saveAppSettings(generalSettings, notificationSettings, {
-															...appearanceSettings,
-															theme: e.target.value,
-														})
-													}
-													disabled={savingSettings}
-												>
-													<option value="auto">跟随系统</option>
-													<option value="light">浅色</option>
-													<option value="dark">深色</option>
-												</select>
-											</label>
-										</div>
-										<div className="settings-item">
-											<label className="settings-label">
-												<span>字体大小</span>
-												<select
-													className="settings-select"
-													value={appearanceSettings.fontSize}
-													onChange={(e) =>
-														void saveAppSettings(generalSettings, notificationSettings, {
-															...appearanceSettings,
-															fontSize: e.target.value,
-														})
-													}
-													disabled={savingSettings}
-												>
-													<option value="small">小</option>
-													<option value="medium">中</option>
-													<option value="large">大</option>
-												</select>
-											</label>
-										</div>
-									</div>
-
-									<div
-										className="settings-editor-card settings-editor-card-subtle"
-										id="general-ocr"
-										ref={bindSectionBlockRef("general-ocr")}
-									>
-										<div className="settings-editor-card-header">
-											<div className="settings-acp-detail-copy">
-												<span className="settings-section-kicker">OCR</span>
-												<h3 className="settings-subsection-title">截图识别</h3>
-												<span className="settings-help-text settings-help-text-tight">
-													OCR 配置移到了通用页。截图流程仍只在 macOS 可用；远程 OCR 会复用普通 LLM
-													模型，并要求显式启用多模态。
-												</span>
-											</div>
-											<button
-												className="settings-button settings-button-compact"
-												disabled={savingOcr}
-												onClick={() => void handleSaveOcr()}
-												type="button"
-											>
-												{savingOcr ? "保存中..." : "保存 OCR 配置"}
-											</button>
-										</div>
-
-										<div className="settings-item">
-											<label className="settings-label">
-												<span>识别 Provider</span>
-												<select
-													className="settings-select"
-													value={ocrSettings.provider}
-													onChange={(event) =>
-														setOcrSettings((current) => ({
-															...current,
-															provider: event.target.value as OcrSettings["provider"],
-															llmProviderId:
-																event.target.value === "llm_ocr"
-																	? (current.llmProviderId ?? eligibleOcrProviders[0]?.id ?? null)
-																	: current.llmProviderId,
-														}))
-													}
-													disabled={savingOcr}
-												>
-													<option value="system">系统 OCR</option>
-													<option value="llm_ocr">大模型 OCR</option>
-													<option value="disabled">禁用</option>
-												</select>
-											</label>
-										</div>
-
-										{showLlmOcrFields ? (
-											<div className="settings-item settings-item-stacked">
-												<label
-													className="settings-label settings-label-stacked"
-													htmlFor="general-ocr-llm-provider"
-												>
-													<span>LLM 条目</span>
-												</label>
-												<select
-													className="settings-select"
-													disabled={savingOcr}
-													id="general-ocr-llm-provider"
-													onChange={(event) =>
-														setOcrSettings((current) => ({
-															...current,
-															llmProviderId: event.target.value || null,
-														}))
-													}
-													value={ocrSettings.llmProviderId ?? ""}
-												>
-													<option value="">选择一个启用了多模态的条目</option>
-													{eligibleOcrProviders.map((provider) => (
-														<option key={provider.id} value={provider.id}>
-															{provider.name || provider.model || provider.baseUrl}
-															{` · ${summarizeLlmProviderProfile(provider)}`}
-														</option>
-													))}
-												</select>
-												<span className="settings-help-text">
-													OCR 只接受普通 LLM 类型且显式启用多模态的条目。
-												</span>
-												{eligibleOcrProviders.length === 0 ? (
-													<span className="settings-help-text settings-help-text-tight">
-														当前没有可用的 OCR 条目。先在 LLM 页面配置普通 LLM 模型，并开启多模态。
-													</span>
-												) : null}
-											</div>
-										) : null}
-									</div>
-								</section>
+								<GeneralSettingsSection
+									appearanceSettings={appearanceSettings}
+									bindSectionBlockRef={bindSectionBlockRef}
+									eligibleOcrProviders={eligibleOcrProviders}
+									generalSettings={generalSettings}
+									isRecording={isRecording}
+									notificationSettings={notificationSettings}
+									ocrSettings={ocrSettings}
+									onSaveAppSettings={saveAppSettings}
+									onSaveNotificationSettings={saveNotificationSettings}
+									onSaveOcr={handleSaveOcr}
+									onShortcutClick={handleShortcutClick}
+									savingOcr={savingOcr}
+									savingSettings={savingSettings}
+									savingShortcutKey={savingShortcutKey}
+									setOcrSettings={setOcrSettings}
+									shortcutSettings={shortcutSettings}
+									showLlmOcrFields={showLlmOcrFields}
+									summarizeLlmProviderProfile={summarizeLlmProviderProfile}
+								/>
 							) : null}
 
 							{activeSection === "prompts" ? (
-								<section
-									aria-labelledby={getSettingsTabId("prompts")}
-									className="settings-section"
-									id={getSettingsPanelId("prompts")}
-									role="tabpanel"
-									tabIndex={0}
-								>
-									<div className="settings-ai-task-grid">
-										<article
-											className="settings-editor-card settings-task-card"
-											id="prompts-translation"
-											ref={bindSectionBlockRef("prompts-translation")}
-										>
-											<div className="settings-task-card-header">
-												<div className="settings-acp-detail-copy">
-													<div className="settings-task-card-title-row">
-														<h3 className="settings-subsection-title">翻译配置</h3>
-														<span
-															className={`settings-status-chip ${
-																translationHasUnsavedChanges ? "settings-status-chip-strong" : ""
-															}`}
-														>
-															{translationHasUnsavedChanges ? "有草稿" : "已同步"}
-														</span>
-													</div>
-													<span className="settings-help-text settings-help-text-tight">
-														选择翻译模型。提示词默认已内置，只有要覆盖时再展开编辑。
-													</span>
-												</div>
-											</div>
-											<div className="settings-item settings-item-stacked">
-												<label
-													className="settings-label settings-label-stacked"
-													htmlFor="translation-provider"
-												>
-													<span>翻译模型</span>
-												</label>
-												<select
-													className="settings-select"
-													disabled={savingAiTaskConfig}
-													id="translation-provider"
-													onChange={(event) =>
-														handleLlmRouteProviderChange(
-															"translationProviderId",
-															event.target.value || null,
-														)
-													}
-													value={llmSettings.translationProviderId ?? ""}
-												>
-													<option value="">请选择一个普通 LLM 条目</option>
-													{eligibleAiTaskProviders.map((provider) => (
-														<option key={provider.id} value={provider.id}>
-															{provider.name || provider.model || provider.baseUrl}
-															{` · ${summarizeLlmProviderProfile(provider)}`}
-														</option>
-													))}
-												</select>
-												<span className="settings-help-text settings-help-text-tight">
-													当前条目：
-													{selectedTranslationProvider
-														? `${selectedTranslationProvider.name || selectedTranslationProvider.model || selectedTranslationProvider.baseUrl} · ${summarizeLlmProviderProfile(selectedTranslationProvider)}`
-														: "未配置"}
-												</span>
-												{eligibleAiTaskProviders.length === 0 ? (
-													<span className="settings-help-text settings-help-text-tight">
-														当前没有可选普通 LLM 条目。
-														<button
-															className="settings-text-link"
-															onClick={() => handleSelectSection("llm")}
-															type="button"
-														>
-															前往 LLM 配置
-														</button>
-													</span>
-												) : null}
-											</div>
-											<div className="settings-item settings-item-stacked">
-												<div className="settings-task-field-header">
-													<label
-														className="settings-label settings-label-stacked"
-														htmlFor="translation-prompt"
-													>
-														<span>提示词</span>
-													</label>
-													<button
-														aria-controls="translation-prompt-panel"
-														aria-expanded={translationPromptExpanded}
-														className="settings-text-link"
-														onClick={() => setTranslationPromptExpanded((current) => !current)}
-														type="button"
-													>
-														{translationPromptExpanded ? "收起编辑" : "展开编辑"}
-													</button>
-												</div>
-												<span className="settings-help-text settings-help-text-tight">
-													{translationPromptSummary}
-												</span>
-												{translationPromptExpanded ? (
-													<div className="settings-task-prompt-panel" id="translation-prompt-panel">
-														<textarea
-															className="settings-textarea settings-task-prompt-textarea"
-															disabled={savingAiTaskConfig}
-															id="translation-prompt"
-															onChange={(event) =>
-																setPromptsSettings((current) => ({
-																	...current,
-																	translationPrompt: event.target.value,
-																}))
-															}
-															placeholder="留空并保存时会恢复内置默认提示词"
-															rows={6}
-															value={promptsSettings.translationPrompt}
-														/>
-														<span className="settings-help-text settings-help-text-tight">
-															默认规则只输出译文，并保留 Markdown、代码块、链接和原文格式。
-														</span>
-													</div>
-												) : null}
-											</div>
-											<div className="settings-task-card-actions">
-												<button
-													className="settings-button settings-agent-secondary"
-													disabled={savingAiTaskConfig}
-													onClick={() =>
-														setPromptsSettings((current) => ({
-															...current,
-															translationPrompt: defaultPromptsSettings.translationPrompt,
-														}))
-													}
-													type="button"
-												>
-													恢复默认
-												</button>
-												<button
-													className="settings-button settings-agent-secondary"
-													disabled={savingAiTaskConfig || !translationHasUnsavedChanges}
-													onClick={handleDiscardTranslationDraft}
-													type="button"
-												>
-													{DISCARD_DRAFT_BUTTON_LABEL}
-												</button>
-												<button
-													className="settings-button settings-task-card-save"
-													disabled={savingAiTaskConfig || !translationHasUnsavedChanges}
-													onClick={() => void handleSaveTranslationConfig()}
-													type="button"
-												>
-													{savingTranslationConfig ? "保存中..." : "保存翻译配置"}
-												</button>
-											</div>
-										</article>
-
-										<article
-											className="settings-editor-card settings-task-card"
-											id="prompts-rag-answer"
-											ref={bindSectionBlockRef("prompts-rag-answer")}
-										>
-											<div className="settings-task-card-header">
-												<div className="settings-acp-detail-copy">
-													<div className="settings-task-card-title-row">
-														<h3 className="settings-subsection-title">文档问答</h3>
-														<span
-															className={`settings-status-chip ${
-																questionAnswerHasUnsavedChanges ? "settings-status-chip-strong" : ""
-															}`}
-														>
-															{questionAnswerHasUnsavedChanges ? "有草稿" : "已同步"}
-														</span>
-													</div>
-													<span className="settings-help-text settings-help-text-tight">
-														这里只控制回答阶段。文档检索仍然使用 RAG 页里的 Embedding。
-													</span>
-												</div>
-											</div>
-											<div className="settings-item settings-item-stacked">
-												<label
-													className="settings-label settings-label-stacked"
-													htmlFor="question-answer-provider"
-												>
-													<span>问答模型</span>
-												</label>
-												<select
-													className="settings-select"
-													disabled={savingAiTaskConfig}
-													id="question-answer-provider"
-													onChange={(event) =>
-														handleLlmRouteProviderChange(
-															"questionAnswerProviderId",
-															event.target.value || null,
-														)
-													}
-													value={llmSettings.questionAnswerProviderId ?? ""}
-												>
-													<option value="">请选择一个普通 LLM 条目</option>
-													{eligibleAiTaskProviders.map((provider) => (
-														<option key={provider.id} value={provider.id}>
-															{provider.name || provider.model || provider.baseUrl}
-															{` · ${summarizeLlmProviderProfile(provider)}`}
-														</option>
-													))}
-												</select>
-												<span className="settings-help-text settings-help-text-tight">
-													当前条目：
-													{selectedQuestionAnswerProvider
-														? `${selectedQuestionAnswerProvider.name || selectedQuestionAnswerProvider.model || selectedQuestionAnswerProvider.baseUrl} · ${summarizeLlmProviderProfile(selectedQuestionAnswerProvider)}`
-														: "未配置"}
-												</span>
-												{eligibleAiTaskProviders.length === 0 ? (
-													<span className="settings-help-text settings-help-text-tight">
-														当前没有可选普通 LLM 条目。
-														<button
-															className="settings-text-link"
-															onClick={() => handleSelectSection("llm")}
-															type="button"
-														>
-															前往 LLM 配置
-														</button>
-													</span>
-												) : null}
-											</div>
-											<div className="settings-item settings-item-stacked">
-												<div className="settings-task-field-header">
-													<label
-														className="settings-label settings-label-stacked"
-														htmlFor="rag-answer-system-prompt"
-													>
-														<span>提示词</span>
-													</label>
-													<button
-														aria-controls="question-answer-prompt-panel"
-														aria-expanded={questionAnswerPromptExpanded}
-														className="settings-text-link"
-														onClick={() => setQuestionAnswerPromptExpanded((current) => !current)}
-														type="button"
-													>
-														{questionAnswerPromptExpanded ? "收起编辑" : "展开编辑"}
-													</button>
-												</div>
-												<span className="settings-help-text settings-help-text-tight">
-													{questionAnswerPromptSummary}
-												</span>
-												{questionAnswerPromptExpanded ? (
-													<div
-														className="settings-task-prompt-panel"
-														id="question-answer-prompt-panel"
-													>
-														<textarea
-															className="settings-textarea settings-task-prompt-textarea"
-															disabled={savingAiTaskConfig}
-															id="rag-answer-system-prompt"
-															onChange={(event) =>
-																setPromptsSettings((current) => ({
-																	...current,
-																	ragAnswerSystemPrompt: event.target.value,
-																}))
-															}
-															placeholder="留空并保存时会恢复内置默认提示词"
-															rows={6}
-															value={promptsSettings.ragAnswerSystemPrompt}
-														/>
-														<span className="settings-help-text settings-help-text-tight">
-															默认规则要求先取证，再区分事实与推断；证据不够时直接说明。
-														</span>
-													</div>
-												) : null}
-											</div>
-											<div className="settings-task-card-actions">
-												<button
-													className="settings-button settings-agent-secondary"
-													disabled={savingAiTaskConfig}
-													onClick={() =>
-														setPromptsSettings((current) => ({
-															...current,
-															ragAnswerSystemPrompt: defaultPromptsSettings.ragAnswerSystemPrompt,
-														}))
-													}
-													type="button"
-												>
-													恢复默认
-												</button>
-												<button
-													className="settings-button settings-agent-secondary"
-													disabled={savingAiTaskConfig || !questionAnswerHasUnsavedChanges}
-													onClick={handleDiscardQuestionAnswerDraft}
-													type="button"
-												>
-													{DISCARD_DRAFT_BUTTON_LABEL}
-												</button>
-												<button
-													className="settings-button settings-task-card-save"
-													disabled={savingAiTaskConfig || !questionAnswerHasUnsavedChanges}
-													onClick={() => void handleSaveQuestionAnswerConfig()}
-													type="button"
-												>
-													{savingQuestionAnswerConfig ? "保存中..." : "保存文档问答配置"}
-												</button>
-											</div>
-										</article>
-									</div>
-								</section>
+								<PromptsSettingsSection
+									bindSectionBlockRef={bindSectionBlockRef}
+									defaultQuestionAnswerPrompt={defaultPromptsSettings.ragAnswerSystemPrompt}
+									defaultTranslationPrompt={defaultPromptsSettings.translationPrompt}
+									eligibleAiTaskProviders={eligibleAiTaskProviders}
+									llmSettings={llmSettings}
+									onDiscardQuestionAnswerDraft={handleDiscardQuestionAnswerDraft}
+									onDiscardTranslationDraft={handleDiscardTranslationDraft}
+									onLlmRouteProviderChange={handleLlmRouteProviderChange}
+									onSaveQuestionAnswerConfig={handleSaveQuestionAnswerConfig}
+									onSaveTranslationConfig={handleSaveTranslationConfig}
+									onSelectSection={handleSelectSection}
+									promptsSettings={promptsSettings}
+									questionAnswerHasUnsavedChanges={questionAnswerHasUnsavedChanges}
+									questionAnswerPromptExpanded={questionAnswerPromptExpanded}
+									questionAnswerPromptSummary={questionAnswerPromptSummary}
+									savingAiTaskConfig={savingAiTaskConfig}
+									savingQuestionAnswerConfig={savingQuestionAnswerConfig}
+									savingTranslationConfig={savingTranslationConfig}
+									selectedQuestionAnswerProvider={selectedQuestionAnswerProvider}
+									selectedTranslationProvider={selectedTranslationProvider}
+									setPromptsSettings={setPromptsSettings}
+									setQuestionAnswerPromptExpanded={setQuestionAnswerPromptExpanded}
+									setTranslationPromptExpanded={setTranslationPromptExpanded}
+									summarizeLlmProviderProfile={summarizeLlmProviderProfile}
+									translationHasUnsavedChanges={translationHasUnsavedChanges}
+									translationPromptExpanded={translationPromptExpanded}
+									translationPromptSummary={translationPromptSummary}
+								/>
 							) : null}
 
 							{activeSection === "llm" ? (
-								<section
-									aria-labelledby={getSettingsTabId("llm")}
-									className="settings-section"
-									id={getSettingsPanelId("llm")}
-									role="tabpanel"
-									tabIndex={0}
-								>
-									{llmSettings.providers.length === 0 ? (
-										<div className="settings-editor-card settings-llm-empty-state">
-											<div className="settings-acp-sidebar-header">
-												<div className="settings-acp-sidebar-copy">
-													<span className="settings-section-kicker">开始配置</span>
-													<h3 className="settings-subsection-title">还没有 LLM 条目</h3>
-													<span className="settings-help-text settings-help-text-tight">
-														先新增一个普通 LLM 条目。翻译、文档问答和 OCR 都会引用这里的条目；RAG
-														索引则使用 Embedding 条目。
-													</span>
-												</div>
-												<button
-													className="settings-button"
-													onClick={handleAddLlmProvider}
-													type="button"
-												>
-													新增条目
-												</button>
-											</div>
-											<div className="settings-llm-empty-steps">
-												<div className="settings-llm-empty-step">
-													<strong>1. 先选配置类型</strong>
-													<span className="settings-agent-meta">
-														普通 LLM 用于翻译、问答和 OCR；Embedding 用于 RAG 建索引。
-													</span>
-												</div>
-												<div className="settings-llm-empty-step">
-													<strong>2. 再填接入信息</strong>
-													<span className="settings-agent-meta">
-														填写名称、Base URL、API Key 和模型名；需要时再套内置模板。
-													</span>
-												</div>
-											</div>
-										</div>
-									) : (
-										<div className="settings-acp-form-layout settings-llm-layout">
-											<aside
-												className="settings-acp-sidebar settings-acp-sidebar-secondary settings-llm-sidebar"
-												id="llm-catalog"
-												ref={bindSectionBlockRef("llm-catalog")}
-											>
-												<div className="settings-acp-sidebar-header">
-													<div className="settings-acp-sidebar-copy">
-														<span className="settings-section-kicker">已配置</span>
-														<h3 className="settings-subsection-title">LLM 条目</h3>
-														<span className="settings-help-text settings-help-text-tight">
-															每个条目只配置一个模型。新增条目后，可直接在右侧编辑卡顶部选择是否套用内置模板。
-														</span>
-													</div>
-													<button
-														className="settings-button settings-button-compact"
-														onClick={handleAddLlmProvider}
-														type="button"
-													>
-														新增
-													</button>
-												</div>
-
-												<div className="settings-llm-provider-grid">
-													{llmSettings.providers.map((provider) => {
-														const issueCount =
-															llmValidation.providerIssues[provider.id]?.length ?? 0;
-														const isSelected = provider.id === selectedLlmProviderId;
-														return (
-															<article
-																className={`settings-llm-provider-card ${isSelected ? "settings-llm-provider-card-selected" : ""} ${issueCount > 0 ? "settings-llm-provider-card-invalid" : ""}`}
-																key={provider.id}
-															>
-																<button
-																	aria-pressed={isSelected}
-																	className="settings-llm-provider-card-main"
-																	onClick={() => handleSelectLlmProvider(provider.id)}
-																	type="button"
-																>
-																	<div className="settings-llm-provider-card-header">
-																		<span className="settings-section-kicker">模型条目</span>
-																		<div className="settings-llm-provider-card-badges">
-																			{llmSettings.translationProviderId === provider.id ? (
-																				<span className="settings-status-chip settings-status-chip-strong">
-																					翻译
-																				</span>
-																			) : null}
-																			{llmSettings.questionAnswerProviderId === provider.id ? (
-																				<span className="settings-status-chip settings-status-chip-strong">
-																					问答
-																				</span>
-																			) : null}
-																			{providerCanHandleOcr(provider) ? (
-																				<span className="settings-status-chip">多模态</span>
-																			) : null}
-																			{issueCount > 0 ? (
-																				<span className="settings-llm-provider-card-issue-badge">
-																					{issueCount} 个问题
-																				</span>
-																			) : null}
-																		</div>
-																	</div>
-
-																	<div className="settings-agent-title-wrap">
-																		<strong className="settings-agent-name">
-																			{provider.name.trim() || "未命名模型条目"}
-																		</strong>
-																		<span className="settings-agent-meta">
-																			{provider.baseUrl.trim() || "未设置 Base URL"}
-																		</span>
-																	</div>
-
-																	<div className="settings-llm-provider-card-model-grid">
-																		<div
-																			className={`settings-llm-provider-card-model settings-llm-provider-card-model-${provider.modelType}`}
-																		>
-																			<span className="settings-llm-provider-card-model-label">
-																				{getLlmProviderKindLabel(getLlmProviderKind(provider))}
-																			</span>
-																			<span className="settings-agent-command-preview">
-																				{provider.model.trim() || "未配置模型"}
-																			</span>
-																		</div>
-																	</div>
-
-																	<span className="settings-agent-meta">
-																		{summarizeLlmProviderProfile(provider)}
-																	</span>
-																</button>
-															</article>
-														);
-													})}
-												</div>
-											</aside>
-
-											<div
-												className="settings-acp-detail settings-llm-detail"
-												id="llm-editor"
-												ref={bindSectionBlockRef("llm-editor")}
-											>
-												<>
-													<SettingsDraftActionCard
-														actions={
-															<>
-																{llmValidation.totalIssues > 0 ? (
-																	<button
-																		className="settings-button settings-agent-secondary"
-																		onClick={locateFirstLlmIssue}
-																		type="button"
-																	>
-																		定位问题
-																	</button>
-																) : null}
-																<button
-																	className="settings-button settings-agent-secondary"
-																	disabled={savingLlm || !llmHasUnsavedChanges}
-																	onClick={handleDiscardLlmDraft}
-																	type="button"
-																>
-																	{DISCARD_DRAFT_BUTTON_LABEL}
-																</button>
-																<button
-																	className="settings-button"
-																	disabled={savingLlm || !llmHasUnsavedChanges}
-																	onClick={() => void handleSaveLlm()}
-																	type="button"
-																>
-																	{savingLlm ? "保存中..." : "保存 LLM 配置"}
-																</button>
-															</>
-														}
-														description={
-															llmHasUnsavedChanges
-																? "当前 LLM 草稿尚未写回配置。"
-																: "LLM 配置已同步到本地配置文件。"
-														}
-														title={llmHasUnsavedChanges ? "有未保存的 LLM 草稿" : "LLM 配置已同步"}
-													/>
-													{selectedLlmProvider ? (
-														<>
-															<div
-																className={`settings-llm-editor-hero settings-llm-editor-hero-${selectedLlmProvider.modelType}`}
-															>
-																<div className="settings-llm-editor-hero-copy">
-																	<span className="settings-section-kicker">编辑</span>
-																	<h3 className="settings-subsection-title">
-																		{selectedLlmProvider.name.trim() || "LLM 条目"}
-																	</h3>
-																	<div className="settings-llm-editor-hero-meta">
-																		<span>
-																			{selectedLlmProvider.baseUrl.trim() || "未设置 Base URL"}
-																		</span>
-																		<span>{selectedLlmProvider.model.trim() || "未配置模型"}</span>
-																	</div>
-																	<div className="settings-llm-editor-hero-badges">
-																		<span
-																			className={`settings-llm-hero-type settings-llm-hero-type-${selectedLlmProvider.modelType}`}
-																		>
-																			{getLlmProviderKindLabel(
-																				selectedLlmProviderKind ?? "embedding",
-																			)}
-																		</span>
-																		{llmSettings.translationProviderId ===
-																		selectedLlmProvider.id ? (
-																			<span className="settings-status-chip settings-status-chip-strong">
-																				翻译 LLM
-																			</span>
-																		) : null}
-																		{llmSettings.questionAnswerProviderId ===
-																		selectedLlmProvider.id ? (
-																			<span className="settings-status-chip settings-status-chip-strong">
-																				问答 LLM
-																			</span>
-																		) : null}
-																		{providerCanHandleOcr(selectedLlmProvider) ? (
-																			<span className="settings-status-chip">多模态</span>
-																		) : null}
-																	</div>
-																</div>
-																<button
-																	className="settings-button settings-agent-remove-inline"
-																	onClick={() => handleRemoveLlmProvider(selectedLlmProvider.id)}
-																	type="button"
-																>
-																	删除
-																</button>
-															</div>
-
-															<div className="settings-llm-editor-grid">
-																<div className="settings-llm-editor-main">
-																	<div className="settings-llm-editor-panel">
-																		<div className="settings-item settings-item-stacked">
-																			<label
-																				className="settings-label settings-label-stacked"
-																				htmlFor="llm-provider-template"
-																			>
-																				<span>使用模板</span>
-																			</label>
-																			<select
-																				className="settings-select"
-																				disabled={savingLlm}
-																				id="llm-provider-template"
-																				onChange={(event) =>
-																					handleLlmProviderTemplateChange(
-																						selectedLlmProvider.id,
-																						event.target.value,
-																					)
-																				}
-																				value={selectedLlmProvider.builtinPresetId ?? ""}
-																			>
-																				<option value="">不使用模板</option>
-																				{builtinLlmTemplates.map((template) => (
-																					<option key={template.id} value={template.id}>
-																						{template.displayName}
-																					</option>
-																				))}
-																			</select>
-																			<span className="settings-help-text settings-help-text-tight">
-																				{selectedLlmProviderIsBuiltin
-																					? "当前条目已绑定模板；模型只能从模板白名单里选。切回“不使用模板”会保留当前字段值，但解除模板约束。"
-																					: "选择后会自动填入 Base URL、协议、默认模型和能力约束。"}
-																			</span>
-																		</div>
-
-																		<div className="settings-item settings-item-stacked">
-																			<label
-																				className="settings-label settings-label-stacked"
-																				htmlFor="llm-provider-kind"
-																			>
-																				<span>配置类型</span>
-																			</label>
-																			<select
-																				className="settings-select"
-																				disabled={savingLlm || selectedLlmProviderIsBuiltin}
-																				id="llm-provider-kind"
-																				onChange={(event) =>
-																					handleLlmProviderKindChange(
-																						selectedLlmProvider.id,
-																						event.target.value as LlmProviderKind,
-																					)
-																				}
-																				value={selectedLlmProviderKind ?? "embedding"}
-																			>
-																				<option value="llm_responses_stateless">
-																					LLM · responses stateless
-																				</option>
-																				<option value="llm_responses_stateful">
-																					LLM · responses stateful
-																				</option>
-																				<option value="llm_chat_completions">
-																					LLM · chat/completions
-																				</option>
-																				<option value="embedding">Embedding</option>
-																			</select>
-																			{selectedLlmProviderIsBuiltin ? (
-																				<span className="settings-help-text settings-help-text-tight">
-																					内置模板条目的配置类型跟随目录模型，不能手动改协议类型。
-																				</span>
-																			) : null}
-																		</div>
-
-																		<div className="settings-item settings-item-stacked">
-																			<label
-																				className="settings-label settings-label-stacked"
-																				htmlFor="llm-provider-name"
-																			>
-																				<span>名称</span>
-																			</label>
-																			<input
-																				aria-describedby={joinDescribedByIds(
-																					selectedLlmFieldIssues.name
-																						? buildFieldIssueId(
-																								"llm",
-																								"name",
-																								selectedLlmProvider.id,
-																							)
-																						: undefined,
-																				)}
-																				aria-invalid={
-																					selectedLlmFieldIssues.name ? true : undefined
-																				}
-																				className="settings-input settings-input-wide"
-																				disabled={savingLlm}
-																				id="llm-provider-name"
-																				onChange={(event) =>
-																					handleLlmProviderFieldChange(
-																						selectedLlmProvider.id,
-																						"name",
-																						event.target.value,
-																					)
-																				}
-																				ref={bindLlmFieldRef(selectedLlmProvider.id, "name")}
-																				type="text"
-																				value={selectedLlmProvider.name}
-																			/>
-																			{selectedLlmFieldIssues.name ? (
-																				<span
-																					className="settings-field-error"
-																					id={buildFieldIssueId(
-																						"llm",
-																						"name",
-																						selectedLlmProvider.id,
-																					)}
-																				>
-																					{selectedLlmFieldIssues.name}
-																				</span>
-																			) : null}
-																		</div>
-
-																		<div className="settings-item settings-item-stacked">
-																			<label
-																				className="settings-label settings-label-stacked"
-																				htmlFor="llm-provider-base-url"
-																			>
-																				<span>API Base URL</span>
-																			</label>
-																			<input
-																				aria-describedby={joinDescribedByIds(
-																					selectedLlmFieldIssues.baseUrl
-																						? buildFieldIssueId(
-																								"llm",
-																								"base-url",
-																								selectedLlmProvider.id,
-																							)
-																						: undefined,
-																				)}
-																				aria-invalid={
-																					selectedLlmFieldIssues.baseUrl ? true : undefined
-																				}
-																				className="settings-input settings-input-wide settings-input-mono"
-																				disabled={
-																					savingLlm ||
-																					(selectedLlmProviderIsBuiltin &&
-																						selectedLlmProvider.managedBaseUrl)
-																				}
-																				id="llm-provider-base-url"
-																				onChange={(event) =>
-																					handleLlmProviderFieldChange(
-																						selectedLlmProvider.id,
-																						"baseUrl",
-																						event.target.value,
-																					)
-																				}
-																				placeholder="https://api.openai.com/v1"
-																				ref={bindLlmFieldRef(selectedLlmProvider.id, "baseUrl")}
-																				type="text"
-																				value={selectedLlmProvider.baseUrl}
-																			/>
-																			{selectedLlmProviderIsBuiltin ? (
-																				<span className="settings-help-text settings-help-text-tight">
-																					{selectedLlmProvider.managedBaseUrl ? (
-																						<>
-																							当前使用模板默认接入点。
-																							<button
-																								className="settings-text-link"
-																								onClick={() =>
-																									handleBuiltinProviderManagedBaseUrlChange(
-																										selectedLlmProvider.id,
-																										false,
-																									)
-																								}
-																								type="button"
-																							>
-																								改为自定义接入点
-																							</button>
-																						</>
-																					) : (
-																						<>
-																							当前已脱离模板默认接入点管理。
-																							<button
-																								className="settings-text-link"
-																								onClick={() =>
-																									handleBuiltinProviderManagedBaseUrlChange(
-																										selectedLlmProvider.id,
-																										true,
-																									)
-																								}
-																								type="button"
-																							>
-																								恢复模板默认接入点
-																							</button>
-																						</>
-																					)}
-																				</span>
-																			) : null}
-																			{selectedLlmFieldIssues.baseUrl ? (
-																				<span
-																					className="settings-field-error"
-																					id={buildFieldIssueId(
-																						"llm",
-																						"base-url",
-																						selectedLlmProvider.id,
-																					)}
-																				>
-																					{selectedLlmFieldIssues.baseUrl}
-																				</span>
-																			) : null}
-																		</div>
-
-																		<div className="settings-item settings-item-stacked">
-																			<label
-																				className="settings-label settings-label-stacked"
-																				htmlFor="llm-provider-api-key"
-																			>
-																				<span>API Key</span>
-																			</label>
-																			<input
-																				autoComplete="off"
-																				className="settings-input settings-input-wide settings-input-mono"
-																				disabled={savingLlm}
-																				id="llm-provider-api-key"
-																				onChange={(event) =>
-																					handleLlmProviderFieldChange(
-																						selectedLlmProvider.id,
-																						"apiKey",
-																						event.target.value,
-																					)
-																				}
-																				placeholder="sk-..."
-																				type="password"
-																				value={selectedLlmProvider.apiKey}
-																			/>
-																		</div>
-
-																		<div
-																			className="settings-item settings-item-stacked"
-																			ref={llmModelMenuRef}
-																		>
-																			<label
-																				className="settings-label settings-label-stacked"
-																				htmlFor="llm-provider-model"
-																			>
-																				<span>模型名</span>
-																			</label>
-																			<div className="settings-llm-model-picker">
-																				<div className="settings-llm-model-input-row">
-																					<input
-																						aria-describedby={joinDescribedByIds(
-																							selectedLlmFieldIssues.model
-																								? buildFieldIssueId(
-																										"llm",
-																										"model",
-																										selectedLlmProvider.id,
-																									)
-																								: undefined,
-																							"llm-provider-model-help",
-																						)}
-																						aria-invalid={
-																							selectedLlmFieldIssues.model ? true : undefined
-																						}
-																						aria-controls={
-																							openLlmModelPickerId ===
-																							buildLlmModelPickerId(selectedLlmProvider.id, "model")
-																								? "llm-provider-model-menu"
-																								: undefined
-																						}
-																						aria-expanded={
-																							openLlmModelPickerId ===
-																							buildLlmModelPickerId(selectedLlmProvider.id, "model")
-																						}
-																						aria-haspopup="listbox"
-																						className="settings-input settings-input-wide settings-input-mono"
-																						disabled={savingLlm}
-																						id="llm-provider-model"
-																						onChange={
-																							selectedLlmProviderIsBuiltin
-																								? undefined
-																								: (event) =>
-																										handleLlmProviderFieldChange(
-																											selectedLlmProvider.id,
-																											"model",
-																											event.target.value,
-																										)
-																						}
-																						onKeyDown={(event) =>
-																							handleLlmModelInputKeyDown(
-																								event,
-																								selectedLlmProvider,
-																								"model",
-																							)
-																						}
-																						placeholder={getLlmProviderModelPlaceholder(
-																							selectedLlmProvider,
-																						)}
-																						readOnly={selectedLlmProviderIsBuiltin}
-																						ref={bindLlmFieldRef(selectedLlmProvider.id, "model")}
-																						type="text"
-																						value={selectedLlmProvider.model}
-																					/>
-																					<button
-																						aria-expanded={
-																							openLlmModelPickerId ===
-																							buildLlmModelPickerId(selectedLlmProvider.id, "model")
-																						}
-																						aria-haspopup="listbox"
-																						aria-label={
-																							selectedLlmProviderIsBuiltin
-																								? "展开模板白名单模型"
-																								: selectedLlmProviderModels.length > 0
-																									? "展开模型列表"
-																									: "通过 /models 拉取模型列表"
-																						}
-																						className="settings-button settings-llm-model-toggle"
-																						disabled={
-																							savingLlm ||
-																							(!selectedLlmProviderIsBuiltin &&
-																								!selectedLlmProvider.baseUrl.trim())
-																						}
-																						onClick={() =>
-																							void handleToggleLlmModelMenu(
-																								selectedLlmProvider,
-																								"model",
-																							)
-																						}
-																						type="button"
-																					>
-																						{isLoadingSelectedLlmProviderModels ? "..." : "▾"}
-																					</button>
-																				</div>
-																				{openLlmModelPickerId ===
-																				buildLlmModelPickerId(selectedLlmProvider.id, "model") ? (
-																					<div
-																						className="settings-combobox-panel settings-llm-model-panel"
-																						id="llm-provider-model-menu"
-																						role="listbox"
-																					>
-																						<div className="settings-llm-model-panel-header">
-																							<span className="settings-combobox-option-meta">
-																								{selectedLlmProviderIsBuiltin
-																									? `目录可选 ${selectedBuiltinLlmSelectableModels.length} 个模型`
-																									: `已拉取 ${selectedLlmProviderModels.length} 个模型`}
-																							</span>
-																							{selectedLlmProviderIsBuiltin ? null : (
-																								<button
-																									className="settings-button settings-llm-model-refresh"
-																									disabled={
-																										savingLlm || isLoadingSelectedLlmProviderModels
-																									}
-																									onClick={() =>
-																										void handleFetchLlmProviderModels(
-																											selectedLlmProvider,
-																											{
-																												openField: "model",
-																											},
-																										)
-																									}
-																									type="button"
-																								>
-																									刷新
-																								</button>
-																							)}
-																						</div>
-																						{selectedLlmProviderIsBuiltin
-																							? selectedBuiltinLlmSelectableModels.map((model) => (
-																									<button
-																										aria-selected={
-																											selectedLlmProvider.builtinPresetModelId ===
-																											model.id
-																										}
-																										className={`settings-combobox-option ${
-																											selectedLlmProvider.builtinPresetModelId ===
-																											model.id
-																												? "settings-combobox-option-active"
-																												: ""
-																										}`}
-																										key={model.id}
-																										onClick={() =>
-																											handleBuiltinTemplateModelChange(
-																												selectedLlmProvider.id,
-																												model.id,
-																											)
-																										}
-																										role="option"
-																										type="button"
-																									>
-																										<span className="settings-combobox-option-label">
-																											{model.displayName}
-																										</span>
-																										<span className="settings-combobox-option-meta">
-																											{model.summary}
-																										</span>
-																									</button>
-																								))
-																							: selectedLlmProviderModels.map((model) => (
-																									<button
-																										aria-selected={
-																											selectedLlmProvider.model === model.id
-																										}
-																										className={`settings-combobox-option ${
-																											selectedLlmProvider.model === model.id
-																												? "settings-combobox-option-active"
-																												: ""
-																										}`}
-																										key={model.id}
-																										onClick={() =>
-																											handleLlmModelOptionClick(
-																												selectedLlmProvider.id,
-																												"model",
-																												model,
-																											)
-																										}
-																										role="option"
-																										type="button"
-																									>
-																										<span className="settings-combobox-option-label">
-																											{model.id}
-																										</span>
-																										<span className="settings-combobox-option-meta">
-																											{selectedLlmProvider.model === model.id
-																												? "当前已选"
-																												: "点击填入输入框"}
-																										</span>
-																									</button>
-																								))}
-																					</div>
-																				) : null}
-																			</div>
-																			<span
-																				className="settings-help-text settings-help-text-tight"
-																				id="llm-provider-model-help"
-																			>
-																				{selectedLlmProviderIsBuiltin
-																					? (selectedBuiltinLlmTemplateModel?.summary ??
-																						"请选择模板白名单中的模型。")
-																					: isLoadingSelectedLlmProviderModels
-																						? "正在从当前 Base URL 拉取模型列表。"
-																						: selectedLlmProviderModelsError
-																							? selectedLlmProviderModelsError
-																							: selectedLlmProviderModels.length > 0
-																								? `已拉取 ${selectedLlmProviderModels.length} 个模型。右侧下拉按钮可直接选，输入框仍可手填列表里没有的模型。`
-																								: "先填写 Base URL 和 API Key，再点右侧下拉按钮请求 /models；如果服务不要求鉴权，API Key 可以留空。"}
-																			</span>
-																			{selectedLlmFieldIssues.model ? (
-																				<span
-																					className="settings-field-error"
-																					id={buildFieldIssueId(
-																						"llm",
-																						"model",
-																						selectedLlmProvider.id,
-																					)}
-																				>
-																					{selectedLlmFieldIssues.model}
-																				</span>
-																			) : null}
-																		</div>
-																	</div>
-																</div>
-																<div className="settings-llm-editor-side">
-																	<div className="settings-llm-usage-card">
-																		<div className="settings-acp-detail-copy">
-																			<span className="settings-section-kicker">用途</span>
-																			<strong className="settings-agent-name">
-																				{providerIsEmbeddingModel(selectedLlmProvider)
-																					? "RAG Embedding"
-																					: "通用 LLM"}
-																			</strong>
-																			<span className="settings-agent-meta">
-																				{getLlmProviderUsageDescription(selectedLlmProvider)}
-																			</span>
-																		</div>
-																		<div className="settings-llm-usage-badges">
-																			{getLlmProviderUsageBadges(selectedLlmProvider).map(
-																				(badge) => (
-																					<span className="settings-status-chip" key={badge}>
-																						{badge}
-																					</span>
-																				),
-																			)}
-																		</div>
-																	</div>
-
-																	{selectedBuiltinLlmTemplate ? (
-																		<div className="settings-llm-usage-card">
-																			<div className="settings-acp-detail-copy">
-																				<span className="settings-section-kicker">内置模板</span>
-																				<strong className="settings-agent-name">
-																					{selectedBuiltinLlmTemplate.displayName}
-																				</strong>
-																				<span className="settings-agent-meta">
-																					{selectedBuiltinLlmTemplate.description}
-																				</span>
-																			</div>
-																			<div className="settings-llm-usage-badges">
-																				<button
-																					className="settings-text-link"
-																					onClick={() =>
-																						void openUrl(selectedBuiltinLlmTemplate.registrationUrl)
-																					}
-																					type="button"
-																				>
-																					注册 / 登录
-																				</button>
-																				<button
-																					className="settings-text-link"
-																					onClick={() =>
-																						void openUrl(selectedBuiltinLlmTemplate.apiKeyUrl)
-																					}
-																					type="button"
-																				>
-																					API Key 页面
-																				</button>
-																				<button
-																					className="settings-text-link"
-																					onClick={() =>
-																						void openUrl(selectedBuiltinLlmTemplate.docsUrl)
-																					}
-																					type="button"
-																				>
-																					官方文档
-																				</button>
-																			</div>
-																		</div>
-																	) : null}
-
-																	{providerIsLlmModel(selectedLlmProvider) ? (
-																		<div className="settings-llm-capability-panel">
-																			<div className="settings-acp-detail-copy">
-																				<span className="settings-section-kicker">能力</span>
-																				<strong className="settings-agent-name">
-																					{getLlmProviderKindLabel(
-																						selectedLlmProviderKind ?? "embedding",
-																					)}
-																				</strong>
-																				<span className="settings-agent-meta">
-																					{selectedLlmProviderKind === "llm_responses_stateful"
-																						? "当前是 responses 的 stateful 页面；续问时会优先复用上一轮 response_id。"
-																						: selectedLlmProviderKind === "llm_responses_stateless"
-																							? "当前是 responses 的 stateless 页面；续问时固定回退到显式历史。"
-																							: "chat/completions 页面不支持 response_id 续链，可用于翻译和问答，但不会进入 OCR 列表。"}
-																				</span>
-																			</div>
-																			{selectedLlmProviderKind === "llm_chat_completions" ? (
-																				<div className="settings-acp-detail-copy">
-																					<span className="settings-agent-meta">
-																						这个页面没有额外能力开关。翻译和问答都会固定走
-																						chat/completions；继续追问时回退到显式历史。
-																					</span>
-																				</div>
-																			) : (
-																				<div className="settings-llm-capability-grid">
-																					<label className="settings-llm-capability-card">
-																						<div className="settings-llm-capability-copy">
-																							<strong>多模态</strong>
-																							<span className="settings-agent-meta">
-																								启用后条目才会进入 OCR 可选列表。
-																							</span>
-																						</div>
-																						<input
-																							checked={selectedLlmProvider.supportsMultimodal}
-																							className="settings-toggle"
-																							disabled={
-																								savingLlm ||
-																								!providerHasResponsesModel(selectedLlmProvider)
-																							}
-																							onChange={(event) =>
-																								handleLlmProviderFieldChange(
-																									selectedLlmProvider.id,
-																									"supportsMultimodal",
-																									event.target.checked,
-																								)
-																							}
-																							type="checkbox"
-																						/>
-																					</label>
-																				</div>
-																			)}
-																		</div>
-																	) : (
-																		<div className="settings-llm-capability-panel settings-llm-capability-panel-passive">
-																			<div className="settings-acp-detail-copy">
-																				<span className="settings-section-kicker">能力</span>
-																				<strong className="settings-agent-name">
-																					Embedding 约束
-																				</strong>
-																				<span className="settings-agent-meta">
-																					Embedding 条目不会出现在翻译 LLM、问答 LLM 或 OCR
-																					列表，也不会启用多模态或 stateful 续链。
-																				</span>
-																			</div>
-																		</div>
-																	)}
-
-																	{selectedBuiltinLlmTemplate ? (
-																		<div className="settings-llm-capability-panel">
-																			<div className="settings-acp-detail-copy">
-																				<span className="settings-section-kicker">目录模型</span>
-																				<strong className="settings-agent-name">
-																					{selectedBuiltinLlmTemplate.models.length} 个模型
-																				</strong>
-																				<span className="settings-agent-meta">
-																					目录会列出模板里的全部模型；只有当前应用支持的模型会进入选择下拉框。
-																				</span>
-																			</div>
-																			<div className="settings-llm-model-card-grid">
-																				{selectedBuiltinLlmTemplate.models.map((model) => (
-																					<div className="settings-llm-model-card" key={model.id}>
-																						<div className="settings-llm-model-card-header">
-																							<strong className="settings-llm-model-card-title">
-																								{model.displayName}
-																							</strong>
-																							<span className="settings-status-chip">
-																								{model.selectableInCurrentApp ? "可选" : "暂不支持"}
-																							</span>
-																						</div>
-																						<span className="settings-agent-command-preview">
-																							{model.model}
-																						</span>
-																						<span className="settings-agent-meta">
-																							{model.summary}
-																						</span>
-																						{model.disabledReason ? (
-																							<span className="settings-help-text settings-help-text-tight">
-																								{model.disabledReason}
-																							</span>
-																						) : null}
-																					</div>
-																				))}
-																			</div>
-																		</div>
-																	) : null}
-
-																	{selectedLlmProviderTriggersRagReindex ? (
-																		<div className="settings-validation-box settings-banner-warn">
-																			{selectedLlmProviderUsedByPersistedRag
-																				? "这个条目当前正被 RAG 用作 embedding。修改 Base URL 或模型并保存 LLM 配置后，现有文档向量会按新的建索引目标重新生成。"
-																				: "当前 RAG 草稿引用了这个 embedding 条目。后续保存并应用该 RAG 配置时，如果这里的 Base URL 或模型发生变化，会按新的建索引目标重新生成文档向量。"}
-																		</div>
-																	) : null}
-																</div>
-															</div>
-
-															{selectedLlmIssueCount > 0 ? (
-																<div className="settings-validation-box settings-banner-error">
-																	<ul className="settings-issue-list">
-																		{(
-																			llmValidation.providerIssues[selectedLlmProvider.id] ?? []
-																		).map((issue) => (
-																			<li key={issue}>{issue}</li>
-																		))}
-																	</ul>
-																</div>
-															) : null}
-														</>
-													) : (
-														<div className="settings-empty-panel">
-															<strong className="settings-empty-title">
-																没有可编辑的 LLM 条目
-															</strong>
-															<span className="settings-help-text settings-help-text-tight">
-																左侧新增一个条目后，先选配置类型，再补全名称、Base URL 和模型名。
-															</span>
-														</div>
-													)}
-												</>
-											</div>
-										</div>
-									)}
-								</section>
+								<LlmSettingsSection
+									bindLlmFieldRef={bindLlmFieldRef}
+									bindSectionBlockRef={bindSectionBlockRef}
+									buildLlmModelPickerId={buildLlmModelPickerId}
+									builtinLlmTemplates={builtinLlmTemplates}
+									getLlmProviderKind={getLlmProviderKind}
+									getLlmProviderKindLabel={getLlmProviderKindLabel}
+									getLlmProviderModelPlaceholder={getLlmProviderModelPlaceholder}
+									getLlmProviderUsageBadges={getLlmProviderUsageBadges}
+									getLlmProviderUsageDescription={getLlmProviderUsageDescription}
+									isLoadingSelectedLlmProviderModels={isLoadingSelectedLlmProviderModels}
+									llmHasUnsavedChanges={llmHasUnsavedChanges}
+									llmModelMenuRef={llmModelMenuRef}
+									llmSettings={llmSettings}
+									llmValidation={llmValidation}
+									onAddLlmProvider={handleAddLlmProvider}
+									onBuiltinProviderManagedBaseUrlChange={handleBuiltinProviderManagedBaseUrlChange}
+									onBuiltinTemplateModelChange={handleBuiltinTemplateModelChange}
+									onDiscardLlmDraft={handleDiscardLlmDraft}
+									onFetchLlmProviderModels={handleFetchLlmProviderModels}
+									onLlmModelInputKeyDown={handleLlmModelInputKeyDown}
+									onLlmModelOptionClick={handleLlmModelOptionClick}
+									onLlmProviderFieldChange={handleLlmProviderFieldChange}
+									onLlmProviderKindChange={handleLlmProviderKindChange}
+									onLlmProviderTemplateChange={handleLlmProviderTemplateChange}
+									onLocateFirstLlmIssue={locateFirstLlmIssue}
+									onOpenUrl={(url) => void openUrl(url)}
+									onRemoveLlmProvider={handleRemoveLlmProvider}
+									onSaveLlm={handleSaveLlm}
+									onSelectLlmProvider={handleSelectLlmProvider}
+									onToggleLlmModelMenu={handleToggleLlmModelMenu}
+									openLlmModelPickerId={openLlmModelPickerId}
+									providerCanHandleOcr={providerCanHandleOcr}
+									providerHasResponsesModel={providerHasResponsesModel}
+									providerIsLlmModel={providerIsLlmModel}
+									savingLlm={savingLlm}
+									selectedBuiltinLlmSelectableModels={selectedBuiltinLlmSelectableModels}
+									selectedBuiltinLlmTemplate={selectedBuiltinLlmTemplate}
+									selectedBuiltinLlmTemplateModel={selectedBuiltinLlmTemplateModel}
+									selectedLlmFieldIssues={selectedLlmFieldIssues}
+									selectedLlmProvider={selectedLlmProvider}
+									selectedLlmProviderId={selectedLlmProviderId}
+									selectedLlmProviderIsBuiltin={selectedLlmProviderIsBuiltin}
+									selectedLlmProviderKind={selectedLlmProviderKind}
+									selectedLlmProviderModels={selectedLlmProviderModels}
+									selectedLlmProviderModelsError={selectedLlmProviderModelsError}
+									selectedLlmProviderTriggersRagReindex={selectedLlmProviderTriggersRagReindex}
+									selectedLlmProviderUsedByPersistedRag={selectedLlmProviderUsedByPersistedRag}
+									summarizeLlmProviderProfile={summarizeLlmProviderProfile}
+								/>
 							) : null}
 
 							{activeSection === "rag" ? (
-								<section
-									aria-labelledby={getSettingsTabId("rag")}
-									className="settings-section"
-									id={getSettingsPanelId("rag")}
-									role="tabpanel"
-									tabIndex={0}
-								>
-									<div className="settings-acp-form-layout settings-rag-layout">
-										<aside
-											className="settings-acp-sidebar settings-acp-sidebar-secondary settings-rag-sidebar"
-											id="rag-summary"
-											ref={bindSectionBlockRef("rag-summary")}
-										>
-											<div className="settings-acp-sidebar-header">
-												<div className="settings-acp-sidebar-copy">
-													<span className="settings-section-kicker">当前配置</span>
-													<h3 className="settings-subsection-title">RAG Index</h3>
-													<span className="settings-help-text settings-help-text-tight">
-														RAG 只关心三个输入：Embedding 条目、扫描目录和忽略规则。
-													</span>
-												</div>
-											</div>
-
-											<div className="settings-rag-sidebar-stack">
-												<div className="settings-rag-summary-card settings-rag-summary-card-primary">
-													<div className="settings-rag-summary-header">
-														<span className="settings-section-kicker">Embedding</span>
-														<span
-															className={`settings-status-chip ${ragHasUnsavedChanges ? "settings-status-chip-strong" : ""}`}
-														>
-															{ragHasUnsavedChanges ? "未保存" : "已同步"}
-														</span>
-													</div>
-													<strong className="settings-agent-name">
-														{selectedRagEmbeddingProviderLabel}
-													</strong>
-													<span className="settings-agent-meta">
-														{selectedRagEmbeddingProvider
-															? `${selectedRagEmbeddingProvider.model} · ${selectedRagEmbeddingProvider.baseUrl}`
-															: eligibleRagEmbeddingProviders.length > 0
-																? "右侧选择一个 Embedding 条目后，RAG 才能建立索引。"
-																: "当前没有可用于 RAG 的 Embedding 条目，先去 LLM 页面新增一个。"}
-													</span>
-													<div className="settings-rag-summary-metric-grid">
-														<div className="settings-rag-summary-metric">
-															<span className="settings-rag-summary-value">
-																{ragSourceDirectoryCount}
-															</span>
-															<span className="settings-agent-meta">扫描目录</span>
-														</div>
-														<div className="settings-rag-summary-metric">
-															<span className="settings-rag-summary-value">
-																{ragIgnoreGlobCount}
-															</span>
-															<span className="settings-agent-meta">忽略规则</span>
-														</div>
-														<div className="settings-rag-summary-metric">
-															<span className="settings-rag-summary-value">
-																{ragSupportedFileExtensions.length}
-															</span>
-															<span className="settings-agent-meta">支持后缀</span>
-														</div>
-														<div className="settings-rag-summary-metric">
-															<span className="settings-rag-summary-value">
-																{ragValidation.totalIssues}
-															</span>
-															<span className="settings-agent-meta">校验问题</span>
-														</div>
-													</div>
-												</div>
-
-												<div className="settings-rag-summary-card settings-rag-summary-card-muted">
-													<div className="settings-acp-detail-copy">
-														<span className="settings-section-kicker">支持范围</span>
-														<strong className="settings-agent-name">文本后缀</strong>
-														<span className="settings-agent-meta">
-															只有这些后缀、可读、UTF-8、且不超过 50 MB
-															的文本文件才会进入切分和向量化。
-														</span>
-													</div>
-													<div className="settings-rag-chip-group">
-														{ragSupportedFileExtensions.map((extension) => (
-															<span className="settings-status-chip" key={extension}>
-																.{extension}
-															</span>
-														))}
-													</div>
-												</div>
-											</div>
-										</aside>
-
-										<div
-											className="settings-acp-detail settings-rag-detail"
-											id="rag-pipeline"
-											ref={bindSectionBlockRef("rag-pipeline")}
-										>
-											<SettingsDraftActionCard
-												actions={
-													<>
-														{ragValidation.totalIssues > 0 ? (
-															<button
-																className="settings-button settings-agent-secondary"
-																onClick={locateFirstRagIssue}
-																type="button"
-															>
-																定位问题
-															</button>
-														) : null}
-														<button
-															className="settings-button settings-agent-secondary"
-															disabled={savingRag || scanningRag || !ragHasUnsavedChanges}
-															onClick={handleDiscardRagDraft}
-															type="button"
-														>
-															{DISCARD_DRAFT_BUTTON_LABEL}
-														</button>
-														<button
-															className="settings-button settings-agent-secondary"
-															disabled={savingRag || scanningRag}
-															onClick={() => void handleScanRag()}
-															type="button"
-														>
-															{scanningRag ? "扫描中..." : "立即重建索引"}
-														</button>
-														<button
-															className="settings-button"
-															disabled={savingRag || scanningRag || !ragHasUnsavedChanges}
-															onClick={() => void handleSaveRag()}
-															type="button"
-														>
-															{savingRag ? "保存中..." : "保存 RAG 配置"}
-														</button>
-													</>
-												}
-												description={
-													ragHasUnsavedChanges
-														? "当前 RAG 草稿尚未写回配置。"
-														: "RAG 配置已同步到本地配置文件。"
-												}
-												title={ragHasUnsavedChanges ? "有未保存的 RAG 草稿" : "RAG 配置已同步"}
-											/>
-											<div className="settings-rag-hero">
-												<div className="settings-rag-hero-copy">
-													<span className="settings-section-kicker">Index Pipeline</span>
-													<h3 className="settings-subsection-title">LanceDB 文档索引</h3>
-													<span className="settings-help-text settings-help-text-tight">
-														保存后会按当前配置启动目录监听。初次扫描和后续变更都会重新切分文本、调用
-														embedding 模型，并用新向量覆盖旧索引。
-													</span>
-													<div className="settings-rag-hero-meta">
-														<span>{`Embedding：${selectedRagEmbeddingProviderLabel}`}</span>
-														<span>{`目录：${ragSourceDirectoryCount}`}</span>
-														<span>{`忽略规则：${ragIgnoreGlobCount}`}</span>
-													</div>
-												</div>
-												<div className="settings-rag-hero-badges">
-													<span className="settings-status-chip">目录监听</span>
-													<span className="settings-status-chip">结构切分</span>
-													<span className="settings-status-chip">向量覆盖</span>
-												</div>
-											</div>
-
-											<div className="settings-rag-editor-grid">
-												<div className="settings-rag-editor-main">
-													<div className="settings-rag-editor-panel">
-														<div className="settings-editor-card-header">
-															<div className="settings-acp-detail-copy">
-																<span className="settings-section-kicker">模型</span>
-																<strong className="settings-agent-name">Embedding 条目</strong>
-																<span className="settings-agent-meta">
-																	RAG 只接受 Embedding 类型条目。没有可选项时，先去 LLM 页面新增一个
-																	Embedding 模型。
-																</span>
-															</div>
-														</div>
-														<div className="settings-item settings-item-stacked">
-															<label
-																className="settings-label settings-label-stacked"
-																htmlFor="rag-embedding-provider"
-															>
-																<span>Embedding 条目</span>
-															</label>
-															<select
-																aria-describedby={joinDescribedByIds(
-																	ragValidation.fieldIssues.embeddingProviderId
-																		? buildFieldIssueId("rag", "embedding-provider")
-																		: undefined,
-																	"rag-embedding-provider-help",
-																)}
-																aria-invalid={
-																	ragValidation.fieldIssues.embeddingProviderId ? true : undefined
-																}
-																className="settings-select"
-																disabled={savingRag || scanningRag}
-																id="rag-embedding-provider"
-																onChange={(event) =>
-																	setRagSettings((current) => ({
-																		...current,
-																		embeddingProviderId: event.target.value || null,
-																	}))
-																}
-																ref={bindRagFieldRef("embeddingProviderId")}
-																value={ragSettings.embeddingProviderId ?? ""}
-															>
-																<option value="">选择一个配置了 embedding 模型的条目</option>
-																{eligibleRagEmbeddingProviders.map((provider) => (
-																	<option key={provider.id} value={provider.id}>
-																		{provider.name || provider.model || provider.baseUrl}
-																		{` · ${provider.model}`}
-																	</option>
-																))}
-															</select>
-															<span
-																className="settings-help-text settings-help-text-tight"
-																id="rag-embedding-provider-help"
-															>
-																当前选择会决定索引时调用哪个 embedding 模型；如果 Embedding 条目、
-																扫描目录或忽略规则发生变化，保存 RAG 配置会触发自动重建。
-															</span>
-															{ragValidation.fieldIssues.embeddingProviderId ? (
-																<span
-																	className="settings-field-error"
-																	id={buildFieldIssueId("rag", "embedding-provider")}
-																>
-																	{ragValidation.fieldIssues.embeddingProviderId}
-																</span>
-															) : null}
-														</div>
-													</div>
-
-													<div className="settings-rag-editor-panel">
-														<div className="settings-editor-card-header">
-															<div className="settings-acp-detail-copy">
-																<span className="settings-section-kicker">范围</span>
-																<strong className="settings-agent-name">扫描目录与忽略规则</strong>
-																<span className="settings-agent-meta">
-																	Markdown 类文件按文档结构切分，其他文本文件走通用语义切分。
-																</span>
-															</div>
-														</div>
-
-														<div className="settings-item settings-item-stacked">
-															<label
-																className="settings-label settings-label-stacked"
-																htmlFor="rag-source-dirs"
-															>
-																<span>扫描目录</span>
-															</label>
-															<textarea
-																aria-describedby={joinDescribedByIds(
-																	ragValidation.fieldIssues.sourceDirectories
-																		? buildFieldIssueId("rag", "source-directories")
-																		: undefined,
-																	"rag-source-dirs-help",
-																	"rag-source-dirs-extension-help",
-																)}
-																aria-invalid={
-																	ragValidation.fieldIssues.sourceDirectories ? true : undefined
-																}
-																className="settings-textarea settings-input settings-input-mono"
-																disabled={savingRag || scanningRag}
-																id="rag-source-dirs"
-																onChange={(event) =>
-																	setRagSettings((current) => ({
-																		...current,
-																		sourceDirectories: parseTextLines(event.target.value),
-																	}))
-																}
-																placeholder={ragSourceDirectoryPlaceholder}
-																ref={bindRagFieldRef("sourceDirectories")}
-																rows={6}
-																value={formatTextLines(ragSettings.sourceDirectories)}
-															/>
-															<div className="settings-inline-actions">
-																<button
-																	className="settings-button settings-agent-secondary"
-																	disabled={savingRag || scanningRag}
-																	onClick={() => void handleAppendRagSourceDirectory()}
-																	type="button"
-																>
-																	选择目录追加
-																</button>
-																<span
-																	className="settings-help-text settings-help-text-tight"
-																	id="rag-source-dirs-help"
-																>
-																	每行一个目录。保存后会监听这些目录内的文件变化；目录选择器默认从
-																	`~/Documents` 打开。
-																</span>
-															</div>
-															<span
-																className="settings-help-text settings-help-text-tight"
-																id="rag-source-dirs-extension-help"
-															>
-																当前允许向量化的后缀：{ragSupportedExtensionsLabel}。
-															</span>
-															{ragValidation.fieldIssues.sourceDirectories ? (
-																<span
-																	className="settings-field-error"
-																	id={buildFieldIssueId("rag", "source-directories")}
-																>
-																	{ragValidation.fieldIssues.sourceDirectories}
-																</span>
-															) : null}
-														</div>
-
-														<div className="settings-item settings-item-stacked">
-															<label className="settings-label settings-label-stacked">
-																<span>内置忽略目录</span>
-															</label>
-															<span
-																className="settings-help-text settings-help-text-tight"
-																id="rag-fixed-ignore-globs-help"
-															>
-																这些规则始终生效，不支持取消：`{defaultRagIgnoreGlobs.join("`、`")}
-																`。 命中后文件不会被切分、向量化或写入 LanceDB。
-															</span>
-														</div>
-
-														<div className="settings-item settings-item-stacked">
-															<label
-																className="settings-label settings-label-stacked"
-																htmlFor="rag-ignore-globs"
-															>
-																<span>额外忽略通配符</span>
-															</label>
-															<textarea
-																aria-describedby={joinDescribedByIds(
-																	ragValidation.fieldIssues.ignoreGlobs
-																		? buildFieldIssueId("rag", "ignore-globs")
-																		: undefined,
-																	"rag-ignore-globs-help",
-																)}
-																aria-invalid={
-																	ragValidation.fieldIssues.ignoreGlobs ? true : undefined
-																}
-																className="settings-textarea settings-input settings-input-mono"
-																disabled={savingRag || scanningRag}
-																id="rag-ignore-globs"
-																onChange={(event) =>
-																	setRagSettings((current) => ({
-																		...current,
-																		ignoreGlobs: normalizeRagIgnoreGlobs(
-																			parseTextLines(event.target.value),
-																		),
-																	}))
-																}
-																placeholder={extraRagIgnoreGlobPlaceholder}
-																ref={bindRagFieldRef("ignoreGlobs")}
-																rows={5}
-																value={formatTextLines(ragExtraIgnoreGlobs)}
-															/>
-															<span
-																className="settings-help-text settings-help-text-tight"
-																id="rag-ignore-globs-help"
-															>
-																每行一个附加 glob。这里只能新增，不能移除上面的内置忽略目录。
-															</span>
-															{ragValidation.fieldIssues.ignoreGlobs ? (
-																<span
-																	className="settings-field-error"
-																	id={buildFieldIssueId("rag", "ignore-globs")}
-																>
-																	{ragValidation.fieldIssues.ignoreGlobs}
-																</span>
-															) : null}
-														</div>
-													</div>
-												</div>
-
-												<div className="settings-rag-editor-side">
-													<div className="settings-rag-usage-card">
-														<div className="settings-acp-detail-copy">
-															<span className="settings-section-kicker">流程</span>
-															<strong className="settings-agent-name">索引阶段</strong>
-															<span className="settings-agent-meta">
-																先过滤文件，再切分文本，最后调用 embedding 模型写入 LanceDB。
-															</span>
-														</div>
-														<div className="settings-rag-chip-group">
-															<span className="settings-status-chip">过滤后缀</span>
-															<span className="settings-status-chip">切分文本</span>
-															<span className="settings-status-chip">生成向量</span>
-															<span className="settings-status-chip">持久化索引</span>
-														</div>
-													</div>
-
-													<div className="settings-rag-capability-panel">
-														<div className="settings-acp-detail-copy">
-															<span className="settings-section-kicker">边界</span>
-															<strong className="settings-agent-name">数据与重建规则</strong>
-														</div>
-														<div className="settings-rag-capability-grid">
-															<div className="settings-rag-capability-card">
-																<strong>隐私边界</strong>
-																<span className="settings-agent-meta">
-																	RAG 建索引时会把切分后的文档内容发送给当前 embedding
-																	模型。涉及隐私或敏感数据时，优先选本机部署的
-																	Ollama，或其它你明确信任的模型服务。
-																</span>
-															</div>
-															<div className="settings-rag-capability-card">
-																<strong>自动重建</strong>
-																<span className="settings-agent-meta">
-																	RAG 元数据会记录每个文件最近一次建索引所用的 embedding
-																	模型。当前实际使用的 Embedding
-																	条目、扫描目录或忽略规则变化时，保存配置会自动重建；其它场景需要手动点击“立即重建索引”。
-																</span>
-															</div>
-														</div>
-													</div>
-
-													<div
-														className="settings-rag-scan-card"
-														id="rag-scan-result"
-														ref={bindSectionBlockRef("rag-scan-result")}
-													>
-														<div className="settings-acp-detail-copy">
-															<span className="settings-section-kicker">扫描结果</span>
-															<strong className="settings-agent-name">最近一次手动重建</strong>
-															<span className="settings-agent-meta">
-																{ragScanResult
-																	? "这里只展示当前窗口内最近一次手动触发的扫描结果。"
-																	: "还没有手动重建结果。完成一次“立即重建索引”后，这里会显示统计数据。"}
-															</span>
-														</div>
-														{ragScanResult ? (
-															<div className="settings-rag-scan-grid">
-																{ragScanSummaryItems.map((item) => (
-																	<div className="settings-rag-scan-metric" key={item.label}>
-																		<span className="settings-rag-scan-label">{item.label}</span>
-																		<span
-																			className={`settings-rag-scan-value ${item.label === "数据库" ? "settings-rag-scan-value-path" : ""}`}
-																		>
-																			{item.value}
-																		</span>
-																	</div>
-																))}
-															</div>
-														) : (
-															<div className="settings-empty-panel settings-empty-panel-subtle">
-																<strong className="settings-empty-title">没有扫描统计</strong>
-																<span className="settings-help-text settings-help-text-tight">
-																	保存配置不会自动跑一次全量扫描。需要时手动点击“立即重建索引”。
-																</span>
-															</div>
-														)}
-													</div>
-												</div>
-											</div>
-
-											{ragValidation.totalIssues > 0 ? (
-												<div className="settings-validation-box settings-banner-error">
-													<ul className="settings-issue-list">
-														{ragValidation.issues.map((issue) => (
-															<li key={issue}>{issue}</li>
-														))}
-													</ul>
-												</div>
-											) : null}
-										</div>
-									</div>
-								</section>
+								<RagSettingsSection
+									bindRagFieldRef={bindRagFieldRef}
+									bindSectionBlockRef={bindSectionBlockRef}
+									defaultRagIgnoreGlobs={defaultRagIgnoreGlobs}
+									eligibleRagEmbeddingProviders={eligibleRagEmbeddingProviders}
+									extraRagIgnoreGlobPlaceholder={extraRagIgnoreGlobPlaceholder}
+									formatTextLines={formatTextLines}
+									normalizeRagIgnoreGlobs={normalizeRagIgnoreGlobs}
+									onAppendRagSourceDirectory={handleAppendRagSourceDirectory}
+									onDiscardRagDraft={handleDiscardRagDraft}
+									onLocateFirstRagIssue={locateFirstRagIssue}
+									onSaveRag={handleSaveRag}
+									onScanRag={handleScanRag}
+									parseTextLines={parseTextLines}
+									ragExtraIgnoreGlobs={ragExtraIgnoreGlobs}
+									ragHasUnsavedChanges={ragHasUnsavedChanges}
+									ragScanResult={ragScanResult}
+									ragScanSummaryItems={ragScanSummaryItems}
+									ragSettings={ragSettings}
+									ragSourceDirectoryPlaceholder={ragSourceDirectoryPlaceholder}
+									ragStatusDescription={ragStatusDescription}
+									ragStatusTitle={ragStatusTitle}
+									ragSummaryItems={ragSummaryItems}
+									ragSupportedExtensionsLabel={ragSupportedExtensionsLabel}
+									ragValidation={ragValidation}
+									savingRag={savingRag}
+									scanningRag={scanningRag}
+									selectedRagEmbeddingProvider={selectedRagEmbeddingProvider}
+									selectedRagEmbeddingProviderLabel={selectedRagEmbeddingProviderLabel}
+									setRagSettings={setRagSettings}
+								/>
 							) : null}
 
 							{activeSection === "acp" ? (
-								<section
-									aria-labelledby={getSettingsTabId("acp")}
-									className="settings-section"
-									id={getSettingsPanelId("acp")}
-									role="tabpanel"
-									tabIndex={0}
-								>
-									{acpNotice ? (
-										<div className={`settings-banner settings-banner-${acpNotice.tone}`}>
-											{acpNotice.text}
-										</div>
-									) : null}
-
-									<div className="settings-acp-form-layout">
-										<aside
-											className="settings-acp-sidebar settings-acp-sidebar-secondary"
-											id="acp-catalog"
-											ref={bindSectionBlockRef("acp-catalog")}
-										>
-											<div className="settings-acp-sidebar-header">
-												<div className="settings-acp-sidebar-copy">
-													<span className="settings-section-kicker">已配置</span>
-												</div>
-												<button
-													className="settings-button settings-button-compact"
-													onClick={handleAddCustomAgent}
-													type="button"
-												>
-													+ 新建
-												</button>
-											</div>
-											<p className="settings-help-text settings-help-text-tight">
-												ACP Agent 就是一条启动命令配置。预设只负责填表；实际创建 Session 用哪个
-												Agent，看 launcher 顶部选择。
-											</p>
-
-											{acpAgents.length === 0 ? (
-												<div className="settings-empty-panel">
-													<strong className="settings-empty-title">还没有 Agent</strong>
-													<span className="settings-help-text settings-help-text-tight">
-														先新建一个，或者从预设填表。
-													</span>
-												</div>
-											) : (
-												<div className="settings-agent-list settings-agent-list-master settings-agent-list-compact">
-													{acpAgents.map((agent) => {
-														const issueCount = acpValidation.agentIssues[agent.id]?.length ?? 0;
-														const isSelected = selectedAgentId === agent.id;
-														return (
-															<article
-																className={`settings-agent-list-item ${isSelected ? "settings-agent-list-item-selected" : ""} ${
-																	issueCount > 0 ? "settings-agent-list-item-invalid" : ""
-																}`}
-																key={agent.id}
-															>
-																<button
-																	className="settings-agent-list-item-main"
-																	onClick={() => setSelectedAgentId(agent.id)}
-																	type="button"
-																>
-																	<div className="settings-agent-title-row">
-																		<strong className="settings-agent-name">
-																			{agent.name.trim() || "未命名 Agent"}
-																		</strong>
-																		<span className="settings-agent-meta">{issueCount} 个问题</span>
-																	</div>
-																	<span className="settings-agent-command-preview">
-																		{agent.command.trim() || "还没有启动命令"}
-																	</span>
-																</button>
-															</article>
-														);
-													})}
-												</div>
-											)}
-										</aside>
-
-										<div className="settings-acp-detail">
-											<SettingsDraftActionCard
-												actions={
-													<>
-														{acpValidation.totalIssues > 0 ? (
-															<button
-																className="settings-button settings-agent-secondary"
-																onClick={locateFirstAcpIssue}
-																type="button"
-															>
-																定位问题
-															</button>
-														) : null}
-														<button
-															className="settings-button settings-agent-secondary"
-															disabled={savingAgent || !acpHasUnsavedChanges}
-															onClick={handleDiscardAcpDraft}
-															type="button"
-														>
-															{DISCARD_DRAFT_BUTTON_LABEL}
-														</button>
-														<button
-															className="settings-button"
-															disabled={savingAgent || !acpHasUnsavedChanges}
-															onClick={() => void handleSaveAgent()}
-															type="button"
-														>
-															{savingAgent ? "保存中..." : "保存 ACP Agent"}
-														</button>
-													</>
-												}
-												description={
-													acpValidation.totalIssues > 0
-														? "先修复校验问题，再写回配置。"
-														: acpHasUnsavedChanges
-															? "当前 ACP Agent 草稿尚未写回配置。"
-															: "ACP Agent 配置已与本地 config.toml 同步。"
-												}
-												title={
-													acpValidation.totalIssues > 0
-														? `先修复 ${acpValidation.totalIssues} 个问题`
-														: acpHasUnsavedChanges
-															? "有未保存的 ACP Agent 草稿"
-															: "ACP Agent 配置已同步"
-												}
-											/>
-											{selectedAgent ? (
-												<>
-													<div className="settings-acp-detail-header">
-														<div className="settings-acp-detail-copy">
-															<span className="settings-section-kicker">当前表单</span>
-															<h3 className="settings-subsection-title">
-																{selectedAgent.name.trim() || "未命名 Agent"}
-															</h3>
-														</div>
-														<button
-															className="settings-agent-remove settings-agent-remove-inline"
-															onClick={() => handleRemoveAgent(selectedAgent.id)}
-															type="button"
-														>
-															删除 Agent
-														</button>
-													</div>
-
-													{(acpValidation.agentIssues[selectedAgent.id]?.length ?? 0) > 0 ? (
-														<ul className="settings-issue-list">
-															{(acpValidation.agentIssues[selectedAgent.id] ?? []).map((issue) => (
-																<li key={issue}>{issue}</li>
-															))}
-														</ul>
-													) : null}
-
-													<div
-														className="settings-editor-card"
-														id="acp-presets"
-														ref={bindSectionBlockRef("acp-presets")}
-													>
-														<div className="settings-editor-card-header">
-															<strong className="settings-agent-mcp-title">选择 Agent</strong>
-															<span className="settings-agent-meta">
-																下拉项只负责填充表单默认值
-															</span>
-														</div>
-														<div className="settings-acp-preset-layout">
-															<div className="settings-acp-preset-controls">
-																<div className="settings-acp-preset-panel">
-																	<span className="settings-acp-preset-kicker">快速填充</span>
-																	<label className="settings-label settings-label-stacked">
-																		<span className="settings-acp-preset-label">Agent 模板</span>
-																		<select
-																			aria-label="选择 Agent"
-																			className="settings-select"
-																			onChange={(event) =>
-																				setSelectedPresetOptionId(event.target.value)
-																			}
-																			value={selectedPresetOptionId}
-																		>
-																			<option value="__custom__">自定义 · 空白表单</option>
-																			{acpAgentOptions.map((option) => {
-																				const alreadyAdded = acpAgents.some(
-																					(agent) => agent.command.trim() === option.command,
-																				);
-																				return (
-																					<option key={option.id} value={option.id}>
-																						{formatAcpAgentOptionLabel(option, alreadyAdded)}
-																					</option>
-																				);
-																			})}
-																		</select>
-																	</label>
-																	<span className="settings-help-text settings-help-text-tight">
-																		只会把名称和启动命令填到下面表单，不会直接保存。
-																	</span>
-																	<button
-																		className="settings-button settings-button-compact settings-acp-preset-action"
-																		disabled={!selectedPresetOptionId}
-																		onClick={handleApplyPresetSelection}
-																		type="button"
-																	>
-																		填入表单
-																	</button>
-																</div>
-															</div>
-															<div className="settings-install-guide settings-install-guide-card">
-																{renderPresetInstallGuide(
-																	selectedPresetInstallOption,
-																	selectedPresetOptionId,
-																)}
-															</div>
-														</div>
-													</div>
-
-													<div
-														className="settings-editor-card"
-														id="acp-form"
-														ref={bindSectionBlockRef("acp-form")}
-													>
-														<div className="settings-editor-card-header">
-															<strong className="settings-agent-mcp-title">基础信息</strong>
-															<span className="settings-agent-meta">
-																{selectedAgentIssueCount > 0
-																	? `${selectedAgentIssueCount} 个待处理问题`
-																	: "基础信息完整"}
-															</span>
-														</div>
-														<div className="settings-agent-fields">
-															<label className="settings-label settings-label-stacked">
-																<span>显示名称</span>
-																<input
-																	aria-describedby={joinDescribedByIds(
-																		selectedAgentFieldIssues.name
-																			? buildFieldIssueId("acp", "name", selectedAgent.id)
-																			: undefined,
-																	)}
-																	aria-invalid={selectedAgentFieldIssues.name ? true : undefined}
-																	className="settings-input settings-input-wide"
-																	onChange={(event) =>
-																		handleAgentFieldChange(
-																			selectedAgent.id,
-																			"name",
-																			event.target.value,
-																		)
-																	}
-																	placeholder="例如 Codex"
-																	ref={bindAcpFieldRef("agent", selectedAgent.id, "name")}
-																	type="text"
-																	value={selectedAgent.name}
-																/>
-																{selectedAgentFieldIssues.name ? (
-																	<span
-																		className="settings-field-error"
-																		id={buildFieldIssueId("acp", "name", selectedAgent.id)}
-																	>
-																		{selectedAgentFieldIssues.name}
-																	</span>
-																) : null}
-															</label>
-															<label className="settings-label settings-label-stacked">
-																<span>启动命令</span>
-																<input
-																	aria-describedby={joinDescribedByIds(
-																		selectedAgentFieldIssues.command
-																			? buildFieldIssueId("acp", "command", selectedAgent.id)
-																			: undefined,
-																		`settings-acp-${selectedAgent.id}-command-help`,
-																	)}
-																	aria-invalid={selectedAgentFieldIssues.command ? true : undefined}
-																	className="settings-input settings-input-wide settings-input-mono"
-																	onChange={(event) =>
-																		handleAgentFieldChange(
-																			selectedAgent.id,
-																			"command",
-																			event.target.value,
-																		)
-																	}
-																	placeholder="输入单行 shell 命令，例如 codex-acp"
-																	ref={bindAcpFieldRef("agent", selectedAgent.id, "command")}
-																	type="text"
-																	value={selectedAgent.command}
-																/>
-																<span
-																	className="settings-help-text settings-help-text-tight"
-																	id={`settings-acp-${selectedAgent.id}-command-help`}
-																>
-																	这里只填写 Agent 启动命令；所有 Agent 仍共用同一份全局 MCP 配置。
-																</span>
-																{selectedAgentFieldIssues.command ? (
-																	<span
-																		className="settings-field-error"
-																		id={buildFieldIssueId("acp", "command", selectedAgent.id)}
-																	>
-																		{selectedAgentFieldIssues.command}
-																	</span>
-																) : null}
-															</label>
-														</div>
-													</div>
-												</>
-											) : (
-												<>
-													<div
-														className="settings-editor-card"
-														id="acp-presets"
-														ref={bindSectionBlockRef("acp-presets")}
-													>
-														<div className="settings-editor-card-header">
-															<strong className="settings-agent-mcp-title">选择 Agent</strong>
-															<span className="settings-agent-meta">
-																下拉项只负责填充表单默认值
-															</span>
-														</div>
-														<div className="settings-acp-preset-layout">
-															<div className="settings-acp-preset-controls">
-																<div className="settings-acp-preset-panel">
-																	<span className="settings-acp-preset-kicker">快速填充</span>
-																	<label className="settings-label settings-label-stacked">
-																		<span className="settings-acp-preset-label">Agent 模板</span>
-																		<select
-																			aria-label="选择 Agent"
-																			className="settings-select"
-																			onChange={(event) =>
-																				setSelectedPresetOptionId(event.target.value)
-																			}
-																			value={selectedPresetOptionId}
-																		>
-																			<option value="__custom__">自定义 · 空白表单</option>
-																			{acpAgentOptions.map((option) => (
-																				<option key={option.id} value={option.id}>
-																					{formatAcpAgentOptionLabel(option, false)}
-																				</option>
-																			))}
-																		</select>
-																	</label>
-																	<span className="settings-help-text settings-help-text-tight">
-																		只会把名称和启动命令填到下面表单，不会直接保存。
-																	</span>
-																	<button
-																		className="settings-button settings-button-compact settings-acp-preset-action"
-																		disabled={!selectedPresetOptionId}
-																		onClick={handleApplyPresetSelection}
-																		type="button"
-																	>
-																		填入表单
-																	</button>
-																</div>
-															</div>
-															<div className="settings-install-guide settings-install-guide-card">
-																{renderPresetInstallGuide(
-																	selectedPresetInstallOption,
-																	selectedPresetOptionId,
-																)}
-															</div>
-														</div>
-													</div>
-													<div
-														className="settings-empty-panel"
-														id="acp-form"
-														ref={bindSectionBlockRef("acp-form")}
-													>
-														<strong className="settings-empty-title">
-															先创建一个 ACP Agent 草稿
-														</strong>
-														<span className="settings-help-text settings-help-text-tight">
-															先选择一个 Agent 填入默认值，或者直接新建一个空白 Agent 表单。
-														</span>
-														<div className="settings-acp-empty-actions">
-															<button
-																className="settings-button settings-button-compact"
-																onClick={handleAddCustomAgent}
-																type="button"
-															>
-																+ 新建 Agent
-															</button>
-														</div>
-													</div>
-												</>
-											)}
-										</div>
-									</div>
-								</section>
+								<AcpSettingsSection
+									acpAgents={acpAgents}
+									acpHasUnsavedChanges={acpHasUnsavedChanges}
+									acpNotice={acpNotice}
+									acpValidation={acpValidation}
+									bindAcpFieldRef={bindAcpFieldRef}
+									bindSectionBlockRef={bindSectionBlockRef}
+									onAddCustomAgent={handleAddCustomAgent}
+									onAgentFieldChange={handleAgentFieldChange}
+									onApplyPresetSelection={handleApplyPresetSelection}
+									onDiscardAcpDraft={handleDiscardAcpDraft}
+									onLocateFirstAcpIssue={locateFirstAcpIssue}
+									onRemoveAgent={handleRemoveAgent}
+									onSaveAgent={handleSaveAgent}
+									savingAgent={savingAgent}
+									selectedAgent={selectedAgent}
+									selectedAgentFieldIssues={selectedAgentFieldIssues}
+									selectedAgentId={selectedAgentId}
+									selectedAgentIssueCount={selectedAgentIssueCount}
+									selectedPresetOptionId={selectedPresetOptionId}
+									setSelectedAgentId={setSelectedAgentId}
+									setSelectedPresetOptionId={setSelectedPresetOptionId}
+								/>
 							) : null}
 
 							{activeSection === "mcp" ? (
-								<section
-									aria-labelledby={getSettingsTabId("mcp")}
-									className="settings-section"
-									id={getSettingsPanelId("mcp")}
-									role="tabpanel"
-									tabIndex={0}
-								>
-									{mcpNotice ? (
-										<div className={`settings-banner settings-banner-${mcpNotice.tone}`}>
-											{mcpNotice.text}
-										</div>
-									) : null}
-
-									<div className="settings-mcp-layout">
-										<div
-											className="settings-editor-card settings-editor-card-subtle settings-mcp-catalog-panel"
-											id="mcp-catalog"
-											ref={bindSectionBlockRef("mcp-catalog")}
-										>
-											<div className="settings-editor-card-header">
-												<div className="settings-acp-sidebar-copy">
-													<span className="settings-section-kicker">已配置</span>
-													<h3 className="settings-subsection-title">服务目录</h3>
-												</div>
-											</div>
-											<p className="settings-help-text settings-help-text-tight">
-												所有 Agent 共用这一份 MCP 目录。先在上面选服务，下面只处理当前任务。
-											</p>
-											{mcpServers.length === 0 ? (
-												<div className="settings-empty-panel settings-empty-panel-subtle">
-													<strong className="settings-empty-title">还没有服务</strong>
-													<span className="settings-help-text settings-help-text-tight">
-														先新建一个服务，再补全连接参数。
-													</span>
-												</div>
-											) : null}
-											<div className="settings-catalog-grid settings-catalog-grid-3 settings-mcp-catalog-grid">
-												<article
-													className={`settings-mcp-list-item settings-mcp-builtin-card ${
-														builtinRagMcpConfigured &&
-														selectedMcpServerId === builtinRagMcpServer?.id
-															? "settings-mcp-list-item-selected"
-															: ""
-													} ${builtinRagMcpIssueCount > 0 ? "settings-mcp-list-item-invalid" : ""}`}
-												>
-													<div className="settings-mcp-builtin-card-header">
-														<div className="settings-agent-title-row">
-															<strong className="settings-agent-name">内置 MCP</strong>
-														</div>
-														<label className="settings-mcp-builtin-toggle">
-															<span className="sr-only">启用内置 MCP</span>
-															<input
-																checked={builtinRagMcpConfigured}
-																className="settings-toggle"
-																disabled={builtinRagMcpToggleDisabled}
-																onChange={(event) =>
-																	handleToggleBuiltinRagMcpServer(event.target.checked)
-																}
-																type="checkbox"
-															/>
-														</label>
-													</div>
-													<div className="settings-mcp-list-item-badges">
-														<span className="settings-status-chip">内置</span>
-														<span className="settings-mcp-badge">
-															{builtinRagMcpTransportMeta.label}
-														</span>
-														<span
-															className={`settings-status-chip ${
-																builtinRagMcpServerStatus?.running
-																	? "settings-status-chip-success"
-																	: "settings-status-chip-warn"
-															}`}
-														>
-															{builtinRagMcpServerStatus?.running ? "运行中" : "未运行"}
-														</span>
-														{builtinRagMcpIssueCount > 0 ? (
-															<span className="settings-agent-meta">
-																{builtinRagMcpIssueCount} 个问题
-															</span>
-														) : null}
-													</div>
-													<span className="settings-agent-command-preview">
-														{builtinRagMcpServerStatus?.server.transport === "http"
-															? builtinRagMcpServerStatus.server.url
-															: "http://127.0.0.1:43189/internal/mcp/rag"}
-													</span>
-													<span className="settings-help-text settings-help-text-tight">
-														{builtinRagMcpConfigured
-															? "已加入当前 MCP 草稿，保存后当前 Agent 就能直接调用。"
-															: builtinRagMcpServerStatus?.running
-																? "开启后会把内置 RAG Query 写入当前草稿。"
-																: builtinRagMcpServerStatus?.lastError ||
-																	"桌面端启动后会自动暴露这个本地地址。"}
-													</span>
-													{builtinRagMcpConfigured && builtinRagMcpServer ? (
-														<button
-															className="settings-agent-secondary settings-button-compact"
-															onClick={() => selectMcpServer(builtinRagMcpServer.id)}
-															type="button"
-														>
-															编辑当前服务
-														</button>
-													) : null}
-												</article>
-												<div
-													aria-label="MCP 服务目录"
-													className="settings-mcp-catalog-group"
-													role="radiogroup"
-												>
-													{regularMcpServers.map((server) => {
-														const transportMeta = getMcpTransportMeta(server.transport);
-														const issueCount = mcpValidation.serverIssues[server.id]?.length ?? 0;
-														const isSelected = isMcpEditMode && selectedMcpServerId === server.id;
-														const isFocusable =
-															isSelected ||
-															(!isMcpEditMode && regularMcpServers[0]?.id === server.id);
-														return (
-															<article
-																className={`settings-mcp-list-item ${isSelected ? "settings-mcp-list-item-selected" : ""} ${
-																	issueCount > 0 ? "settings-mcp-list-item-invalid" : ""
-																}`}
-																key={server.id}
-															>
-																<button
-																	aria-checked={isSelected}
-																	className="settings-mcp-list-item-main"
-																	id={`settings-mcp-option-${server.id}`}
-																	onClick={() => selectMcpServer(server.id)}
-																	onKeyDown={(event) => handleMcpCatalogKeyDown(event, server.id)}
-																	ref={bindMcpListOptionRef(server.id)}
-																	role="radio"
-																	tabIndex={isFocusable ? 0 : -1}
-																	type="button"
-																>
-																	<div className="settings-agent-title-row">
-																		<strong className="settings-agent-name">
-																			{getMcpServerDraftTitle(server)}
-																		</strong>
-																	</div>
-																	<div className="settings-mcp-list-item-badges">
-																		<span className="settings-mcp-badge">
-																			{transportMeta.label}
-																		</span>
-																		{issueCount > 0 ? (
-																			<span className="settings-agent-meta">
-																				{issueCount} 个问题
-																			</span>
-																		) : null}
-																	</div>
-																	<span className="settings-agent-command-preview">
-																		{summarizeMcpServerDraft(server)}
-																	</span>
-																</button>
-															</article>
-														);
-													})}
-												</div>
-												<article
-													className={`settings-mcp-list-item settings-mcp-list-item-create ${
-														isMcpCreateMode ? "settings-mcp-list-item-selected" : ""
-													}`}
-												>
-													<button
-														className="settings-mcp-list-item-main settings-mcp-create-trigger"
-														onClick={handleEnterMcpCreateMode}
-														type="button"
-													>
-														<div className="settings-agent-title-row">
-															<strong className="settings-agent-name">新建服务</strong>
-														</div>
-														<div className="settings-mcp-list-item-badges">
-															<span className="settings-mcp-badge">新建</span>
-														</div>
-														<span className="settings-agent-command-preview">
-															只在需要另一种 transport 时新增，创建后会直接切到当前服务。
-														</span>
-													</button>
-												</article>
-											</div>
-										</div>
-
-										<div className="settings-acp-detail settings-mcp-detail">
-											<SettingsDraftActionCard
-												actions={
-													<>
-														{mcpValidation.totalIssues > 0 ? (
-															<button
-																className="settings-button settings-agent-secondary"
-																onClick={locateFirstMcpIssue}
-																type="button"
-															>
-																定位问题
-															</button>
-														) : null}
-														<button
-															className="settings-button settings-agent-secondary"
-															disabled={savingMcp || !mcpHasUnsavedChanges}
-															onClick={handleDiscardMcpDraft}
-															type="button"
-														>
-															{DISCARD_DRAFT_BUTTON_LABEL}
-														</button>
-														<button
-															className="settings-button"
-															disabled={savingMcp || !mcpHasUnsavedChanges}
-															onClick={() => void handleSaveMcp()}
-															type="button"
-														>
-															{savingMcp ? "保存中..." : "保存 MCP 配置"}
-														</button>
-													</>
-												}
-												description={
-													mcpValidation.totalIssues > 0
-														? "先修复校验问题，再写回配置。"
-														: mcpHasUnsavedChanges
-															? "当前 MCP 草稿尚未写回配置。"
-															: "MCP 配置已与本地 config.toml 同步。"
-												}
-												title={
-													mcpValidation.totalIssues > 0
-														? `先修复 ${mcpValidation.totalIssues} 个问题`
-														: mcpHasUnsavedChanges
-															? "有未保存的 MCP 草稿"
-															: "MCP 配置已同步"
-												}
-											/>
-											{isMcpEditMode ? (
-												<>
-													<div className="settings-acp-detail-header settings-mcp-detail-header">
-														<div className="settings-acp-detail-copy">
-															<span className="settings-section-kicker">当前服务</span>
-															<h3 className="settings-subsection-title">
-																{getMcpServerDraftTitle(selectedMcpServer)}
-															</h3>
-															<span className="settings-help-text settings-help-text-tight">
-																目录和表单始终指向同一条服务。
-															</span>
-														</div>
-														<button
-															className="settings-agent-remove settings-agent-remove-inline"
-															onClick={() => handleRemoveMcpServer(selectedMcpServer.id)}
-															type="button"
-														>
-															删除服务
-														</button>
-													</div>
-
-													<div
-														className="settings-editor-card"
-														id="mcp-form"
-														ref={bindSectionBlockRef("mcp-form")}
-													>
-														<div className="settings-editor-card-header">
-															<strong className="settings-agent-mcp-title">基础信息</strong>
-															<span className="settings-agent-meta">
-																{selectedMcpIssueCount > 0
-																	? `${selectedMcpIssueCount} 个问题待处理`
-																	: "名称会显示在左侧目录里"}
-															</span>
-														</div>
-
-														<div className="settings-agent-fields">
-															<label className="settings-label settings-label-stacked">
-																<span>名称</span>
-																<input
-																	aria-describedby={joinDescribedByIds(
-																		selectedMcpFieldIssues.name
-																			? buildFieldIssueId("mcp", "name", selectedMcpServer.id)
-																			: undefined,
-																		`settings-mcp-${selectedMcpServer.id}-name-help`,
-																	)}
-																	aria-invalid={selectedMcpFieldIssues.name ? true : undefined}
-																	className="settings-input settings-input-wide"
-																	onChange={(event) =>
-																		handleMcpServerFieldChange(
-																			selectedMcpServer.id,
-																			"name",
-																			event.target.value,
-																		)
-																	}
-																	placeholder="例如 filesystem"
-																	ref={bindAcpFieldRef("server", selectedMcpServer.id, "name")}
-																	type="text"
-																	value={selectedMcpServer.name}
-																/>
-																<span
-																	className="settings-help-text settings-help-text-tight"
-																	id={`settings-mcp-${selectedMcpServer.id}-name-help`}
-																>
-																	用能力或数据源命名，后续切换服务时更容易辨认。
-																</span>
-																{selectedMcpFieldIssues.name ? (
-																	<span
-																		className="settings-field-error"
-																		id={buildFieldIssueId("mcp", "name", selectedMcpServer.id)}
-																	>
-																		{selectedMcpFieldIssues.name}
-																	</span>
-																) : null}
-															</label>
-															<div className="settings-item settings-item-stacked">
-																<span className="settings-label">连接类型</span>
-																<div className="settings-mcp-transport-summary">
-																	<span className="settings-mcp-badge">
-																		{getMcpTransportMeta(selectedMcpServer.transport).label}
-																	</span>
-																	<span className="settings-help-text settings-help-text-tight">
-																		连接类型在创建时决定。需要换 transport 时，直接新建一条更清楚。
-																	</span>
-																</div>
-															</div>
-														</div>
-													</div>
-
-													<div className="settings-editor-card">
-														<div className="settings-editor-card-header">
-															<strong className="settings-agent-mcp-title">连接配置</strong>
-															<span className="settings-agent-meta">
-																{getMcpTransportMeta(selectedMcpServer.transport).description}
-															</span>
-														</div>
-														<div className="settings-agent-fields">
-															{selectedMcpServer.transport === "stdio" ? (
-																<>
-																	<label className="settings-label settings-label-stacked">
-																		<span>命令</span>
-																		<input
-																			aria-describedby={joinDescribedByIds(
-																				selectedMcpFieldIssues.command
-																					? buildFieldIssueId(
-																							"mcp",
-																							"command",
-																							selectedMcpServer.id,
-																						)
-																					: undefined,
-																			)}
-																			aria-invalid={
-																				selectedMcpFieldIssues.command ? true : undefined
-																			}
-																			className="settings-input settings-input-wide settings-input-mono"
-																			onChange={(event) =>
-																				handleMcpServerFieldChange(
-																					selectedMcpServer.id,
-																					"command",
-																					event.target.value,
-																				)
-																			}
-																			placeholder="例如 npx"
-																			ref={bindAcpFieldRef(
-																				"server",
-																				selectedMcpServer.id,
-																				"command",
-																			)}
-																			type="text"
-																			value={selectedMcpServer.command}
-																		/>
-																		{selectedMcpFieldIssues.command ? (
-																			<span
-																				className="settings-field-error"
-																				id={buildFieldIssueId(
-																					"mcp",
-																					"command",
-																					selectedMcpServer.id,
-																				)}
-																			>
-																				{selectedMcpFieldIssues.command}
-																			</span>
-																		) : null}
-																	</label>
-																	<label className="settings-label settings-label-stacked">
-																		<span>参数</span>
-																		<textarea
-																			className="settings-textarea settings-input-mono"
-																			onChange={(event) =>
-																				handleMcpServerFieldChange(
-																					selectedMcpServer.id,
-																					"argsText",
-																					event.target.value,
-																				)
-																			}
-																			placeholder="每行一个参数"
-																			rows={3}
-																			value={selectedMcpServer.argsText}
-																		/>
-																	</label>
-																	<label className="settings-label settings-label-stacked">
-																		<span>环境变量</span>
-																		<textarea
-																			aria-describedby={joinDescribedByIds(
-																				selectedMcpFieldIssues.envText
-																					? buildFieldIssueId(
-																							"mcp",
-																							"env-text",
-																							selectedMcpServer.id,
-																						)
-																					: undefined,
-																			)}
-																			aria-invalid={
-																				selectedMcpFieldIssues.envText ? true : undefined
-																			}
-																			className="settings-textarea settings-input-mono"
-																			onChange={(event) =>
-																				handleMcpServerFieldChange(
-																					selectedMcpServer.id,
-																					"envText",
-																					event.target.value,
-																				)
-																			}
-																			placeholder="每行一个 KEY=VALUE"
-																			ref={bindAcpFieldRef(
-																				"server",
-																				selectedMcpServer.id,
-																				"envText",
-																			)}
-																			rows={3}
-																			value={selectedMcpServer.envText}
-																		/>
-																		{selectedMcpFieldIssues.envText ? (
-																			<span
-																				className="settings-field-error"
-																				id={buildFieldIssueId(
-																					"mcp",
-																					"env-text",
-																					selectedMcpServer.id,
-																				)}
-																			>
-																				{selectedMcpFieldIssues.envText}
-																			</span>
-																		) : null}
-																	</label>
-																</>
-															) : (
-																<>
-																	<label className="settings-label settings-label-stacked">
-																		<span>URL</span>
-																		<input
-																			aria-describedby={joinDescribedByIds(
-																				selectedMcpFieldIssues.url
-																					? buildFieldIssueId("mcp", "url", selectedMcpServer.id)
-																					: undefined,
-																				`settings-mcp-${selectedMcpServer.id}-url-help`,
-																			)}
-																			aria-invalid={selectedMcpFieldIssues.url ? true : undefined}
-																			className="settings-input settings-input-wide settings-input-mono"
-																			onChange={(event) =>
-																				handleMcpServerFieldChange(
-																					selectedMcpServer.id,
-																					"url",
-																					event.target.value,
-																				)
-																			}
-																			placeholder="https://example.com/mcp"
-																			ref={bindAcpFieldRef("server", selectedMcpServer.id, "url")}
-																			type="text"
-																			value={selectedMcpServer.url}
-																		/>
-																		<span
-																			className="settings-help-text settings-help-text-tight"
-																			id={`settings-mcp-${selectedMcpServer.id}-url-help`}
-																		>
-																			支持 `http://` 或 `https://`，例如{" "}
-																			{getMcpTransportMeta(selectedMcpServer.transport).example}
-																		</span>
-																		{selectedMcpFieldIssues.url ? (
-																			<span
-																				className="settings-field-error"
-																				id={buildFieldIssueId("mcp", "url", selectedMcpServer.id)}
-																			>
-																				{selectedMcpFieldIssues.url}
-																			</span>
-																		) : null}
-																	</label>
-																	<label className="settings-label settings-label-stacked">
-																		<span>请求头</span>
-																		<textarea
-																			aria-describedby={joinDescribedByIds(
-																				selectedMcpFieldIssues.headersText
-																					? buildFieldIssueId(
-																							"mcp",
-																							"headers-text",
-																							selectedMcpServer.id,
-																						)
-																					: undefined,
-																			)}
-																			aria-invalid={
-																				selectedMcpFieldIssues.headersText ? true : undefined
-																			}
-																			className="settings-textarea settings-input-mono"
-																			onChange={(event) =>
-																				handleMcpServerFieldChange(
-																					selectedMcpServer.id,
-																					"headersText",
-																					event.target.value,
-																				)
-																			}
-																			placeholder="每行一个 KEY=VALUE"
-																			ref={bindAcpFieldRef(
-																				"server",
-																				selectedMcpServer.id,
-																				"headersText",
-																			)}
-																			rows={3}
-																			value={selectedMcpServer.headersText}
-																		/>
-																		<span className="settings-help-text settings-help-text-tight">
-																			需要鉴权时再填写。每行一个 `KEY=VALUE`。
-																		</span>
-																		{selectedMcpFieldIssues.headersText ? (
-																			<span
-																				className="settings-field-error"
-																				id={buildFieldIssueId(
-																					"mcp",
-																					"headers-text",
-																					selectedMcpServer.id,
-																				)}
-																			>
-																				{selectedMcpFieldIssues.headersText}
-																			</span>
-																		) : null}
-																	</label>
-																</>
-															)}
-														</div>
-													</div>
-												</>
-											) : null}
-											{isMcpCreateMode ? renderMcpCreateCard() : null}
-										</div>
-									</div>
-								</section>
+								<McpSettingsSection
+									bindAcpFieldRef={bindAcpFieldRef}
+									bindMcpListOptionRef={bindMcpListOptionRef}
+									bindSectionBlockRef={bindSectionBlockRef}
+									builtinRagMcpConfigured={builtinRagMcpConfigured}
+									builtinRagMcpIssueCount={builtinRagMcpIssueCount}
+									builtinRagMcpServer={builtinRagMcpServer}
+									builtinRagMcpServerStatus={builtinRagMcpServerStatus}
+									builtinRagMcpToggleDisabled={builtinRagMcpToggleDisabled}
+									builtinRagMcpTransportMeta={builtinRagMcpTransportMeta}
+									isMcpCreateMode={isMcpCreateMode}
+									isMcpEditMode={isMcpEditMode}
+									mcpHasUnsavedChanges={mcpHasUnsavedChanges}
+									mcpNotice={mcpNotice}
+									mcpServers={mcpServers}
+									mcpValidation={mcpValidation}
+									onApplyMcpTransportSelection={handleApplyMcpTransportSelection}
+									onDiscardMcpDraft={handleDiscardMcpDraft}
+									onEnterMcpCreateMode={handleEnterMcpCreateMode}
+									onLocateFirstMcpIssue={locateFirstMcpIssue}
+									onMcpCatalogKeyDown={handleMcpCatalogKeyDown}
+									onMcpServerFieldChange={handleMcpServerFieldChange}
+									onRemoveMcpServer={handleRemoveMcpServer}
+									onReturnToCurrentMcp={handleReturnToCurrentMcp}
+									onSaveMcp={handleSaveMcp}
+									onSelectMcpServer={selectMcpServer}
+									onToggleBuiltinRagMcpServer={handleToggleBuiltinRagMcpServer}
+									regularMcpServers={regularMcpServers}
+									savingMcp={savingMcp}
+									selectedMcpFieldIssues={selectedMcpFieldIssues}
+									selectedMcpIssueCount={selectedMcpIssueCount}
+									selectedMcpServer={selectedMcpServer}
+									selectedMcpServerId={selectedMcpServerId}
+									selectedMcpTransport={selectedMcpTransport}
+									setSelectedMcpTransport={setSelectedMcpTransport}
+								/>
 							) : null}
 
 							{activeSection === "skills" ? (
-								<section
-									aria-labelledby={getSettingsTabId("skills")}
-									className="settings-section"
-									id={getSettingsPanelId("skills")}
-									role="tabpanel"
-									tabIndex={0}
-								>
-									{skillError ? (
-										<div className="settings-banner settings-banner-error">{skillError}</div>
-									) : null}
-
-									<div className="settings-skills-layout">
-										<div
-											className="settings-editor-card settings-editor-card-subtle settings-skill-catalog-panel"
-											id="skills-catalog"
-											ref={bindSectionBlockRef("skills-catalog")}
-										>
-											<div className="settings-editor-card-header">
-												<div className="settings-acp-sidebar-copy">
-													<span className="settings-section-kicker">公共目录</span>
-													<strong className="settings-agent-mcp-title">
-														{skillCatalog.skills.length} 个 skill
-													</strong>
-												</div>
-											</div>
-											<p className="settings-help-text settings-help-text-tight">
-												当前只读扫描{" "}
-												<code className="settings-inline-code">{skillCatalog.rootPath}</code>
-												，先在上面选一个 skill，再看下面的详情。
-											</p>
-
-											{!skillCatalog.exists ? (
-												<div className="settings-empty-panel settings-empty-panel-subtle">
-													<strong className="settings-empty-title">目录不存在</strong>
-													<span className="settings-help-text settings-help-text-tight">
-														没找到公共 skill 目录。当前只读取 `~/.agents/skills`。
-													</span>
-												</div>
-											) : skillCatalog.skills.length === 0 ? (
-												<div className="settings-empty-panel settings-empty-panel-subtle">
-													<strong className="settings-empty-title">没有公共 skill</strong>
-													<span className="settings-help-text settings-help-text-tight">
-														目录存在，但下面没有可展示的 skill 子目录。
-													</span>
-												</div>
-											) : (
-												<div className="settings-catalog-grid settings-catalog-grid-3">
-													{skillCatalog.skills.map((skill) => {
-														const isSelected = selectedSkillId === skill.id;
-														const skillTitle = skill.meta.name?.trim() || skill.directoryName;
-														return (
-															<article
-																className={`settings-agent-list-item settings-skill-list-item ${isSelected ? "settings-agent-list-item-selected" : ""}`}
-																key={skill.id}
-															>
-																<button
-																	className="settings-agent-list-item-main settings-skill-list-item-main"
-																	onClick={() => handleViewSkill(skill.id)}
-																	type="button"
-																>
-																	<div className="settings-agent-title-row">
-																		<strong className="settings-agent-name">{skillTitle}</strong>
-																	</div>
-																	<span className="settings-agent-command-preview">
-																		{skill.relativePath}
-																	</span>
-																	<div className="settings-mcp-list-item-badges">
-																		<span className="settings-status-chip">
-																			{skill.directoryCount} 目录
-																		</span>
-																		<span className="settings-status-chip">
-																			{skill.fileCount} 文件
-																		</span>
-																	</div>
-																</button>
-															</article>
-														);
-													})}
-												</div>
-											)}
-										</div>
-
-										<div
-											className="settings-acp-detail"
-											id="skills-detail"
-											ref={bindSectionBlockRef("skills-detail")}
-										>
-											{selectedSkill ? (
-												<>
-													<div className="settings-acp-detail-header">
-														<div className="settings-acp-detail-copy">
-															<span className="settings-section-kicker">当前 Skill</span>
-															<h3 className="settings-subsection-title">
-																{selectedSkill.meta.name?.trim() || selectedSkill.directoryName}
-															</h3>
-														</div>
-													</div>
-
-													<div className="settings-editor-card">
-														<div className="settings-editor-card-header">
-															<strong className="settings-agent-mcp-title">Meta 信息</strong>
-															<span className="settings-agent-meta">
-																{selectedSkill.directoryCount} 个目录 · {selectedSkill.fileCount}{" "}
-																个文件
-															</span>
-														</div>
-														<div className="settings-skill-table-wrap">
-															<table className="settings-skill-table">
-																<tbody>
-																	<tr>
-																		<th scope="row">目录</th>
-																		<td>
-																			<code className="settings-inline-code">
-																				{selectedSkill.relativePath}
-																			</code>
-																		</td>
-																	</tr>
-																	<tr>
-																		<th scope="row">名称</th>
-																		<td>{selectedSkill.meta.name ?? "未声明"}</td>
-																	</tr>
-																	<tr>
-																		<th scope="row">描述</th>
-																		<td>{selectedSkill.meta.description ?? "未声明"}</td>
-																	</tr>
-																	<tr>
-																		<th scope="row">参数提示</th>
-																		<td>{selectedSkill.meta.argumentHint ?? "未声明"}</td>
-																	</tr>
-																	<tr>
-																		<th scope="row">License</th>
-																		<td>{selectedSkill.meta.license ?? "未声明"}</td>
-																	</tr>
-																	<tr>
-																		<th scope="row">目录数</th>
-																		<td>{selectedSkill.directoryCount}</td>
-																	</tr>
-																	<tr>
-																		<th scope="row">文件数</th>
-																		<td>{selectedSkill.fileCount}</td>
-																	</tr>
-																</tbody>
-															</table>
-														</div>
-														<div className="settings-editor-card-header">
-															<strong className="settings-agent-mcp-title">metadata</strong>
-															<span className="settings-agent-meta">
-																{selectedSkill.meta.metadata.length > 0
-																	? `${selectedSkill.meta.metadata.length} 项`
-																	: "未声明"}
-															</span>
-														</div>
-														{selectedSkill.meta.metadata.length > 0 ? (
-															<div className="settings-skill-table-wrap">
-																<table className="settings-skill-table">
-																	<thead>
-																		<tr>
-																			<th scope="col">Key</th>
-																			<th scope="col">Value</th>
-																		</tr>
-																	</thead>
-																	<tbody>
-																		{selectedSkill.meta.metadata.map((entry) => (
-																			<tr key={`${entry.key}:${entry.value}`}>
-																				<td>{entry.key}</td>
-																				<td>{entry.value}</td>
-																			</tr>
-																		))}
-																	</tbody>
-																</table>
-															</div>
-														) : (
-															<span className="settings-help-text settings-help-text-tight">
-																`metadata` 段为空或未声明。
-															</span>
-														)}
-													</div>
-
-													<div className="settings-editor-card">
-														<div className="settings-editor-card-header">
-															<strong className="settings-agent-mcp-title">目录树</strong>
-															<span className="settings-agent-meta">
-																只展示名称与层级，不读取文件内容
-															</span>
-														</div>
-														<div className="settings-skill-tree-panel">
-															{renderSkillTreeNode(selectedSkill.tree)}
-														</div>
-													</div>
-												</>
-											) : (
-												<div className="settings-empty-panel">
-													<strong className="settings-empty-title">没有选中的 skill</strong>
-													<span className="settings-help-text settings-help-text-tight">
-														先从上面的卡片里选择一个公共 skill，下面才会显示 meta 和目录树。
-													</span>
-												</div>
-											)}
-										</div>
-									</div>
-								</section>
+								<SkillsSettingsSection
+									bindSectionBlockRef={bindSectionBlockRef}
+									onViewSkill={handleViewSkill}
+									selectedSkill={selectedSkill}
+									selectedSkillId={selectedSkillId}
+									skillCatalog={skillCatalog}
+									skillError={skillError}
+								/>
 							) : null}
 
 							{activeSection === "about" ? (
-								<section
-									aria-labelledby={getSettingsTabId("about")}
-									className="settings-section"
-									id={getSettingsPanelId("about")}
-									role="tabpanel"
-									tabIndex={0}
-								>
-									<div
-										className="settings-editor-card settings-editor-card-subtle"
-										id="about-overview"
-										ref={bindSectionBlockRef("about-overview")}
-									>
-										<div className="settings-item">
-											<span className="settings-info-label">版本</span>
-											<span className="settings-info-value">0.1.0</span>
-										</div>
-										<div className="settings-item">
-											<span className="settings-info-label">检查更新</span>
-											<button className="settings-button" type="button">
-												检查更新
-											</button>
-										</div>
-									</div>
-								</section>
+								<AboutSettingsSection bindSectionBlockRef={bindSectionBlockRef} />
 							) : null}
 						</div>
 					</div>
