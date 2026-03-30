@@ -48,12 +48,13 @@
 其中外部系统包括：
 
 - 操作系统窗口与全局快捷键
+- 操作系统默认 opener 与外部应用
 - 操作系统通知中心
 - 本地配置文件与 workspace 历史
 - 本地应用索引、文件系统、目录监听
 - ACP agent 进程
 - OpenAI 兼容 LLM / OCR / Embedding 服务
-- LanceDB 与 SQLite
+- LanceDB 与 SQLite（含 RAG 元数据与 BM25/FTS 词法索引）
 
 核心原则：
 
@@ -82,17 +83,37 @@ launcher 进入轻量 RAG 问答结果展示态后，前端会把原生窗口 re
 
 macOS 下 launcher 不是普通文档窗口，而是服务于全屏覆盖场景的高层级 `NSPanel`。它会叠加 `nonactivating_panel`、全屏辅助 collection behavior 和 `Status` 窗口层级，以覆盖全屏 Space。这个约束直接服务于全局唤起和短时输入，不允许前端或业务流程把它当成长期主窗口去驱动。
 
-`settings` 里凡是显式提交的分组，都把保存、恢复已保存版本和定位问题动作放在主编辑区内的草稿操作卡，不再挂在页面头部。
+`settings` 里凡是显式提交的分组，都把保存、恢复已保存版本和定位问题动作收敛在主编辑区入口，不再挂在页面头部。像 RAG 这类输入密集分组优先使用紧凑状态/操作条，而不是再叠一张独立大卡去占首屏。
 
-`settings` 里的短说明型表单优先靠组件级响应式布局消化横向空间：宽窗口下直接并排说明与控件，容器变窄时再回退堆叠，避免把本可横向解决的信息继续压成长滚动。
+`settings` 里凡是“多条目里选当前编辑对象”的目录，都必须暴露真实互斥选择语义，例如 `radiogroup/radio` 或等价模式；不能继续拿普通按钮状态去冒充单选关系。自定义模型选择器同样必须补齐 `combobox/listbox/option` 语义和键盘流，而不是只保留视觉下拉效果。
 
-`settings` 的主内容区只保留一层 section header：分组标题、简短说明和块级跳转共用同一行或同一区块，不再额外叠一层“当前分组”舞台或独立 jump rail 去消耗首屏。
+`settings` 里的短说明型表单优先靠组件级响应式布局消化横向空间：像 `input`、`select`、`combobox` 这类短字段默认并排“左侧说明 / 右侧控件与帮助”，容器变窄时再回退堆叠；`textarea`、目录列表和长说明块才继续保持纵向展开，避免把本可横向解决的信息继续压成长滚动。这个规则不是一刀切模板，像通用页的通知、外观、OCR 这类线性设置仍应保持单列顺排，避免把依赖关系横向打散。
+
+`settings` 里的配置卡片内部字段列表允许组件级双列，但不是一刀切：RAG、LLM、ACP、MCP 这类编辑卡里的多个短字段可以左右分布，用卡片内部横向空间缩短纵向长度；header、动作区、模型选择器、`textarea`、多行目录和长说明块必须自动跨满整行。像 `AI 功能` 这种按任务组织、依赖渐进展开的任务卡，则继续保持单列任务流，避免被误拉成细长工作台。
+
+`settings` 里的次级说明、用途摘要和安装提示优先平铺为普通区块，不再默认额外包一层渐变次卡；块级跳转也要尽量使用更短标签和更轻的 pill，避免把辅助信息重新堆成首屏噪声。
+
+`settings` 的输入密集型页面默认走单列主流程：摘要、状态、主表单、次级说明和结果区按阅读顺序顺排，不再把能力说明、安装指南、扫描结果这类次级块挂成长期并排侧栏。只有像快捷键这类局部短行说明，才保留组件级双列并在容器变窄时回退堆叠。
+
+`settings` 左侧分组导航只在真正窄到无法稳定容纳双列时，才允许退到主内容上方。像 `720px` 这类仍能维持“左侧分组 / 右侧编辑”主骨架的窗口宽度，必须继续优先让位给当前编辑区，不能让导航先占掉首个可编辑字段的首屏空间。
+
+`settings` 里的摘要卡也必须维持单层信息结构：允许一张摘要卡承载主状态和扁平事实列表，但不允许在摘要卡内部再堆一排同构小卡去伪造层级；主次优先靠排版、留白和分组建立，而不是再加第二层边框容器。
+
+`settings` 里的说明型侧栏块也应保持同一原则：只要风险、规则、建议动作或最近一次操作结果本身就是对“当前配置”的解释，就直接并入对应摘要卡；只有真正独立于当前配置的结果或状态，才保留单独板块。RAG 的最近一次手动重建结果也属于这一类，不再单独挂一个“扫描结果”卡。即便需要解释，也优先用分段、definition list 或短规则列表建立层级，不再把两三条说明拆成并列同构小卡。
+
+`settings` 的主内容区只保留一层 section header：分组标题、简短说明和块级跳转共用同一行或同一区块，不再额外叠一层“当前分组”舞台或独立 jump rail 去消耗首屏。块级跳转只保留真正会离开当前视口的编辑区或结果区，不重复给首屏已可见的摘要块再挂一层导航；如果当前分组实际上只有 1 个可跳目标，或像通用页这样首屏已经能直接建立结构，就直接隐藏 jump，不为了形式完整再留一张无意义跳转卡。
+
+像 `ACP Agent` 这类需要先建草稿再编辑的分组，空状态也必须直接落到可操作主任务上：模板选择、创建空白草稿和后续基础字段属于同一条流程，不允许先堆一张不可提交的保存状态卡或把入口拆成多个互相竞争的空面板。
+
+进入分组内“当前草稿”编辑态后，共享双列规则也必须服从主任务可编辑性：只要当前字段或动作区被压到影响输入和扫读，就应退回单列主表单或整行动作区，不能为了复用统一布局继续把活跃表单挤成窄列。
 
 其中 `AI 功能` 分组按任务边界组织为“翻译配置”和“文档问答配置”两个编辑卡，每张卡同时维护任务级模型路由和系统提示词；`LLM` 分组只维护可复用条目本身，不承载任务默认选择。
 
 长文本型设置默认走渐进展开而不是整页常驻全高输入框。像 `AI 功能` 里的提示词编辑，首屏优先展示任务状态和核心路由，长文本编辑器只在用户明确展开时出现。
 
 `LLM` 分组允许先创建普通 OpenAI-compatible 条目，再在同一张编辑卡里按需套用只读内置供应商模板。
+
+`LLM` 条目的主编辑区遵守“模式先显式、字段后展开”的顺序：模板、配置类型和模型来源要先说明它们各自会改写什么边界，再进入名称、接入点、密钥和模型字段。用途与能力说明只保留约束性信息，不再重复目录区已经可见的身份摘要。版式上要与 `AI 功能`、`RAG` 这些输入密集分组保持同一节奏：状态条之后拆成多段主编辑卡，不允许再退回成单块细长长表单。
 
 内置模板目录属于应用发布物，不写入用户配置；用户最终保存的仍然是普通 `LlmProviderConfig` 条目和本地 API Key。这样可以把“供应商引导元数据”和“用户私有密钥配置”分开，避免升级和持久化边界混淆。
 
@@ -208,6 +229,7 @@ macOS 下 launcher 不是普通文档窗口，而是服务于全屏覆盖场景�
 - `@token` 走 workspace 内文件搜索
 - 显式 `/` 命令和强信号输入走动作匹配
 - 普通文本优先应用搜索
+- `/open` 这类有副作用的本地动作由 Rust 运行时直接调系统 opener 执行，不把平台命令拼接和路径解析下放到前端
 - 应用候选不成立时，主动作可回退到轻量 RAG 问答
 
 ### 6.2 设置链路
@@ -275,29 +297,37 @@ RAG 分成两块：
 
 - 输入来自设置页里的 source directories、ignore globs 和 embedding provider
 - ignore globs 分成“固定内置规则 + 用户追加规则”两层：固定规则默认覆盖 `.git`、`node_modules`、`vendor`、`Pods`、`target`、`dist`、`build`、`out`、`.next`、`.nuxt`、`.svelte-kit`、`.turbo`、`.cache`、`coverage`、`.venv`、`venv`，后端归一化时会强制补回，前端不提供取消入口；用户只能在此基础上继续追加
-- `RagIndexService` 维护 LanceDB 向量索引和 SQLite 元数据；文件级索引目标以 embedding fingerprint 表达，而不是只记模型名。fingerprint 先尝试从模型自身的稳定身份推导，例如显式 digest、`/models` 返回项里的 digest/fingerprint hint，或官方托管模型 ID；只有无法稳定确认模型空间时才回退到 endpoint 绑定
+- `RagIndexService` 维护 LanceDB 向量索引和 SQLite 元数据；SQLite 除了文件级 metadata，还承载 active chunk 的 `FTS5 + bm25()` 词法索引，供运行时混合召回使用。文件级索引目标以 embedding fingerprint 表达，而不是只记模型名。fingerprint 先尝试从模型自身的稳定身份推导，例如显式 digest、`/models` 返回项里的 digest/fingerprint hint，或官方托管模型 ID；只有无法稳定确认模型空间时才回退到 endpoint 绑定
+- `rag` 的 Rust 实现已经从单个 `rag.rs` 收口为目录模块：`service` 负责 watcher 生命周期和入口，`indexing` 负责全量/增量计划与 staged/active 切换，`storage` 负责 LanceDB/SQLite，`embedding` 负责 fingerprint 和批处理请求，`chunking` 负责文档切块，`config` / `status` / `model` 负责共享规则、运行态状态和类型边界；后续修改默认沿这条边界落位，不再把不同层职责重新堆回单文件
+- `document_extract` 是索引入口前的显式抽取层：纯文本和 Markdown 仍按 UTF-8 文本处理，`docx` 先规范化成 Markdown 风格文本，文本型 `pdf` 先按页抽取成 block，再进入后续 chunk 打包
 - Markdown 文档切块不是简单按固定字符窗口切。索引侧会先按标题、列表项、代码块和普通段落做语义预切，再在同一标题路径内按字符预算打包；只有单个语义块本身过大时，才回退到通用 splitter 在块内继续拆分
+- PDF chunk 的主定位锚点是 `page_start/page_end`；文本类文件继续保留 `line_start/line_end/paragraph_line_start` 强语义，citation 不再对 PDF 伪造行号
 - watcher 只监听显式配置目录；纯 metadata 噪音不会升级成整文件重读或重分片
 - 手动全量重建和后台 watcher 增量维护共享同一套存储互斥，避免并发改写同一份 LanceDB / SQLite
-- schema 或 embedding fingerprint 变化会触发重建语义
+- schema、embedding fingerprint 或 extractor fingerprint 变化会触发重建语义
 - 运行态单独暴露 `phase/scanned/completed/total/pending` 这组结构化计数，launcher 状态栏直接消费，不靠字符串猜重建进度
 
 问答侧：
 
 - launcher 触发 `rag_answer`
 - `AppState` 只负责装配运行时依赖并转调独立的问答后端模块；问答核心通过库导出的稳定函数接口暴露，允许在不启动 Tauri UI 和 `AppState` 的前提下单独做集成测试
+- `rag_answer` 本身不再继续膨胀成单文件总控；当前按 `conversation_state`、`result`、`parsing`、`tool_catalog`、`tool_execute`、`protocol_responses`、`protocol_chat` 拆成子模块，根模块只保留共享类型、入口编排和统一回合循环
 - 服务按 AI 功能页里显式选择的问答 LLM 协议分流到 `responses` 或 `chat/completions`，不做跨协议 fallback
-- 内置工具至少包括 `wabity.rag.query` 和 `wabity.read_file_lines`
+- 内置工具至少包括 `wabity.rag.query`、`wabity.read_file_lines`、`wabity.read_document_excerpt` 和有副作用的 `wabity.system.open`
+- `wabity.system.open` 虽然会随问答工具列表一起注入，但只有当前问题明确要求“打开链接 / 文件 / 目录”时才允许真正执行；本地路径仍只允许落在当前 workspace 根目录和显式配置的 RAG source roots 内
+- `wabity.system.open` 的 tool description 不是静态文案；后端会在构建请求时动态拼入当前宿主机的操作系统、版本，以及 PATH 上实际检测到的包管理器列表，减少模型对运行环境的臆测
 - `responses` 链路会优先注入全局 HTTP/SSE MCP server；若某个兼容层对工具支持不完整，在带 `type=mcp` 或普通 `function` tools 时首轮返回 5xx，或请求长时间挂起后超时/取消，后端会逐级收缩到“仅内置 function tools”，必要时再收缩到“无工具请求”重试当前轮，并把这次兼容结果缓存在当前进程里，后续同一 provider/model 直接使用已知可用级别
 - 前端只消费结构化结果、citation 和 action 轨迹
-- RAG 索引构建与检索同样通过库导出的稳定函数接口暴露最小测试入口，允许集成测试直接验证“建库 -> query embedding -> LanceDB 检索 -> 命中裁剪”的端到端行为，而不需要先启动 `AppState`
-- RAG 检索不会为了凑满 `top_k` 把弱相关尾部一起返回；运行时会先扩大候选窗口，再做轻量 rerank，并结合显式 `min_score`、默认高置信门槛、相对首命中的尾部截断、强实体 query 的锚点词硬过滤，以及标题-only / base64 类低质量 chunk 剔除，只保留高关联候选
+- citation 必须稳定携带 `document_kind`，并在页码锚点可用时优先展示页码；前端不能继续把所有命中都渲染成“文件行号”
+- RAG 索引构建与检索同样通过库导出的稳定函数接口暴露最小测试入口，允许集成测试直接验证“建库 -> 向量/词法混合召回 -> 命中裁剪”的端到端行为，而不需要先启动 `AppState`
+- RAG 检索不会再把召回完全绑死在单一路径向量 top-k 上；运行时会并行执行 LanceDB 向量候选和 SQLite `FTS5 + bm25()` 词法候选，按 `absolute_path + chunk_index` 去重合并后，再做轻量 rerank，并结合显式 `min_score`、默认高置信门槛、相对首命中的尾部截断、强实体 query 的锚点词硬过滤，以及标题-only / base64 类低质量 chunk 剔除，只保留高关联候选
 - OpenAI-compatible 的 URL 归一化、鉴权注入、请求发送、错误体提取、`responses`/`chat` 文本提取、SSE 流式消费与归并、`/models` 提取统一收口到基础设施层薄 client，避免问答、翻译、OCR、embedding、模型列表各自复制一份脆弱传输逻辑
 
 关键设计：
 
 - RAG 不自动把检索结果偷偷塞进 prompt
 - 模型必须显式调用工具获取证据
+- 有副作用的 `wabity.system.open` 不属于“证据获取”，不能被模型主动猜测式调用；运行时和系统提示都会重复施加这条限制
 - 续链状态由显式 `conversation_state` 承载，而不是靠前端猜测
 - 只有当前 provider + workspace scope 匹配时才允许续链
 - `responses stateful` 的继续追问如果因为 provider 预算或累计上下文过大被拒绝，后端会丢弃旧 `response_id`，改用最近历史重试一次，避免长 response chain 直接把问答链路打死
@@ -461,12 +491,14 @@ ACP 是独立于 launcher 轻量问答的第二条交互链。
 | `src-tauri/src/domain/README.md`         | 领域模型设计与边界                        | UI 细节                          |
 | `src-tauri/src/services/README.md`       | 各服务职责与用例边界                      | 页面布局细节                     |
 | `src-tauri/src/infrastructure/README.md` | 平台能力、配置存储、窗口约束              | 业务规则细节                     |
+| `public/`                                | 前端静态资源与共享品牌源图                | 平台打包后的派生二进制图标       |
 | `docs/`                                  | 大型方案、决策过程、阶段进度              | 稳定架构总览的替代品             |
 
 ## 11. 当前目录概览
 
 ```text
 .
+├── public
 ├── src
 │   ├── app
 │   ├── features
@@ -484,3 +516,5 @@ ACP 是独立于 launcher 轻量问答的第二条交互链。
 ```
 
 这个结构本身已经表达了当前架构：前端只保留 UI feature，Rust 侧按边界清晰分层，`docs/` 承接大型方案，而不是把所有信息继续压进一个总文档。
+
+静态品牌源图当前集中在 `public/wabity.svg`；桌面端打包所需的 `png/icns/ico` 派生图标统一落在 `src-tauri/icons/`，避免前端和打包链各自维护一份不同语义的图标。

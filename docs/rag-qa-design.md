@@ -10,6 +10,8 @@
 - 问答答案走 Markdown 渲染，引用通过独立 `References` 列表展示
 - 点击引用会通过 `open_document_reference(path)` 打开本地文件
 - v2 起，问答不再自动预注入 RAG 命中片段，而是给模型注入内置 `wabity.rag.query` / `wabity.read_file_lines` 和全局 HTTP/SSE MCP server，由模型自己发起工具调用；其中 `wabity.read_file_lines` 只允许读取当前 workspace 和显式配置的 RAG source roots
+- v2.3 起，问答额外内置注入有副作用工具 `wabity.system.open`，用于显式“打开链接 / 文件 / 目录”的请求；它默认也出现在工具列表里，但运行时只有在当前问题明确要求打开时才允许真正执行，本地路径仍只允许落在当前 workspace 和显式配置的 RAG source roots 内
+- v2.3 起，`wabity.system.open` 的 tool description 会动态拼装当前宿主机的操作系统、版本，以及 PATH 上检测到的包管理器列表，降低模型对运行环境的硬编码假设
 - v2 起，launcher 会把最近几轮问答的 user/assistant 文本显式回传给后端，形成轻量多轮上下文；这仍然不是 ACP session
 - `Esc` 显式隐藏 launcher 时会把这份轻量多轮上下文连同当前输入、内联结果和当前激活 session 选择一起清掉，回到干净的 launcher 初始态；其它隐藏路径只隐藏窗口，继续保留上下文
 - v2 起，问答请求会显式打开 `parallel_tool_calls`，并在模型返回多个本地 function call 时并发执行，再把 tool output 回填给下一轮 `responses`
@@ -21,7 +23,7 @@
 基于现有 RAG 向量索引和 MCP 配置，补一条“从 launcher 直接提问”的问答链路：
 
 - 用户在 launcher 输入问题
-- 系统把读文件、RAG Query 和可直连的 MCP server 作为工具注入给模型
+- 系统把读文件、RAG Query、受限 opener 和可直连的 MCP server 作为工具注入给模型
 - 模型按需自行检索、读文件、调用外部 MCP 工具
 - 工具结果回填后再生成答案
 - launcher 内联显示答案
@@ -133,6 +135,8 @@
 - `reasoning` 是可选次级字段，只在 provider 能同时给出明确正文和 reasoning 时回传；前端只能把它渲染成折叠的 thought disclosure，不能再把它直接当正文兜底展示
 - 后端只会在 scope 与当前 provider + workspace 一致时沿用这份状态；scope 不匹配时必须把旧状态和旧历史一起丢弃，避免跨模型或跨 workspace 误续链
 - 如果 `responses stateful` 的首轮续问因为 provider 预算或累计上下文过大被拒绝，后端应丢弃旧 `response_id`，回退到显式最近历史再重试一次；否则长 response chain 会把后续问答直接锁死
+- `wabity.system.open` 属于有副作用工具；即使它被注入到工具列表里，模型也只能在当前用户明确要求“打开”时调用，不能把“我可以顺手帮你打开”当作默认行为
+- `wabity.system.open` 的本地路径白名单与引用打开链路一致：只允许当前 workspace 和显式配置的 RAG source roots；tool description 还会动态附带宿主机 OS / version / package managers，避免模型瞎猜当前环境
 
 前端显示策略：
 
@@ -185,13 +189,13 @@
 1. 校验 RAG 已配置扫描目录和 embedding 条目
 2. 校验 AI 功能页已经选择可用于生成答案的问答 LLM 条目
 3. 用 RAG 的 embedding 模型对用户问题生成 query embedding
-4. 在 LanceDB 对 `vector` 列做 top-k 相似搜索
-5. 读取候选 chunk 的 `absolute_path`、对外展示用 `path`、`chunk_index`、`line_start`、`line_end`、`paragraph_line_start`、`heading_path`、`text`
+4. 在 LanceDB 对 `vector` 列做 top-k 相似搜索，同时在 SQLite `FTS5 + bm25()` 上做一轮关键词候选召回
+5. 按 `absolute_path + chunk_index` 去重合并两路候选，并读取候选 chunk 的 `absolute_path`、对外展示用 `path`、`chunk_index`、`line_start`、`line_end`、`paragraph_line_start`、`heading_path`、`text`
 6. 做一次轻量重排和裁剪，再送给 LLM；裁剪不只看固定 `top_k`，还要同时过滤低于默认高置信阈值、明显落后于首个命中的弱相关尾部、以及不满足强实体锚点词约束或命中标题-only / base64 低质量 chunk 的结果
 
 建议的 v1 参数：
 
-- 初始召回 `top_k = 12`
+- 每路初始召回 `top_k = 12`
 - 每个文件最多保留 `2` 个 chunk，避免单文件霸榜
 - 最终送入 LLM 的 chunk 数 `4~6`
 - 文本总预算控制在 `4_000 ~ 8_000` 字符
@@ -370,3 +374,4 @@ v1 阈值可以先做静态配置，后续再按模型/距离度量调参。
 - 2026-03-21：`responses stateful` 在首轮续问遇到 provider budget/context 限制时，会自动丢弃旧 `response_id`，回退到显式最近历史重试一次，降低长链续问失败概率
 - 2026-03-25：新增 `question_answer_backend` 公开入口；当前已用本地 mock `chat/completions` server 补上脱离 `AppState` 的问答后端集成测试，验证 builtin `wabity.read_file_lines` 工具回路
 - 2026-03-26：RAG 建索引已先支持 `.docx`；索引侧会把 `docx` 规范化成 Markdown 风格文本后再分块，问答里的 `wabity.read_file_lines` 也同步复用这条抽取逻辑回读规范化文本
+- 2026-03-28：问答内置工具新增 `wabity.system.open`；该工具只在当前问题明确要求打开时可执行，本地路径继续复用 workspace / RAG roots 白名单，tool description 会动态拼装宿主机 OS / version / package managers

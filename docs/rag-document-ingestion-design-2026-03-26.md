@@ -35,11 +35,13 @@
 ## 当前状态
 
 - 2026-03-26：第一步已落地 `docx`
+- 2026-03-28：第二步已落地文本型 `pdf`
 - 当前实现新增独立 `document_extract` 模块
 - `docx` 会先解 ZIP，读取 `word/document.xml`，并在可用时读取 `word/styles.xml`
 - 抽取结果会被规范化成 Markdown 风格文本，再复用现有标题路径和语义切块逻辑
-- `wabity.read_file_lines` 已同步支持对 `docx` 返回规范化后的可读文本行
-- `pdf` 和旧二进制 `.doc` 仍未实现
+- 文本型 `pdf` 会先按页抽取文本、做轻量页眉页脚去噪，并切成页级 block；当前 chunk 主锚点为 `page_start/page_end`
+- `wabity.read_document_excerpt` 已支持按 `path + chunk_index` 回读抽取型文档摘录，`wabity.read_file_lines` 继续只服务文本行语义稳定的文档
+- 旧二进制 `.doc` 仍未实现
 
 ## 非目标
 
@@ -416,6 +418,11 @@ LanceDB chunk 行和查询返回结构建议补充：
 - 文本型 PDF 能被扫描、分块、检索
 - 检索结果能显示页码锚点
 
+阶段状态：
+
+- 已完成
+- 当前仍未支持扫描版 PDF OCR
+
 ### 阶段 4：问答精读补齐
 
 - 新增 `wabity.read_document_excerpt`
@@ -426,6 +433,11 @@ LanceDB chunk 行和查询返回结构建议补充：
 
 - 模型可以继续精读 PDF / DOCX 的规范化片段
 - 不再依赖伪造“行号”完成验证
+
+阶段状态：
+
+- 已完成 `wabity.read_document_excerpt` 和前端 citation 页码展示
+- `docx` 当前仍兼容 `wabity.read_file_lines`；后续若要彻底统一抽取型文档精读入口，再收口到同一个 excerpt 工具
 
 ### 阶段 5：DOC 适配
 

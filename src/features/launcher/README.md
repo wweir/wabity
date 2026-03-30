@@ -4,7 +4,7 @@
 
 - 管理 launcher 主窗口 UI
 - 协调 workspace 地址栏、session 点、输入内容、候选动作和执行结果
-- 处理键盘导航与前端副作用（打开 URL、复制文本）
+- 处理键盘导航与前端副作用（复制文本，以及浏览器 fallback 下的链接打开）
 - `LauncherPage.tsx` 只保留状态编排、命令调用和事件处理；纯函数和展示块拆到同目录模块与 `components/`
 
 当前代码组织：
@@ -81,6 +81,7 @@
 - 启动时会读取后端恢复提示，并以内联提示块展示哪些 session 没能通过 agent 恢复
 - 候选项收敛为附着式建议列表
 - 本地 launcher 模式下，输入分三类：`@token` 走 workspace 文件搜索，显式 `/` 或 `http`/`{` 强信号走动作候选，其余文本只有在达到应用搜索阈值后才走应用搜索
+- `/open` 现在由 Rust 运行时统一执行：显式 URL、裸域名、绝对路径、`~` 路径和相对当前 workspace 的文件/目录都会先在后端解析，再交给系统默认 opener；浏览器 fallback 只保留 URL 打开，不伪装成本地文件能力
 - 应用搜索当前只面向已安装桌面应用；前端只负责展示候选和触发启动，不自己拼本地索引
 - 移除输入框下方的常驻 workspace 描述，只保留必要的错误或执行反馈
 - 补全提示改为跟随输入光标的浮动候选框，位置和内容都基于光标前文本实时刷新，默认高亮第一项；动作候选固定显示“主 `/` 命令 + 简短说明”，应用候选显示应用名和 bundle 路径；主动作按钮显式展示快捷键：单行和多行输入都用 `Enter`，多行模式换行改为 `Ctrl/Cmd+Enter`；候选框可见时 `Enter` 默认执行当前模式的主动作，`Esc` 默认隐藏整个补全框；slash 动作确认后不会再把完整命令文本留在输入框里，而是进入一次性的待执行状态：输入框只保留 payload，下一次 `Enter` 或主按钮直接执行；如果确认时已经带 payload，则该次确认直接执行，并在成功后仍只保留 payload；已选 slash 动作还会接受最短命令前缀和紧贴 payload 的写法，例如 `/uhello` 会按 `/upper hello` 处理；通过上下键显式选中某个 slash 动作后，执行也会以该动作为准，不会把前导 `/` 残留进 payload；slash 执行后会保留 payload 内原来的光标逻辑位置，不会强制跳到末尾；高亮项变化时列表会自动滚动，尽量保持高亮项居中
@@ -128,5 +129,6 @@
 - `Esc` 显式收起 launcher 时，现在按“结束当前这一轮 launcher 本地交互”处理：除了清空轻量问答上下文，还要同步清掉当前输入、内联结果展示、pending slash 动作和当前激活 session 选择，重新回到干净的 launcher 初始态；其它隐藏路径例如 blur auto-hide、打开引用前的临时隐藏、执行结果要求关闭 launcher 或全局快捷键 toggle 隐藏都保留当前上下文，避免把“临时收起窗口”和“主动结束本轮交互”混成同一个动作
 - 轻量问答的结构化 payload 除了 `conversationState`、citation、action 和 tool 摘要外，还允许带一段可选 `reasoning`；只有在 provider 同时给出明确正文和 reasoning 时，前端才把这段 reasoning 接成次级 thought 折叠块，绝不能再把 reasoning 当主答案兜底展示；`chat/completions` 兼容层若把 thinking 作为 `content` 数组项或 `<think>...</think>` 片段返回，后端也必须先拆成 `primary_text + reasoning`
 - 问答成功后，反馈区优先切到轻量对话历史，而不是只显示最后一张结果卡；assistant 内容仍走 Markdown 渲染，便于继续追问
-- 问答请求会显式携带工具列表：无论 `responses` 还是 `chat/completions`，都会注入内置 `wabity.read_file_lines` 和 `wabity.rag.query`；只有 `responses` 额外注入全局 MCP 里的 HTTP/SSE server。模型可以在单轮里并发调用多个工具，页面不再只显示压缩摘要，而是直接复用 `SessionTimeline` 的 action bar 渲染“第 N 步”、tool call 输入和 tool result 输出
+- 问答请求会显式携带工具列表：无论 `responses` 还是 `chat/completions`，都会注入内置 `wabity.read_file_lines`、`wabity.read_document_excerpt`、`wabity.rag.query` 和 `wabity.system.open`；只有 `responses` 额外注入全局 MCP 里的 HTTP/SSE server。模型可以在单轮里并发调用多个工具，页面不再只显示压缩摘要，而是直接复用 `SessionTimeline` 的 action bar 渲染“第 N 步”、tool call 输入和 tool result 输出
+- `wabity.system.open` 属于有副作用工具：只有当前问题明确要求“打开”时后端才会放行执行，本地路径仍只允许当前 workspace 和显式配置的 RAG source roots；该工具说明还会动态带上宿主机 OS / version / package managers，避免模型误判平台环境
 - 本地文件引用点击打开需要单独命令；不要把桌面 opener 逻辑混进 `MarkdownRenderer`
