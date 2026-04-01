@@ -1,0 +1,68 @@
+<svg
+	xmlns="http://www.w3.org/2000/svg"
+	viewBox="0 0 512 512"
+	role="img"
+	aria-labelledby="wabityIconTitle"
+>
+	<title id="wabityIconTitle">Wabity Launcher Hub Icon</title>
+	<defs>
+		<linearGradient
+			id="wabity-bg"
+			x1="108"
+			y1="84"
+			x2="404"
+			y2="428"
+			gradientUnits="userSpaceOnUse"
+		>
+			<stop offset="0" stop-color="#183629" />
+			<stop offset="1" stop-color="#10261c" />
+		</linearGradient>
+		<linearGradient
+			id="wabity-launcher"
+			x1="198"
+			y1="170"
+			x2="314"
+			y2="220"
+			gradientUnits="userSpaceOnUse"
+		>
+			<stop offset="0" stop-color="#c6f472" />
+			<stop offset="1" stop-color="#74c64f" />
+		</linearGradient>
+		<linearGradient
+			id="wabity-mark"
+			x1="167"
+			y1="145"
+			x2="336"
+			y2="371"
+			gradientUnits="userSpaceOnUse"
+		>
+			<stop offset="0" stop-color="#f7fbe9" />
+			<stop offset="1" stop-color="#e3f0c3" />
+		</linearGradient>
+	</defs>
+	<rect x="36" y="36" width="440" height="440" rx="116" fill="url(#wabity-bg)" />
+	<rect
+		x="36"
+		y="36"
+		width="440"
+		height="440"
+		rx="116"
+		fill="none"
+		stroke="#3f7358"
+		stroke-width="4"
+	/>
+	<path
+		d="M144 164H188L222 286L236 230V144H276V230L290 286L324 164H368L314 364H276L256 314L236 364H198L144 164Z"
+		fill="url(#wabity-mark)"
+	/>
+	<rect
+		x="200"
+		y="170"
+		width="112"
+		height="42"
+		rx="18"
+		fill="url(#wabity-launcher)"
+		stroke="#29543e"
+		stroke-width="4"
+	/>
+</svg>

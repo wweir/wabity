@@ -5,12 +5,14 @@
 当前仓库已完成第一批可运行骨架：
 
 - `Tauri v2` 桌面壳与 `React` 前端集成
-- 全局快捷键切换主窗口
-- macOS 下支持全局快捷键触发交互式截图 OCR；`Alt+R` 只识别后回填 launcher，`Alt+D` 会先尝试翻译当前应用的选中文本，只有没有选中文本时才回退到截图 OCR 并翻译
+- 同一用户登录会话内只允许一个 launcher 原生实例；重复启动会直接唤醒已有窗口
+- 全局快捷键支持切换主窗口、翻译选中文本/OCR，以及直接打开历史剪贴板；默认分别为 `Alt+Space`、`Alt+D`、`Alt+V`
+- macOS 下支持全局快捷键触发交互式截图 OCR；`Alt+D` 会先尝试翻译当前应用的选中文本，只有没有选中文本时才回退到截图 OCR 并翻译
 - OCR provider 现已支持本地 macOS Vision 和远程 OpenAI 兼容多模态模型
-- 设置页已把快捷键、外观和 OCR 配置并入“通用”；“AI 功能”页按“翻译配置 / 文档问答配置”两个任务卡片维护各自的模型和系统提示词；LLM 页面统一维护 OpenAI 风格接入点下的单模型条目：配置类型直接区分 `LLM · responses stateless`、`LLM · responses stateful`、`LLM · chat/completions` 和 `Embedding`，其中 `responses` 页面仍可额外声明多模态；RAG 配置页支持用这些 embedding 模型为选中目录中的 `.md`、`.mdx`、`.txt`、`.markdown`、`.rst`、`.adoc` 文件构建并持续维护本地 LanceDB 向量索引，配套 SQLite 元数据缓存、watcher 增量维护、`staged/active` 版本切换，以及基于 `原文文本 + embedding fingerprint` 的全局向量复用以减少重复 embedding
+- 设置页已把快捷键、外观和 OCR 配置并入“通用”；“AI 功能”页按“翻译配置 / 文档问答配置”两个任务卡片维护各自的模型和系统提示词；LLM 页面统一维护 OpenAI 风格接入点下的单模型条目：配置类型直接区分 `LLM · responses stateless`、`LLM · responses stateful`、`LLM · chat/completions` 和 `Embedding`，其中 `responses` 页面仍可额外声明多模态，并提供 `OpenAI / DeepSeek / Ollama / 智谱 / SiliconFlow` 等内置模板；RAG 配置页支持用这些 embedding 模型为选中目录中的 `.md`、`.mdx`、`.txt`、`.markdown`、`.rst`、`.adoc` 文件构建并持续维护本地 LanceDB 向量索引，配套 SQLite 元数据缓存、watcher 增量维护、`staged/active` 版本切换，以及基于 `原文文本 + embedding fingerprint` 的全局向量复用以减少重复 embedding
 - 透明窗口 + 圆角 launcher 外观
 - 默认单行输入框，可按 `Cmd/Ctrl+Enter` 插入换行并切到多行模式；单行和多行都用 `Enter` 执行
+- 历史剪贴板通过全局快捷键 `Alt+V` 打开独立面板：后台只保留少量文本记录，并支持固定少量常用项；如果 launcher 已在前台，选中某条会插入 launcher 输入框；否则会写回系统剪贴板、记住呼出前的前台应用、隐藏 launcher、重新激活原应用，并在确认目标应用重新成为前台后再发送粘贴快捷键
 - 普通动作补全不再对任意非空输入立刻弹出；只有显式 `/` 命令、`http`/`{` 这类强信号输入，或满足 2 个英文字符 / 1 个非英文字符后才显示候选
 - `/` 候选只保留真实可执行命令，并以“主命令 + 简短说明”展示，不暴露内部匹配评分
 - JSON 格式化命令以 `/format` 为主，支持 `/fmt` 与兼容别名 `/json`；输入合法 JSON 载荷时会在输入框下方直接显示 pretty format 预览
@@ -48,6 +50,8 @@ macOS 下显式构建 `dmg`：
 ```bash
 npm run tauri:build:macos:dmg
 ```
+
+这个脚本会先启动一个本地补丁 watcher，在 `@tauri-apps/cli` 生成临时 `bundle_dmg.sh` 后立即打补丁：保留 Finder AppleScript 美化流程，但给 `osascript` 增加重试和最终降级容错，避免因为 Finder 自动化权限、前台会话时序或偶发 `-1728` 之类错误直接导致整个 DMG 构建失败。
 
 产物输出到 `src-tauri/target/release/bundle/dmg/`，文件名会跟随 `productName`，例如 `Wabity.dmg`、`Wabity.exe`。
 

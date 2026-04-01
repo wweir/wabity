@@ -25,20 +25,20 @@
 1. 选择内置供应商
 2. 跟着引导去官网注册
 3. 生成并填入 API Key
-4. 直接选择推荐模型
+4. 拉取当前服务真实模型目录；目录不可用时再手填模型
 5. 保存后即可被翻译、问答、OCR、RAG 使用
 
 ## 目标
 
 - 在 `LLM` 页面提供“内置供应商模板”目录，而不是只允许纯手工配置
-- 用户选择模板后，系统自动填充协议、默认 `Base URL`、推荐条目名称和能力标签
+- 用户选择模板后，系统自动填充默认 `Base URL`；模型仍以实际服务能力和用户选择为准。若当前模型命中模板目录里的已知元数据，则协议与能力应直接跟随该模型；只有未知模型才退回手工选择
 - 每个内置模板显式展示：
   - 注册入口
   - API Key 管理入口
   - 官方文档入口
   - 预置模型列表
   - 每个模型对应的用途和协议限制
-- 用户即使不调用远端 `/models`，也能直接从内置模型列表完成配置
+- 用户优先通过远端 `/models` 获取当前服务真实可用模型；目录不可用时再手填
 - 仍然保留现有手工模式，避免把企业代理、内网网关和自建兼容层挡死
 
 ## 非目标
@@ -54,7 +54,7 @@
 
 采用“两层模型”：
 
-1. 内置目录层：只描述供应商模板和推荐模型，不保存用户密钥
+1. 内置目录层：只描述供应商模板和接入引导，不保存用户密钥
 2. 用户配置层：沿用现有 `LlmProviderConfig` 保存真实可用条目和用户 API Key
 
 这样做的原因很直接：
@@ -73,7 +73,8 @@
 
 - 用户点击 `新增` 后，先得到一个普通 LLM 草稿
 - 右侧编辑卡顶部提供 `使用模板` 下拉框
-- 选择模板后，当前条目立即被模板填充；切回“不使用模板”时只解除模板约束，不清空当前字段值
+- 选择模板后，当前条目立即被模板填充；切回“不使用模板”时只解除模板来源，不清空当前字段值
+- 模板挂载后仍允许继续修改 `配置类型 / model / OCR 能力`；模板不是持续性锁
 
 ### 2. 模板卡片字段
 
@@ -82,8 +83,11 @@
 - `providerId`
 - `displayName`
 - `description`
+- `registrationLabel`
 - `registrationUrl`
+- `apiKeyLabel`
 - `apiKeyUrl`
+- `docsLabel`
 - `docsUrl`
 - `defaultBaseUrl`
 - `supportsModelListing`
@@ -111,9 +115,17 @@
 - `ocr`
 - `embedding`
 
-`summary` 是下拉框里展示的一句话说明，必须来自官方能力描述的稳定摘要，不允许写成空泛营销文案。
+`summary` 是内置目录中对模型能力的静态说明，主要用于文档和供应商目录维护，不再直接驱动设置页里的默认模型选择。
 
 `selectableInCurrentApp` 明确这个模型当前能不能进入 Wabity 的模型选择器。
+
+这里补一个之前文档没说清的前提：模板动作按钮不能假设所有供应商都遵循“注册 / API Key / 文档”三段式。像 `Ollama` 这种本地 provider，更合理的是：
+
+- `下载安装`
+- `OpenAI 兼容说明`
+- `模型 / Embedding 文档`
+
+所以模板元数据需要自带动作标签，而不是前端写死按钮文案。
 
 原因很简单：
 
@@ -228,6 +240,28 @@ SiliconFlow 免费语言模型目录按 2026-03-23 官方定价页列出以下 1
 - 当前先按 `chat_completions` 模板接入，因为 SiliconFlow 官方文档主链路就是 OpenAI 兼容 `chat/completions`
 - 这些模型里存在 OCR / 视觉理解模型，但 Wabity 当前 OCR 入口仍要求 `responses`；因此这里可以把它们作为普通 LLM 条目创建，用于翻译或问答试配，但不会自动进入 OCR 可选列表
 - 只收录官方定价页当前明确标为免费的语言模型；未标免费、已下线或不在当前页面中的模型不进白名单
+
+### 5. OpenAI / OpenRouter / DeepSeek / Ollama 模板补充
+
+当前目录已额外补四类常见供应商：
+
+- `OpenAI`
+  - `defaultBaseUrl = https://api.openai.com/v1`
+  - 常用模型目录覆盖 `gpt-5.4`、`gpt-5.4-mini`、`gpt-5.4-nano`、`text-embedding-3-small`、`text-embedding-3-large`
+  - 其中通用模型按 `responses` 模板接入，并允许声明多模态和 stateful；Embedding 条目只进入 RAG
+- `OpenRouter`
+  - `defaultBaseUrl = https://openrouter.ai/api/v1`
+  - 这是聚合网关模板，不再在前端内置推荐模型或白名单；模型一律以当前账号实际拉取到的 `/models` 结果为准
+  - 模板只提供注册入口、API Key 页面和官方文档，适合快速填入聚合网关接入点
+- `DeepSeek`
+  - `defaultBaseUrl = https://api.deepseek.com`
+  - 当前目录收录 `deepseek-chat` 和 `deepseek-reasoner`
+  - 它们按 `chat_completions` 模板接入，不进入 OCR 列表
+- `Ollama`
+  - `defaultBaseUrl = http://localhost:11434/v1`
+  - 不要求注册，也不强制 API Key；按钮文案应改成安装和兼容说明
+  - 目录示例覆盖本地常见的 `qwen3:8b`、`gpt-oss:20b`、`qwen3-vl:8b` 和 `embeddinggemma`
+  - 其中视觉模型仍然不会自动进入当前 OCR 列表，因为现有 OCR 入口只接受 `responses + multimodal`
 
 ## 配置模型改动
 
@@ -367,7 +401,7 @@ Rust 侧职责：
 
 对内置条目增加额外约束：
 
-- 模板推荐模型只能声明当前系统支持的组合
+- 模板目录里的模型说明只能声明当前系统支持的组合，不能再被前端当作默认模型来源
 - `ocr` 只能选择 `responses + supportsMultimodal = true`
 - `embedding` 只能进入 RAG embedding 列表
 - `chat_completions` 不能假装支持 stateful
@@ -473,11 +507,13 @@ Rust 侧职责：
 
 - 新增模板目录只读接口
 - LLM 页新增“从内置模板创建”
-- 支持智谱 / SiliconFlow 模板
+- 支持 OpenAI / DeepSeek / Ollama / 智谱 / SiliconFlow 模板
 - 收录智谱免费模型页当前 7 个模型
 - 收录 SiliconFlow 定价页当前 13 个免费语言模型
+- 收录 OpenAI / DeepSeek / Ollama 的常用模型白名单
 - 其中仅允许当前应用可消费的模型进入选择下拉框
 - 模型下拉项展示一句话说明
+- 模板动作按钮文案跟随供应商元数据
 - 保存来源元数据
 
 验收标准：
@@ -554,3 +590,4 @@ UI 必须写清楚“是否可调用仍取决于供应商账户权限”。
 - 2026-03-23：完成完整实现方案设计，确定采用“内置目录层 + 用户配置层”双层结构；首期先落智谱模板验证链路，再按白名单继续扩供应商
 - 2026-03-23：落地首期实现：Rust/前端已接入智谱内置模板目录、白名单模型选择、模型一句话说明，以及“目录可见但当前不可选”的禁用模型展示
 - 2026-03-23：扩展第二批内置模板，新增 SiliconFlow 官方免费语言模型目录，来源对齐 `https://www.siliconflow.cn/pricing#bmf0`
+- 2026-03-31：扩展常见供应商模板，新增 OpenAI / DeepSeek / Ollama；同时把模板动作按钮改成供应商自定义标签，避免本地 provider 被误渲染成“注册 / API Key”流程

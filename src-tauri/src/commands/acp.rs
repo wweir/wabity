@@ -6,7 +6,7 @@ use tauri::{
 use crate::{
     domain::acp::{
         AcpAgentCatalog, AcpMcpServerCatalog, AcpMcpServerConfig, AcpRestoreNotice,
-        AcpSessionDetail, AcpSessionSummary,
+        AcpSessionDetail, AcpSessionSummary, BuiltinMcpServerStatus,
     },
     state::AppState,
 };
@@ -41,11 +41,18 @@ pub async fn get_acp_mcp_servers(
 pub async fn set_acp_mcp_servers(
     state: State<'_, AppState>,
     servers: Vec<AcpMcpServerConfig>,
+    builtin: crate::domain::acp::BuiltinMcpConfig,
 ) -> Result<AcpMcpServerCatalog, String> {
     state
-        .update_acp_mcp_servers(AcpMcpServerCatalog { servers })
+        .update_acp_mcp_servers(AcpMcpServerCatalog { servers, builtin })
         .await
         .map_err(|error| error.to_string())
+}
+
+pub async fn get_builtin_mcp_server_status(
+    state: State<'_, AppState>,
+) -> Result<BuiltinMcpServerStatus, String> {
+    Ok(state.builtin_mcp_server_status().await)
 }
 
 pub async fn list_acp_sessions(
@@ -171,7 +178,18 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
             resolver.respond_async(async move {
                 let state = super::parse_arg(&invoke, "set_acp_mcp_servers", "state")?;
                 let servers = super::parse_arg(&invoke, "set_acp_mcp_servers", "servers")?;
-                set_acp_mcp_servers(state, servers)
+                let builtin = super::parse_arg(&invoke, "set_acp_mcp_servers", "builtin")?;
+                set_acp_mcp_servers(state, servers, builtin)
+                    .await
+                    .map_err(InvokeError::from)
+            });
+            true
+        }
+        "get_builtin_mcp_server_status" => {
+            let resolver = invoke.resolver.clone();
+            resolver.respond_async(async move {
+                let state = super::parse_arg(&invoke, "get_builtin_mcp_server_status", "state")?;
+                get_builtin_mcp_server_status(state)
                     .await
                     .map_err(InvokeError::from)
             });

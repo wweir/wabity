@@ -1,20 +1,54 @@
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
-    path::{Path, PathBuf},
+    collections::HashMap,
+    path::Path,
     sync::{Arc, Mutex, OnceLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{bail, Context, Result};
 use futures::future::join_all;
 use reqwest::Client as HttpClient;
-use serde::Serialize;
 use serde_json::{json, Value};
-use tokio::fs;
+
+mod conversation_state;
+mod parsing;
+mod protocol_chat;
+mod protocol_responses;
+mod result;
+mod tool_catalog;
+mod tool_execute;
+
+use self::{
+    conversation_state::{
+        build_answer_conversation_state, prepare_conversation_state,
+        previous_response_id_for_follow_up,
+    },
+    parsing::{
+        json_string_to_pretty_text, json_value_to_pretty_text, question_explicitly_requests_open,
+        question_payload,
+    },
+    protocol_chat::{
+        build_chat_assistant_tool_call_message, build_initial_chat_messages,
+        extract_chat_completion_message, extract_chat_local_tool_calls,
+        request_chat_completions_turn,
+    },
+    protocol_responses::{
+        extract_local_tool_calls, extract_mcp_tool_calls, has_mcp_approval_request,
+        request_responses_turn, should_retry_without_all_tools, should_retry_without_mcp_tools,
+        should_retry_without_response_chain,
+    },
+    result::{build_execution_result, deduplicate_and_number_citations},
+    tool_catalog::{
+        build_tool_catalog, load_cached_responses_tool_compatibility,
+        responses_tool_compatibility_cache_key, store_cached_responses_tool_compatibility,
+        tool_catalog_without_all_tools, tool_catalog_without_mcp_tools,
+    },
+    tool_execute::execute_local_tool_call,
+};
 
 use crate::{
     domain::{
-        acp::{AcpActionEvent, AcpMcpServerConfig, AcpNameValuePair},
+        acp::{AcpActionEvent, AcpMcpServerConfig},
         execution::{
             ExecutionCitation, ExecutionConversationRole, ExecutionConversationState,
             ExecutionConversationTurn, ExecutionProgressEvent, ExecutionResult, ExecutionToolCall,
@@ -25,58 +59,27 @@ use crate::{
     },
     infrastructure::openai_compatible::{
         describe_chat_completions_response_issue, extract_chat_completions_message_parts,
-        extract_responses_text, normalize_base_url, OpenAiCompatibleClient,
-        OpenAiCompatibleResponseFormat,
-    },
-    services::{
-        document_extract::load_readable_document_text,
-        rag,
-        rag_query::{self, RagSearchHit},
+        extract_responses_text, normalize_base_url,
     },
 };
 
 const RAG_ANSWER_COMMAND_ALIASES: [&str; 3] = ["/ask", "/qa", "/docs"];
 const READ_FILE_TOOL_NAME: &str = "wabity.read_file_lines";
+const READ_DOCUMENT_EXCERPT_TOOL_NAME: &str = "wabity.read_document_excerpt";
 const RAG_QUERY_TOOL_NAME: &str = "wabity.rag.query";
+const OPEN_TARGET_TOOL_NAME: &str = "wabity.system.open";
 const MAX_TOOL_ROUNDS: usize = 8;
 const MAX_READ_FILE_LINES: usize = 240;
 const MAX_READ_FILE_BYTES: u64 = 512 * 1024;
 const DEFAULT_RAG_TOOL_TOP_K: usize = 6;
 const DEFAULT_RAG_TOOL_MIN_SCORE: f32 = 0.35;
 const CITATION_SNIPPET_MAX_CHARS: usize = 240;
+const LOCAL_TOOL_EXECUTION_TIMEOUT: Duration = Duration::from_secs(20);
+const RESPONSES_TOOL_COMPATIBILITY_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+const RESPONSES_TOOL_COMPATIBILITY_REPROBE_AFTER: Duration = Duration::from_secs(90);
 static RESPONSES_TOOL_COMPATIBILITY_CACHE: OnceLock<
-    Mutex<HashMap<String, ResponsesToolCompatibilityMode>>,
+    Mutex<HashMap<String, CachedResponsesToolCompatibility>>,
 > = OnceLock::new();
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RagAnswerPayload {
-    kind: &'static str,
-    render: &'static str,
-    response_id: Option<String>,
-    conversation_state: ExecutionConversationState,
-    reasoning: Option<String>,
-    citations: Vec<ExecutionCitation>,
-    retrieval: RagRetrievalPayload,
-    actions: Vec<AcpActionEvent>,
-    tools: RagToolUsagePayload,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RagRetrievalPayload {
-    query: String,
-    match_count: usize,
-    file_count: usize,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RagToolUsagePayload {
-    available: Vec<String>,
-    skipped: Vec<String>,
-    calls: Vec<ExecutionToolCall>,
-}
 
 #[derive(Debug, Clone)]
 struct LocalToolCall {
@@ -108,25 +111,15 @@ struct QuestionToolRuntime<'a> {
     workspace_root: &'a Path,
     rag_settings: &'a RagSettings,
     llm_settings: &'a LlmSettings,
+    allow_open_target: bool,
     progress_event_tx: Option<Arc<dyn Fn(ExecutionProgressEvent) + Send + Sync>>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ReadFileToolLine {
-    number: usize,
-    text: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ReadFileToolResult {
-    absolute_path: String,
-    path: String,
-    line_start: usize,
-    line_end: usize,
-    line_count: usize,
-    lines: Vec<ReadFileToolLine>,
+#[derive(Debug, Clone)]
+struct HostSystemContext {
+    os_name: String,
+    os_version: Option<String>,
+    package_managers: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -134,6 +127,7 @@ struct ToolCatalog {
     request_tools: Vec<Value>,
     available_names: Vec<String>,
     skipped_mcp_servers: Vec<String>,
+    compatibility_fingerprint: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +143,12 @@ enum ResponsesToolCompatibilityMode {
     NoTools,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CachedResponsesToolCompatibility {
+    mode: ResponsesToolCompatibilityMode,
+    stored_at: Instant,
+}
+
 pub struct QuestionAnswerRequest<'a> {
     pub data_dir: &'a Path,
     pub workspace_root: &'a Path,
@@ -162,13 +162,8 @@ pub struct QuestionAnswerRequest<'a> {
     pub progress_event_tx: Option<Arc<dyn Fn(ExecutionProgressEvent) + Send + Sync>>,
 }
 
-struct PreparedConversationState<'a> {
-    conversation: &'a [ExecutionConversationTurn],
-    state: ExecutionConversationState,
-}
-
 pub async fn answer_question(request: QuestionAnswerRequest<'_>) -> Result<ExecutionResult> {
-    let question = question_payload(request.raw_text);
+    let question = question_payload(request.raw_text, &RAG_ANSWER_COMMAND_ALIASES);
     if question.is_empty() {
         bail!("请输入要提问的内容");
     }
@@ -201,6 +196,7 @@ pub async fn answer_question(request: QuestionAnswerRequest<'_>) -> Result<Execu
         workspace_root: request.workspace_root,
         rag_settings: request.rag_settings,
         llm_settings: request.llm_settings,
+        allow_open_target: question_explicitly_requests_open(question),
         progress_event_tx: request.progress_event_tx.clone(),
     };
     let execution = QuestionAnswerExecutionContext {
@@ -218,68 +214,25 @@ pub async fn answer_question(request: QuestionAnswerRequest<'_>) -> Result<Execu
     };
     let initial_protocol = answer_protocol(provider);
     let (answer, protocol, tool_catalog) = request_answer(initial_protocol, &execution).await?;
-
-    let citations = deduplicate_and_number_citations(answer.citations);
-    let retrieval = RagRetrievalPayload {
-        query: question.to_string(),
-        match_count: citations.len(),
-        file_count: citations
-            .iter()
-            .map(|citation| citation.absolute_path.clone())
-            .collect::<BTreeSet<_>>()
-            .len(),
-    };
-    let secondary_text = if answer.tool_calls.is_empty() {
-        format!(
-            "{} 未调用工具，直接生成了回答",
-            protocol_label(protocol, provider)
-        )
-    } else {
-        format!(
-            "{} 已执行 {} 次工具调用，引用 {} 个文件",
-            protocol_label(protocol, provider),
-            answer.tool_calls.len(),
-            retrieval.file_count
-        )
-    };
-    let secondary_text = if tool_catalog.skipped_mcp_servers.is_empty() {
-        secondary_text
-    } else {
-        format!(
-            "{secondary_text}；跳过 {} 个当前协议不支持的 MCP server",
-            tool_catalog.skipped_mcp_servers.len()
-        )
-    };
     let response_id = answer.response_id.clone();
+    let citations = deduplicate_and_number_citations(answer.citations.clone());
+    let conversation_state = build_answer_conversation_state(
+        response_id,
+        provider,
+        request.workspace_root,
+        &citations,
+        &answer.actions,
+        &answer.tool_calls,
+    );
 
-    Ok(ExecutionResult::success(
-        Some(answer.final_answer),
-        Some(secondary_text),
-        Some(serde_json::to_value(RagAnswerPayload {
-            kind: "rag_answer",
-            render: "markdown",
-            response_id: response_id.clone(),
-            conversation_state: build_answer_conversation_state(
-                response_id,
-                provider,
-                request.workspace_root,
-                &citations,
-                &answer.actions,
-                &answer.tool_calls,
-            ),
-            reasoning: answer.reasoning,
-            citations,
-            retrieval,
-            tools: RagToolUsagePayload {
-                available: tool_catalog.available_names.clone(),
-                skipped: tool_catalog.skipped_mcp_servers.clone(),
-                calls: answer.tool_calls,
-            },
-            actions: answer.actions,
-        })?),
-        vec!["copy_text"],
-        false,
-    ))
+    build_execution_result(
+        question,
+        protocol_label(protocol, provider),
+        answer,
+        conversation_state,
+        tool_catalog.available_names,
+        tool_catalog.skipped_mcp_servers,
+    )
 }
 
 struct QuestionAnswerExecutionContext<'a> {
@@ -396,8 +349,11 @@ async fn answer_with_responses(
     let mut previous_response_id = initial_previous_response_id;
     let mcp_free_tool_catalog = tool_catalog_without_mcp_tools(request.tool_catalog);
     let tool_free_tool_catalog = tool_catalog_without_all_tools(request.tool_catalog);
-    let compatibility_cache_key =
-        responses_tool_compatibility_cache_key(request.base_url, request.model);
+    let compatibility_cache_key = responses_tool_compatibility_cache_key(
+        request.base_url,
+        request.model,
+        request.tool_catalog,
+    );
     let mut compatibility_mode = load_cached_responses_tool_compatibility(&compatibility_cache_key);
     let mut disabled_mcp_tools_for_compat = matches!(
         compatibility_mode,
@@ -815,12 +771,28 @@ fn summarize_local_tool_progress(local_calls: &[LocalToolCall]) -> &'static str 
         .iter()
         .filter(|call| call.name == READ_FILE_TOOL_NAME)
         .count();
+    let read_document_count = local_calls
+        .iter()
+        .filter(|call| call.name == READ_DOCUMENT_EXCERPT_TOOL_NAME)
+        .count();
+    let open_target_count = local_calls
+        .iter()
+        .filter(|call| call.name == OPEN_TARGET_TOOL_NAME)
+        .count();
 
-    match (rag_query_count > 0, read_file_count > 0) {
-        (true, true) => "文档问答 · 正在检索索引并读取证据文件",
-        (true, false) => "文档问答 · 正在检索本地文档索引",
-        (false, true) => "文档问答 · 正在读取证据文件",
-        (false, false) => "文档问答 · 正在执行模型请求的工具",
+    match (
+        rag_query_count > 0,
+        read_file_count > 0,
+        read_document_count > 0,
+        open_target_count > 0,
+    ) {
+        (true, true, _, _) | (true, _, true, _) => "文档问答 · 正在检索索引并读取证据",
+        (true, false, false, true) => "文档问答 · 正在检索并打开目标",
+        (true, false, false, false) => "文档问答 · 正在检索本地文档索引",
+        (false, true, _, true) | (false, _, true, true) => "文档问答 · 正在读取证据并打开目标",
+        (false, true, _, false) | (false, _, true, false) => "文档问答 · 正在读取证据",
+        (false, false, false, true) => "文档问答 · 正在打开目标",
+        (false, false, false, false) => "文档问答 · 正在执行模型请求的工具",
     }
 }
 
@@ -829,65 +801,6 @@ fn answer_protocol(provider: &LlmProviderConfig) -> QuestionAnswerProtocol {
         LlmProviderProtocol::Responses => QuestionAnswerProtocol::Responses,
         LlmProviderProtocol::ChatCompletions => QuestionAnswerProtocol::ChatCompletions,
     }
-}
-
-fn should_retry_without_response_chain(
-    round: usize,
-    continue_previous_response: bool,
-    error: &anyhow::Error,
-) -> bool {
-    round == 1 && continue_previous_response && is_budget_exceeded_error(error)
-}
-
-fn should_retry_without_mcp_tools(
-    disabled_all_tools_for_compat: bool,
-    disabled_mcp_tools_for_compat: bool,
-    tool_catalog: &ToolCatalog,
-    error: &anyhow::Error,
-) -> bool {
-    !disabled_all_tools_for_compat
-        && !disabled_mcp_tools_for_compat
-        && tool_catalog
-            .request_tools
-            .iter()
-            .any(is_mcp_tool_definition)
-        && is_provider_transport_or_server_error(error)
-}
-
-fn should_retry_without_all_tools(
-    disabled_all_tools_for_compat: bool,
-    tool_catalog: &ToolCatalog,
-    error: &anyhow::Error,
-) -> bool {
-    !disabled_all_tools_for_compat
-        && !tool_catalog.request_tools.is_empty()
-        && is_provider_transport_or_server_error(error)
-}
-
-fn is_budget_exceeded_error(error: &anyhow::Error) -> bool {
-    let message = error.to_string().to_ascii_lowercase();
-    message.contains("budget has been exceeded")
-        || (message.contains("budget") && message.contains("exceeded"))
-        || message.contains("context_length_exceeded")
-        || message.contains("maximum context length")
-        || message.contains("prompt is too long")
-        || message.contains("request too large")
-}
-
-fn is_provider_transport_or_server_error(error: &anyhow::Error) -> bool {
-    if error
-        .chain()
-        .filter_map(|source| source.downcast_ref::<reqwest::Error>())
-        .any(reqwest::Error::is_timeout)
-    {
-        return true;
-    }
-
-    let message = error.to_string();
-    ["500", "502", "503", "504"]
-        .iter()
-        .any(|status| message.contains(&format!("({status} ")))
-        || message.to_ascii_lowercase().contains("context canceled")
 }
 
 fn protocol_label(protocol: QuestionAnswerProtocol, provider: &LlmProviderConfig) -> String {
@@ -903,232 +816,9 @@ fn protocol_label(protocol: QuestionAnswerProtocol, provider: &LlmProviderConfig
     }
 }
 
-fn build_tool_catalog(
-    mcp_servers: &[AcpMcpServerConfig],
-    protocol: QuestionAnswerProtocol,
-) -> ToolCatalog {
-    let mut request_tools = vec![
-        build_read_file_tool(protocol),
-        build_rag_query_tool(protocol),
-    ];
-    let mut available_names = vec![
-        READ_FILE_TOOL_NAME.to_string(),
-        RAG_QUERY_TOOL_NAME.to_string(),
-    ];
-    let mut skipped_mcp_servers = Vec::new();
-
-    for server in mcp_servers {
-        if protocol == QuestionAnswerProtocol::ChatCompletions {
-            let name = match server {
-                AcpMcpServerConfig::Http(server) => &server.name,
-                AcpMcpServerConfig::Sse(server) => &server.name,
-                AcpMcpServerConfig::Stdio(server) => &server.name,
-            };
-            skipped_mcp_servers.push(name.clone());
-            continue;
-        }
-
-        match server {
-            AcpMcpServerConfig::Http(server) => {
-                available_names.push(format!("mcp:{}", server.name));
-                request_tools.push(json!({
-                    "type": "mcp",
-                    "server_label": server.name,
-                    "server_url": server.url,
-                    "headers": name_value_pairs_to_json_object(&server.headers),
-                    "require_approval": "never",
-                }));
-            }
-            AcpMcpServerConfig::Sse(server) => {
-                available_names.push(format!("mcp:{}", server.name));
-                request_tools.push(json!({
-                    "type": "mcp",
-                    "server_label": server.name,
-                    "server_url": server.url,
-                    "headers": name_value_pairs_to_json_object(&server.headers),
-                    "require_approval": "never",
-                }));
-            }
-            AcpMcpServerConfig::Stdio(server) => {
-                skipped_mcp_servers.push(server.name.clone());
-            }
-        }
-    }
-
-    ToolCatalog {
-        request_tools,
-        available_names,
-        skipped_mcp_servers,
-    }
-}
-
-fn tool_catalog_without_mcp_tools(tool_catalog: &ToolCatalog) -> ToolCatalog {
-    let mut skipped_mcp_servers = tool_catalog.skipped_mcp_servers.clone();
-    skipped_mcp_servers.extend(
-        tool_catalog
-            .request_tools
-            .iter()
-            .filter(|tool| is_mcp_tool_definition(tool))
-            .filter_map(|tool| {
-                tool.get("server_label")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned)
-            }),
-    );
-
-    ToolCatalog {
-        request_tools: tool_catalog
-            .request_tools
-            .iter()
-            .filter(|tool| !is_mcp_tool_definition(tool))
-            .cloned()
-            .collect(),
-        available_names: tool_catalog
-            .available_names
-            .iter()
-            .filter(|name| !name.starts_with("mcp:"))
-            .cloned()
-            .collect(),
-        skipped_mcp_servers,
-    }
-}
-
-fn tool_catalog_without_all_tools(tool_catalog: &ToolCatalog) -> ToolCatalog {
-    let mut stripped = tool_catalog_without_mcp_tools(tool_catalog);
-    stripped.request_tools.clear();
-    stripped.available_names.clear();
-    stripped
-}
-
-fn responses_tool_compatibility_cache_key(base_url: &str, model: &str) -> String {
-    format!("responses::{base_url}::{model}")
-}
-
-fn load_cached_responses_tool_compatibility(
-    compatibility_cache_key: &str,
-) -> ResponsesToolCompatibilityMode {
-    responses_tool_compatibility_cache()
-        .lock()
-        .expect("responses tool compatibility cache lock poisoned")
-        .get(compatibility_cache_key)
-        .copied()
-        .unwrap_or(ResponsesToolCompatibilityMode::Full)
-}
-
-fn store_cached_responses_tool_compatibility(
-    compatibility_cache_key: &str,
-    mode: ResponsesToolCompatibilityMode,
-) {
-    let mut cache = responses_tool_compatibility_cache()
-        .lock()
-        .expect("responses tool compatibility cache lock poisoned");
-    let entry = cache
-        .entry(compatibility_cache_key.to_string())
-        .or_insert(ResponsesToolCompatibilityMode::Full);
-    if mode > *entry {
-        *entry = mode;
-    }
-}
-
-fn responses_tool_compatibility_cache(
-) -> &'static Mutex<HashMap<String, ResponsesToolCompatibilityMode>> {
-    RESPONSES_TOOL_COMPATIBILITY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn is_mcp_tool_definition(tool: &Value) -> bool {
-    tool.get("type").and_then(Value::as_str) == Some("mcp")
-}
-
-fn build_read_file_tool(protocol: QuestionAnswerProtocol) -> Value {
-    build_function_tool(
-            protocol,
-            READ_FILE_TOOL_NAME,
-            "Read exact lines from a local text file after you already know which file matters. Access is restricted to the current workspace root and explicitly configured RAG source roots. Prefer calling wabity.rag.query first to locate evidence, then use this tool to verify the precise file path and line range you want to cite. Do not use this as a blind file discovery tool.",
-            json!({
-                "type": "object",
-                "additionalProperties": false,
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Absolute path, ~/ path, or workspace-relative path of the file to read, but it must resolve inside the current workspace root or an explicit RAG source root. Use a concrete path you already identified from retrieval results."
-                    },
-                "line_start": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "1-based starting line number. Choose the smallest range that still captures the exact evidence you need."
-                },
-                "line_count": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": MAX_READ_FILE_LINES,
-                    "description": "Number of lines to read. Keep the window tight; expand only if the first slice is insufficient."
-                }
-            },
-            "required": ["path", "line_start", "line_count"]
-        }),
-    )
-}
-
-fn build_rag_query_tool(protocol: QuestionAnswerProtocol) -> Value {
-    build_function_tool(
-        protocol,
-        RAG_QUERY_TOOL_NAME,
-        "Search the local RAG index to find likely evidence before answering repository or documentation questions. Use this first when you do not yet know which file or section is relevant. Then follow up with wabity.read_file_lines on the best hits to verify exact wording and line ranges before making specific claims.",
-        json!({
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Natural-language retrieval query. Write it in terms of the concept, behavior, API, error, or file/topic you need evidence for."
-                },
-                "top_k": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 20,
-                    "description": "How many hits to return. Start small for focused queries; increase only when the first pass is too narrow."
-                },
-                "min_score": {
-                    "type": "number",
-                    "minimum": 0.0,
-                    "maximum": 1.0,
-                    "description": "Minimum similarity score. Lower it only if an initial focused search returns too few relevant hits."
-                }
-            },
-            "required": ["query"]
-        }),
-    )
-}
-
-fn build_function_tool(
-    protocol: QuestionAnswerProtocol,
-    name: &str,
-    description: &str,
-    parameters: Value,
-) -> Value {
-    match protocol {
-        QuestionAnswerProtocol::Responses => json!({
-            "type": "function",
-            "name": name,
-            "description": description,
-            "strict": true,
-            "parameters": parameters,
-        }),
-        QuestionAnswerProtocol::ChatCompletions => json!({
-            "type": "function",
-            "function": {
-                "name": name,
-                "description": description,
-                "strict": true,
-                "parameters": parameters,
-            },
-        }),
-    }
-}
-
 fn build_runtime_system_prompt(user_prompt: &str) -> String {
     format!(
-        "{user_prompt}\n\nAdditional runtime rules:\n- Tools are available through the request tool list. Use them when the answer depends on repository files, indexed documents, or MCP-connected systems.\n- Do not assume any RAG snippets are preloaded. Call `{RAG_QUERY_TOOL_NAME}` yourself when you need retrieval.\n- Prefer `{RAG_QUERY_TOOL_NAME}` to locate evidence, then `{READ_FILE_TOOL_NAME}` to inspect exact lines.\n- When you rely on tool output, cite the relevant sources inline with [1], [2], ...\n- If the available tools do not provide enough evidence, say that directly.\n- Return Markdown only."
+        "{user_prompt}\n\nAdditional runtime rules:\n- Tools are available through the request tool list. Use them when the answer depends on repository files, indexed documents, MCP-connected systems, or when the user explicitly asks you to open a target.\n- Do not assume any RAG snippets are preloaded. Call `{RAG_QUERY_TOOL_NAME}` yourself when you need retrieval.\n- Prefer `{RAG_QUERY_TOOL_NAME}` to locate evidence, then use `{READ_FILE_TOOL_NAME}` for text files or `{READ_DOCUMENT_EXCERPT_TOOL_NAME}` for extracted documents such as PDFs.\n- `{OPEN_TARGET_TOOL_NAME}` has side effects. Only call it when the current user request explicitly asks you to open a link, file, or directory. Do not call it proactively.\n- When you rely on tool output, cite the relevant sources inline with [1], [2], ...\n- If the available tools do not provide enough evidence, say that directly.\n- Return Markdown only."
     )
 }
 
@@ -1175,139 +865,6 @@ fn build_responses_text_content(text: &str) -> Vec<Value> {
     })]
 }
 
-fn build_initial_chat_messages(
-    system_prompt: &str,
-    conversation: &[ExecutionConversationTurn],
-    question: &str,
-) -> Vec<Value> {
-    let mut messages = vec![json!({
-        "role": "system",
-        "content": system_prompt,
-    })];
-    messages.extend(conversation.iter().filter_map(|turn| {
-        let content = turn.content.trim();
-        if content.is_empty() {
-            return None;
-        }
-
-        Some(json!({
-            "role": match turn.role {
-                ExecutionConversationRole::User => "user",
-                ExecutionConversationRole::Assistant => "assistant",
-            },
-            "content": content,
-        }))
-    }));
-    messages.push(json!({
-        "role": "user",
-        "content": question,
-    }));
-    messages
-}
-
-fn build_chat_assistant_tool_call_message(message: &Value) -> Value {
-    json!({
-        "role": "assistant",
-        "content": message.get("content").cloned().unwrap_or(Value::Null),
-        "tool_calls": message
-            .get("tool_calls")
-            .cloned()
-            .unwrap_or_else(|| Value::Array(Vec::new())),
-    })
-}
-
-fn normalize_previous_response_id(previous_response_id: Option<&str>) -> Option<String> {
-    previous_response_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn normalize_continuation_scope(continuation_scope: Option<&str>) -> Option<String> {
-    continuation_scope
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn provider_continuation_scope(provider: &LlmProviderConfig, workspace_root: &Path) -> String {
-    let workspace = workspace_root.to_string_lossy();
-    let scope_seed = format!(
-        "rag-answer|{}|{}|{}|{}",
-        match provider.protocol {
-            LlmProviderProtocol::Responses => "responses",
-            LlmProviderProtocol::ChatCompletions => "chat_completions",
-        },
-        provider.base_url.trim().trim_end_matches('/'),
-        provider.model_name(),
-        workspace
-    );
-    format!("{:x}", md5::compute(scope_seed))
-}
-
-fn prepare_conversation_state<'a>(
-    conversation: &'a [ExecutionConversationTurn],
-    conversation_state: Option<&ExecutionConversationState>,
-    provider: &LlmProviderConfig,
-    workspace_root: &Path,
-) -> PreparedConversationState<'a> {
-    let expected_scope = provider_continuation_scope(provider, workspace_root);
-    let scope_matches = conversation_state
-        .and_then(|state| normalize_continuation_scope(state.continuation_scope.as_deref()))
-        .is_some_and(|scope| scope == expected_scope);
-    let state_has_data = conversation_state
-        .map(ExecutionConversationState::has_state)
-        .unwrap_or(false);
-    let should_reset_context = state_has_data && !scope_matches;
-
-    let mut next_state = if scope_matches {
-        conversation_state.cloned().unwrap_or_default()
-    } else {
-        ExecutionConversationState::default()
-    };
-    next_state.previous_response_id =
-        normalize_previous_response_id(next_state.previous_response_id.as_deref());
-    next_state.continuation_scope = Some(expected_scope);
-
-    PreparedConversationState {
-        conversation: if should_reset_context {
-            &[]
-        } else {
-            conversation
-        },
-        state: next_state,
-    }
-}
-
-fn build_answer_conversation_state(
-    response_id: Option<String>,
-    provider: &LlmProviderConfig,
-    workspace_root: &Path,
-    citations: &[ExecutionCitation],
-    actions: &[AcpActionEvent],
-    tool_calls: &[ExecutionToolCall],
-) -> ExecutionConversationState {
-    ExecutionConversationState {
-        previous_response_id: response_id,
-        continuation_scope: Some(provider_continuation_scope(provider, workspace_root)),
-        citations: citations.to_vec(),
-        actions: actions.to_vec(),
-        tool_calls: tool_calls.to_vec(),
-    }
-}
-
-fn previous_response_id_for_follow_up(
-    conversation_state: Option<&ExecutionConversationState>,
-    supports_stateful: bool,
-) -> Option<String> {
-    if !supports_stateful {
-        return None;
-    }
-
-    conversation_state
-        .and_then(|state| normalize_previous_response_id(state.previous_response_id.as_deref()))
-}
-
 fn build_tool_output_items(executed_calls: &[ExecutedToolCall]) -> Vec<Value> {
     executed_calls
         .iter()
@@ -1319,215 +876,6 @@ fn build_tool_output_items(executed_calls: &[ExecutedToolCall]) -> Vec<Value> {
             })
         })
         .collect()
-}
-
-async fn execute_local_tool_call(
-    runtime: &QuestionToolRuntime<'_>,
-    call: LocalToolCall,
-) -> Result<ExecutedToolCall> {
-    let executed = match call.name.as_str() {
-        READ_FILE_TOOL_NAME => execute_read_file_tool(runtime, &call.arguments).await,
-        RAG_QUERY_TOOL_NAME => execute_rag_query_tool(runtime, &call.arguments).await,
-        _ => Err(anyhow::anyhow!("未知内置工具: {}", call.name)),
-    };
-
-    match executed {
-        Ok(mut executed) => {
-            executed.call_id = call.call_id;
-            Ok(executed)
-        }
-        Err(error) => Ok(ExecutedToolCall {
-            call_id: call.call_id,
-            name: call.name.clone(),
-            output: serde_json::to_string(&json!({
-                "ok": false,
-                "error": error.to_string(),
-            }))?,
-            citations: Vec::new(),
-            trace: ExecutionToolCall {
-                name: call.name,
-                source: "builtin".to_string(),
-                status: "error".to_string(),
-                summary: error.to_string(),
-            },
-        }),
-    }
-}
-
-async fn execute_read_file_tool(
-    runtime: &QuestionToolRuntime<'_>,
-    arguments: &Value,
-) -> Result<ExecutedToolCall> {
-    let path = arguments
-        .get("path")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .context("read_file_lines.path 不能为空")?;
-    let line_start = value_as_usize(arguments, "line_start")?.max(1);
-    let line_count = value_as_usize(arguments, "line_count")?.clamp(1, MAX_READ_FILE_LINES);
-    let allowed_roots =
-        rag::collect_document_access_roots(runtime.workspace_root, runtime.rag_settings);
-    let resolved_path = resolve_readable_file_path(path, &allowed_roots)?;
-    let metadata = fs::metadata(&resolved_path)
-        .await
-        .with_context(|| format!("无法读取文件 metadata: {}", resolved_path.display()))?;
-    if metadata.len() > MAX_READ_FILE_BYTES {
-        bail!(
-            "文件过大，read_file_lines 只允许读取不超过 {} KB 的文本文件",
-            MAX_READ_FILE_BYTES / 1024
-        );
-    }
-
-    let text = tokio::task::spawn_blocking({
-        let resolved_path = resolved_path.clone();
-        move || load_readable_document_text(&resolved_path)
-    })
-    .await
-    .context("读取文档文本任务失败")?
-    .with_context(|| format!("无法读取可索引文档文本: {}", resolved_path.display()))?;
-    let lines = text.lines().collect::<Vec<_>>();
-    let start_index = line_start.saturating_sub(1);
-    let selected = lines
-        .iter()
-        .enumerate()
-        .skip(start_index)
-        .take(line_count)
-        .map(|(index, line)| ReadFileToolLine {
-            number: index + 1,
-            text: (*line).to_string(),
-        })
-        .collect::<Vec<_>>();
-    if selected.is_empty() {
-        bail!(
-            "请求的文件范围为空: {}:{}+{}",
-            resolved_path.display(),
-            line_start,
-            line_count
-        );
-    }
-
-    let line_end = selected
-        .last()
-        .map(|line| line.number)
-        .unwrap_or(line_start);
-    let result = ReadFileToolResult {
-        absolute_path: resolved_path.to_string_lossy().into_owned(),
-        path: display_path(&resolved_path),
-        line_start,
-        line_end,
-        line_count: selected.len(),
-        lines: selected.clone(),
-    };
-    let snippet = compact_snippet(
-        &selected
-            .iter()
-            .map(|line| format!("{}: {}", line.number, line.text))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        CITATION_SNIPPET_MAX_CHARS,
-    );
-
-    Ok(ExecutedToolCall {
-        call_id: String::new(),
-        name: READ_FILE_TOOL_NAME.to_string(),
-        output: serde_json::to_string(&result)?,
-        citations: vec![ExecutionCitation {
-            id: 0,
-            absolute_path: result.absolute_path.clone(),
-            path: result.path.clone(),
-            chunk_index: -1,
-            line_start: i32::try_from(result.line_start).unwrap_or(i32::MAX),
-            line_end: i32::try_from(result.line_end).unwrap_or(i32::MAX),
-            paragraph_line_start: i32::try_from(result.line_start).unwrap_or(i32::MAX),
-            heading_path: Vec::new(),
-            score: 1.0,
-            distance: 0.0,
-            snippet,
-        }],
-        trace: ExecutionToolCall {
-            name: READ_FILE_TOOL_NAME.to_string(),
-            source: "builtin".to_string(),
-            status: "ok".to_string(),
-            summary: format!("{}:{}-{}", result.path, result.line_start, result.line_end),
-        },
-    })
-}
-
-async fn execute_rag_query_tool(
-    runtime: &QuestionToolRuntime<'_>,
-    arguments: &Value,
-) -> Result<ExecutedToolCall> {
-    let query = arguments
-        .get("query")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .context("rag.query.query 不能为空")?;
-    let top_k = arguments
-        .get("top_k")
-        .map(|_| value_as_usize(arguments, "top_k"))
-        .transpose()?
-        .unwrap_or(DEFAULT_RAG_TOOL_TOP_K);
-    let min_score = arguments
-        .get("min_score")
-        .and_then(Value::as_f64)
-        .map(|value| value.clamp(0.0, 1.0) as f32)
-        .unwrap_or(DEFAULT_RAG_TOOL_MIN_SCORE);
-    let result = rag_query::search_chunks(
-        runtime.data_dir,
-        query,
-        runtime.rag_settings,
-        runtime.llm_settings,
-        top_k,
-        min_score,
-    )
-    .await?;
-    let citations = result
-        .hits
-        .iter()
-        .map(citation_from_rag_hit)
-        .collect::<Vec<_>>();
-
-    Ok(ExecutedToolCall {
-        call_id: String::new(),
-        name: RAG_QUERY_TOOL_NAME.to_string(),
-        output: serde_json::to_string(&result)?,
-        citations,
-        trace: ExecutionToolCall {
-            name: RAG_QUERY_TOOL_NAME.to_string(),
-            source: "builtin".to_string(),
-            status: if result.pending_indexing {
-                "error".to_string()
-            } else {
-                "ok".to_string()
-            },
-            summary: if result.pending_indexing {
-                format!(
-                    "query=`{}` hits={} pending_indexing=true",
-                    result.query, result.hit_count
-                )
-            } else {
-                format!("query=`{}` hits={}", result.query, result.hit_count)
-            },
-        },
-    })
-}
-
-fn citation_from_rag_hit(hit: &RagSearchHit) -> ExecutionCitation {
-    ExecutionCitation {
-        id: 0,
-        absolute_path: hit.absolute_path.clone(),
-        path: hit.path.clone(),
-        chunk_index: hit.chunk_index,
-        line_start: hit.line_start,
-        line_end: hit.line_end,
-        paragraph_line_start: hit.paragraph_line_start,
-        heading_path: hit.heading_path.clone(),
-        score: hit.score,
-        distance: hit.distance,
-        snippet: compact_snippet(&hit.text, CITATION_SNIPPET_MAX_CHARS),
-    }
 }
 
 struct ResponsesTurnRequest<'a> {
@@ -1548,252 +896,6 @@ struct ChatCompletionsTurnRequest<'a> {
     model: &'a str,
     tool_catalog: &'a ToolCatalog,
     messages: &'a [Value],
-}
-
-async fn request_responses_turn(request_args: ResponsesTurnRequest<'_>) -> Result<Value> {
-    let client = OpenAiCompatibleClient::new_async(
-        request_args.client,
-        request_args.base_url,
-        request_args.api_key,
-        "LLM provider base URL",
-    )?;
-    let mut body = json!({
-        "model": request_args.model,
-        "instructions": request_args.instructions,
-        "input": request_args.input,
-        "stream": false,
-    });
-    if !request_args.tool_catalog.request_tools.is_empty() {
-        body["tools"] = Value::Array(request_args.tool_catalog.request_tools.clone());
-        body["parallel_tool_calls"] = Value::Bool(true);
-    }
-    if let Some(previous_response_id) = request_args.previous_response_id {
-        body["previous_response_id"] = Value::String(previous_response_id.to_string());
-    }
-
-    client
-        .post_json(
-            "/responses",
-            &body,
-            "question answering from responses API",
-            OpenAiCompatibleResponseFormat::JsonOrSse,
-        )
-        .await
-}
-
-async fn request_chat_completions_turn(
-    request_args: ChatCompletionsTurnRequest<'_>,
-) -> Result<Value> {
-    let client = OpenAiCompatibleClient::new_async(
-        request_args.client,
-        request_args.base_url,
-        request_args.api_key,
-        "LLM provider base URL",
-    )?;
-    client
-        .post_json(
-            "/chat/completions",
-            &json!({
-                "model": request_args.model,
-                "messages": request_args.messages,
-                "tools": request_args.tool_catalog.request_tools,
-                "tool_choice": "auto",
-                "parallel_tool_calls": true,
-                "stream": false,
-            }),
-            "question answering from chat/completions API",
-            OpenAiCompatibleResponseFormat::Json,
-        )
-        .await
-}
-
-fn has_mcp_approval_request(payload: &Value) -> bool {
-    payload
-        .get("output")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items.iter().any(|item| {
-                item.get("type")
-                    .and_then(Value::as_str)
-                    .map(|value| value == "mcp_approval_request")
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
-}
-
-fn extract_local_tool_calls(payload: &Value) -> Result<Vec<LocalToolCall>> {
-    let mut calls = Vec::new();
-    let Some(items) = payload.get("output").and_then(Value::as_array) else {
-        return Ok(calls);
-    };
-
-    for item in items {
-        let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
-        if item_type != "function_call" {
-            continue;
-        }
-
-        let call_id = item
-            .get("call_id")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .context("responses function_call 缺少 call_id")?;
-        let name = item
-            .get("name")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .context("responses function_call 缺少 name")?;
-        let arguments = item
-            .get("arguments")
-            .map(parse_tool_arguments)
-            .transpose()?
-            .unwrap_or_else(|| json!({}));
-        calls.push(LocalToolCall {
-            call_id,
-            name,
-            arguments,
-        });
-    }
-
-    Ok(calls)
-}
-
-fn extract_chat_completion_message(payload: &Value) -> Result<Value> {
-    payload
-        .get("choices")
-        .and_then(Value::as_array)
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
-        .cloned()
-        .context("chat/completions 未返回 assistant message")
-}
-
-fn extract_chat_local_tool_calls(message: &Value) -> Result<Vec<LocalToolCall>> {
-    let mut calls = Vec::new();
-    let Some(items) = message.get("tool_calls").and_then(Value::as_array) else {
-        return Ok(calls);
-    };
-
-    for item in items {
-        let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
-        if item_type != "function" {
-            continue;
-        }
-
-        let function = item
-            .get("function")
-            .filter(|value| value.is_object())
-            .context("chat/completions tool_call 缺少 function")?;
-        let call_id = item
-            .get("id")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .context("chat/completions tool_call 缺少 id")?;
-        let name = function
-            .get("name")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .context("chat/completions tool_call 缺少 function.name")?;
-        let arguments = function
-            .get("arguments")
-            .map(parse_tool_arguments)
-            .transpose()?
-            .unwrap_or_else(|| json!({}));
-        calls.push(LocalToolCall {
-            call_id,
-            name,
-            arguments,
-        });
-    }
-
-    Ok(calls)
-}
-
-fn parse_tool_arguments(value: &Value) -> Result<Value> {
-    if value.is_object() {
-        return Ok(value.clone());
-    }
-    let raw = value
-        .as_str()
-        .map(str::trim)
-        .filter(|content| !content.is_empty())
-        .context("tool call arguments 不能为空")?;
-    serde_json::from_str(raw).with_context(|| format!("tool call arguments 不是有效 JSON: {raw}"))
-}
-
-fn extract_mcp_tool_calls(payload: &Value) -> Vec<McpToolCallTrace> {
-    payload
-        .get("output")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| {
-                    let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
-                    if item_type != "mcp_call" {
-                        return None;
-                    }
-
-                    let call_id = item
-                        .get("call_id")
-                        .and_then(Value::as_str)
-                        .or_else(|| item.get("id").and_then(Value::as_str))
-                        .map(ToOwned::to_owned);
-                    let name = item
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown_mcp_tool");
-                    let server = item
-                        .get("server_label")
-                        .and_then(Value::as_str)
-                        .unwrap_or("mcp");
-                    let error = item.get("error").and_then(Value::as_str).map(str::trim);
-                    let formatted_name = format!("{server}::{name}");
-                    Some(McpToolCallTrace {
-                        call_id,
-                        input_detail: extract_mcp_call_input_detail(item),
-                        output_detail: extract_mcp_call_output_detail(item),
-                        trace: ExecutionToolCall {
-                            name: formatted_name.clone(),
-                            source: "mcp".to_string(),
-                            status: if error.is_some() {
-                                "error".to_string()
-                            } else {
-                                "ok".to_string()
-                            },
-                            summary: error
-                                .filter(|value| !value.is_empty())
-                                .map(ToOwned::to_owned)
-                                .unwrap_or_else(|| formatted_name),
-                        },
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn extract_mcp_call_input_detail(item: &Value) -> Option<String> {
-    item.get("arguments")
-        .or_else(|| item.get("input"))
-        .map(json_value_to_pretty_text)
-}
-
-fn extract_mcp_call_output_detail(item: &Value) -> Option<String> {
-    if let Some(error) = item
-        .get("error")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        return Some(error.to_string());
-    }
-
-    item.get("output")
-        .or_else(|| item.get("result"))
-        .or_else(|| item.get("content"))
-        .map(json_value_to_pretty_text)
 }
 
 fn resolve_answer_provider(llm_settings: &LlmSettings) -> Result<&LlmProviderConfig> {
@@ -1821,166 +923,9 @@ fn validate_answer_provider(provider: &LlmProviderConfig) -> Result<()> {
     Ok(())
 }
 
-fn question_payload(raw_text: &str) -> &str {
-    let trimmed = raw_text.trim_start();
-    if trimmed.starts_with('/') {
-        return extract_rag_answer_payload(raw_text).unwrap_or("").trim();
-    }
-
-    raw_text.trim()
-}
-
+#[cfg(test)]
 fn extract_rag_answer_payload(raw_text: &str) -> Option<&str> {
-    extract_prefixed_payload(raw_text, &RAG_ANSWER_COMMAND_ALIASES)
-}
-
-fn extract_prefixed_payload<'a>(raw_text: &'a str, aliases: &[&str]) -> Option<&'a str> {
-    let trimmed = raw_text.trim_start();
-
-    for alias in aliases {
-        let Some(remainder) = trimmed.strip_prefix(alias) else {
-            continue;
-        };
-
-        if remainder.is_empty() {
-            return None;
-        }
-
-        let next_character = remainder.chars().next();
-        if !matches!(next_character, Some(character) if character.is_whitespace()) {
-            continue;
-        }
-
-        let payload = remainder.trim();
-        return (!payload.is_empty()).then_some(payload);
-    }
-
-    for alias in aliases {
-        let max_prefix_length = alias.len().min(trimmed.len().saturating_sub(1));
-        for prefix_length in (2..=max_prefix_length).rev() {
-            let Some(alias_prefix) = alias.get(..prefix_length) else {
-                continue;
-            };
-            let Some(candidate_prefix) = trimmed.get(..prefix_length) else {
-                continue;
-            };
-            if !candidate_prefix.eq_ignore_ascii_case(alias_prefix) {
-                continue;
-            }
-
-            let Some(remainder) = trimmed.get(prefix_length..) else {
-                continue;
-            };
-            let payload = remainder.trim();
-            if payload.is_empty() {
-                continue;
-            }
-
-            return Some(payload);
-        }
-    }
-
-    None
-}
-
-fn resolve_readable_file_path(path: &str, allowed_roots: &[PathBuf]) -> Result<PathBuf> {
-    let candidate = if let Some(remainder) = path.strip_prefix("~/") {
-        dirs::home_dir()
-            .map(|home| home.join(remainder))
-            .context("无法展开 ~/ 路径，因为 HOME 不可用")?
-    } else {
-        let candidate = PathBuf::from(path);
-        if candidate.is_absolute() {
-            candidate
-        } else {
-            allowed_roots
-                .first()
-                .cloned()
-                .context("当前没有可访问的文档根目录")?
-                .join(candidate)
-        }
-    };
-    let resolved = candidate
-        .canonicalize()
-        .with_context(|| format!("无法解析文件路径: {}", candidate.display()))?;
-    if !resolved.is_file() {
-        bail!("不是可读取的文件: {}", resolved.display());
-    }
-    if !rag::path_is_within_roots(&resolved, allowed_roots) {
-        bail!(
-            "文件路径超出允许范围，只能读取当前 workspace 或显式配置的 RAG 目录: {}",
-            resolved.display()
-        );
-    }
-    Ok(resolved)
-}
-
-fn value_as_usize(arguments: &Value, key: &str) -> Result<usize> {
-    arguments
-        .get(key)
-        .and_then(Value::as_u64)
-        .map(|value| value as usize)
-        .with_context(|| format!("{key} 必须是正整数"))
-}
-
-fn display_path(path: &Path) -> String {
-    let Some(home) = dirs::home_dir() else {
-        return path.to_string_lossy().into_owned();
-    };
-    if let Ok(relative) = path.strip_prefix(&home) {
-        return format!("~/{}", relative.to_string_lossy());
-    }
-    path.to_string_lossy().into_owned()
-}
-
-fn compact_snippet(text: &str, max_chars: usize) -> String {
-    let compact = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.chars().count() <= max_chars {
-        return compact;
-    }
-
-    let mut snippet = compact.chars().take(max_chars).collect::<String>();
-    snippet.push_str("...");
-    snippet
-}
-
-fn json_string_to_pretty_text(raw: &str) -> String {
-    serde_json::from_str::<Value>(raw)
-        .map(|value| json_value_to_pretty_text(&value))
-        .unwrap_or_else(|_| raw.to_string())
-}
-
-fn json_value_to_pretty_text(value: &Value) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-}
-
-fn deduplicate_and_number_citations(citations: Vec<ExecutionCitation>) -> Vec<ExecutionCitation> {
-    let mut seen = HashSet::new();
-    citations
-        .into_iter()
-        .filter(|citation| {
-            seen.insert(format!(
-                "{}:{}:{}:{}",
-                citation.absolute_path,
-                citation.chunk_index,
-                citation.line_start,
-                citation.line_end
-            ))
-        })
-        .enumerate()
-        .map(|(index, mut citation)| {
-            citation.id = index + 1;
-            citation
-        })
-        .collect()
-}
-
-fn name_value_pairs_to_json_object(pairs: &[AcpNameValuePair]) -> Value {
-    let mut object = serde_json::Map::new();
-    for pair in pairs {
-        object.insert(pair.name.clone(), Value::String(pair.value.clone()));
-    }
-    Value::Object(object)
+    crate::services::command_prefix::extract_prefixed_payload(raw_text, &RAG_ANSWER_COMMAND_ALIASES)
 }
 
 #[cfg(test)]
@@ -1988,22 +933,40 @@ mod tests {
     use std::{
         io::{Cursor, Write},
         path::{Path, PathBuf},
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     use super::{
-        build_answer_conversation_state, build_initial_responses_input, build_round_action,
-        build_tool_catalog, deduplicate_and_number_citations, execute_read_file_tool,
-        extract_mcp_tool_calls, extract_rag_answer_payload, is_budget_exceeded_error,
-        load_cached_responses_tool_compatibility, normalize_previous_response_id,
-        prepare_conversation_state, previous_response_id_for_follow_up,
-        provider_continuation_scope, question_payload, resolve_readable_file_path,
-        responses_tool_compatibility_cache_key, should_retry_without_all_tools,
-        should_retry_without_mcp_tools, should_retry_without_response_chain,
-        store_cached_responses_tool_compatibility, summarize_local_tool_progress,
-        tool_catalog_without_all_tools, tool_catalog_without_mcp_tools, LocalToolCall,
-        QuestionAnswerProtocol, QuestionToolRuntime, ResponsesToolCompatibilityMode,
-        RAG_QUERY_TOOL_NAME, READ_FILE_TOOL_NAME,
+        build_initial_responses_input, build_round_action, extract_rag_answer_payload,
+        summarize_local_tool_progress, HostSystemContext, LocalToolCall, QuestionAnswerProtocol,
+        QuestionToolRuntime, ResponsesToolCompatibilityMode, OPEN_TARGET_TOOL_NAME,
+        RAG_ANSWER_COMMAND_ALIASES, RAG_QUERY_TOOL_NAME, READ_DOCUMENT_EXCERPT_TOOL_NAME,
+        READ_FILE_TOOL_NAME,
+    };
+    use super::{
+        conversation_state::{
+            build_answer_conversation_state, normalize_previous_response_id,
+            prepare_conversation_state, previous_response_id_for_follow_up,
+            provider_continuation_scope,
+        },
+        parsing::{question_explicitly_requests_open, question_payload},
+        protocol_responses::{
+            extract_mcp_tool_calls, is_budget_exceeded_error, should_retry_without_all_tools,
+            should_retry_without_mcp_tools, should_retry_without_response_chain,
+        },
+        result::deduplicate_and_number_citations,
+        tool_catalog::{
+            build_tool_catalog, expire_cached_responses_tool_compatibility,
+            load_cached_responses_tool_compatibility,
+            mark_cached_responses_tool_compatibility_ready_for_reprobe,
+            open_target_tool_description, responses_tool_compatibility_cache_key,
+            store_cached_responses_tool_compatibility, tool_catalog_without_all_tools,
+            tool_catalog_without_mcp_tools,
+        },
+        tool_execute::{
+            execute_open_target_tool, execute_read_file_tool, execute_with_timeout,
+            resolve_readable_file_path,
+        },
     };
     use crate::domain::{
         acp::{AcpActionEvent, AcpMcpServerConfig, AcpMcpServerHttpConfig, AcpNameValuePair},
@@ -2015,6 +978,7 @@ mod tests {
         settings::{LlmSettings, RagSettings},
     };
     use crate::infrastructure::openai_compatible::{body_preview, parse_json_or_sse_payload};
+    use crate::services::builtin_mcp;
     use zip::{write::SimpleFileOptions, ZipWriter};
 
     fn test_provider() -> LlmProviderConfig {
@@ -2037,6 +1001,26 @@ mod tests {
         std::env::temp_dir().join(format!("wabity-rag-answer-{label}-{unique}"))
     }
 
+    fn test_citation(path: &str) -> ExecutionCitation {
+        ExecutionCitation {
+            id: 1,
+            absolute_path: path.to_string(),
+            path: path.to_string(),
+            document_kind: "markdown".to_string(),
+            chunk_index: 1,
+            line_start: Some(1),
+            line_end: Some(3),
+            paragraph_line_start: Some(1),
+            page_start: None,
+            page_end: None,
+            heading_path: Vec::new(),
+            anchor_label: None,
+            score: 0.9,
+            distance: 0.1,
+            snippet: "alpha".to_string(),
+        }
+    }
+
     fn normalize_path(path: &Path) -> String {
         path.to_string_lossy().replace('\\', "/")
     }
@@ -2056,8 +1040,32 @@ mod tests {
 
     #[test]
     fn question_payload_strips_rag_alias() {
-        assert_eq!(question_payload("/ask 解释架构"), "解释架构");
+        assert_eq!(
+            question_payload("/ask 解释架构", &RAG_ANSWER_COMMAND_ALIASES),
+            "解释架构"
+        );
         assert_eq!(extract_rag_answer_payload("/qa explain"), Some("explain"));
+    }
+
+    #[test]
+    fn question_explicitly_requests_open_detects_open_intent() {
+        assert!(question_explicitly_requests_open("打开 README.md"));
+        assert!(question_explicitly_requests_open("open https://tauri.app"));
+        assert!(!question_explicitly_requests_open(
+            "解释 README.md 在做什么"
+        ));
+    }
+
+    #[test]
+    fn open_target_tool_description_embeds_host_context() {
+        let description = open_target_tool_description(&HostSystemContext {
+            os_name: "macOS".to_string(),
+            os_version: Some("15.3".to_string()),
+            package_managers: vec!["brew".to_string(), "cargo".to_string(), "pnpm".to_string()],
+        });
+
+        assert!(description.contains("OS=macOS 15.3"));
+        assert!(description.contains("package managers on PATH=brew, cargo, pnpm"));
     }
 
     #[test]
@@ -2132,11 +1140,15 @@ mod tests {
                 id: 99,
                 absolute_path: "/tmp/a.md".to_string(),
                 path: "/tmp/a.md".to_string(),
+                document_kind: "markdown".to_string(),
                 chunk_index: 1,
-                line_start: 10,
-                line_end: 12,
-                paragraph_line_start: 10,
+                line_start: Some(10),
+                line_end: Some(12),
+                paragraph_line_start: Some(10),
+                page_start: None,
+                page_end: None,
                 heading_path: Vec::new(),
+                anchor_label: None,
                 score: 0.8,
                 distance: 0.2,
                 snippet: "a".to_string(),
@@ -2145,11 +1157,15 @@ mod tests {
                 id: 0,
                 absolute_path: "/tmp/a.md".to_string(),
                 path: "/tmp/a.md".to_string(),
+                document_kind: "markdown".to_string(),
                 chunk_index: 1,
-                line_start: 10,
-                line_end: 12,
-                paragraph_line_start: 10,
+                line_start: Some(10),
+                line_end: Some(12),
+                paragraph_line_start: Some(10),
+                page_start: None,
+                page_end: None,
                 heading_path: Vec::new(),
+                anchor_label: None,
                 score: 0.8,
                 distance: 0.2,
                 snippet: "a".to_string(),
@@ -2167,19 +1183,7 @@ mod tests {
         let carried_state = ExecutionConversationState {
             previous_response_id: Some("resp_123".to_string()),
             continuation_scope: Some(provider_continuation_scope(&provider, workspace_root)),
-            citations: vec![ExecutionCitation {
-                id: 1,
-                absolute_path: "/workspace/a.md".to_string(),
-                path: "~/a.md".to_string(),
-                chunk_index: 1,
-                line_start: 1,
-                line_end: 3,
-                paragraph_line_start: 1,
-                heading_path: Vec::new(),
-                score: 0.9,
-                distance: 0.1,
-                snippet: "alpha".to_string(),
-            }],
+            citations: vec![test_citation("~/a.md")],
             actions: vec![AcpActionEvent {
                 kind: "info".to_string(),
                 title: "第 1 步".to_string(),
@@ -2222,19 +1226,7 @@ mod tests {
         let carried_state = ExecutionConversationState {
             previous_response_id: Some("resp_123".to_string()),
             continuation_scope: Some("stale-scope".to_string()),
-            citations: vec![ExecutionCitation {
-                id: 1,
-                absolute_path: "/workspace/a.md".to_string(),
-                path: "~/a.md".to_string(),
-                chunk_index: 1,
-                line_start: 1,
-                line_end: 3,
-                paragraph_line_start: 1,
-                heading_path: Vec::new(),
-                score: 0.9,
-                distance: 0.1,
-                snippet: "alpha".to_string(),
-            }],
+            citations: vec![test_citation("~/a.md")],
             actions: Vec::new(),
             tool_calls: Vec::new(),
         };
@@ -2268,19 +1260,7 @@ mod tests {
             Some("resp_456".to_string()),
             &provider,
             workspace_root,
-            &[ExecutionCitation {
-                id: 1,
-                absolute_path: "/workspace/a.md".to_string(),
-                path: "~/a.md".to_string(),
-                chunk_index: 1,
-                line_start: 1,
-                line_end: 3,
-                paragraph_line_start: 1,
-                heading_path: Vec::new(),
-                score: 0.9,
-                distance: 0.1,
-                snippet: "alpha".to_string(),
-            }],
+            &[test_citation("~/a.md")],
             &[AcpActionEvent {
                 kind: "info".to_string(),
                 title: "第 1 步".to_string(),
@@ -2309,6 +1289,7 @@ mod tests {
     #[test]
     fn tool_names_stay_stable() {
         assert_eq!(RAG_QUERY_TOOL_NAME, "wabity.rag.query");
+        assert_eq!(OPEN_TARGET_TOOL_NAME, "wabity.system.open");
     }
 
     #[test]
@@ -2337,7 +1318,18 @@ mod tests {
             },
         ]);
 
-        assert_eq!(progress, "文档问答 · 正在检索索引并读取证据文件");
+        assert_eq!(progress, "文档问答 · 正在检索索引并读取证据");
+    }
+
+    #[test]
+    fn summarize_local_tool_progress_reports_open_target_only() {
+        let progress = summarize_local_tool_progress(&[LocalToolCall {
+            call_id: "call_1".to_string(),
+            name: OPEN_TARGET_TOOL_NAME.to_string(),
+            arguments: serde_json::json!({}),
+        }]);
+
+        assert_eq!(progress, "文档问答 · 正在打开目标");
     }
 
     #[test]
@@ -2356,12 +1348,14 @@ mod tests {
 
         let filtered = tool_catalog_without_mcp_tools(&tool_catalog);
 
-        assert_eq!(filtered.request_tools.len(), 2);
+        assert_eq!(filtered.request_tools.len(), 4);
         assert_eq!(
             filtered.available_names,
             vec![
                 READ_FILE_TOOL_NAME.to_string(),
+                READ_DOCUMENT_EXCERPT_TOOL_NAME.to_string(),
                 RAG_QUERY_TOOL_NAME.to_string(),
+                OPEN_TARGET_TOOL_NAME.to_string(),
             ]
         );
         assert_eq!(filtered.skipped_mcp_servers, vec!["WebMCP".to_string()]);
@@ -2386,10 +1380,31 @@ mod tests {
     }
 
     #[test]
+    fn build_tool_catalog_skips_builtin_mcp_server_for_responses() {
+        let tool_catalog = build_tool_catalog(
+            &[builtin_mcp::builtin_server_config()],
+            QuestionAnswerProtocol::Responses,
+        );
+
+        assert_eq!(tool_catalog.request_tools.len(), 4);
+        assert_eq!(
+            tool_catalog.available_names,
+            vec![
+                READ_FILE_TOOL_NAME.to_string(),
+                READ_DOCUMENT_EXCERPT_TOOL_NAME.to_string(),
+                RAG_QUERY_TOOL_NAME.to_string(),
+                OPEN_TARGET_TOOL_NAME.to_string(),
+            ]
+        );
+        assert!(tool_catalog.skipped_mcp_servers.is_empty());
+    }
+
+    #[test]
     fn responses_tool_compatibility_cache_only_degrades() {
         let cache_key = responses_tool_compatibility_cache_key(
             "https://example.com/v1",
             &format!("gpt-test-{}", std::process::id()),
+            &build_tool_catalog(&[], QuestionAnswerProtocol::Responses),
         );
 
         store_cached_responses_tool_compatibility(
@@ -2410,6 +1425,69 @@ mod tests {
             load_cached_responses_tool_compatibility(&cache_key),
             ResponsesToolCompatibilityMode::NoTools
         );
+    }
+
+    #[test]
+    fn responses_tool_compatibility_cache_expires_stale_entries() {
+        let tool_catalog = build_tool_catalog(&[], QuestionAnswerProtocol::Responses);
+        let cache_key = responses_tool_compatibility_cache_key(
+            "https://example.com/v1",
+            &format!("gpt-expire-{}", std::process::id()),
+            &tool_catalog,
+        );
+        store_cached_responses_tool_compatibility(
+            &cache_key,
+            ResponsesToolCompatibilityMode::NoMcp,
+        );
+        expire_cached_responses_tool_compatibility(&cache_key);
+
+        assert_eq!(
+            load_cached_responses_tool_compatibility(&cache_key),
+            ResponsesToolCompatibilityMode::Full
+        );
+    }
+
+    #[test]
+    fn responses_tool_compatibility_cache_reprobes_degraded_entries() {
+        let tool_catalog = build_tool_catalog(&[], QuestionAnswerProtocol::Responses);
+        let cache_key = responses_tool_compatibility_cache_key(
+            "https://example.com/v1",
+            &format!("gpt-reprobe-{}", std::process::id()),
+            &tool_catalog,
+        );
+        store_cached_responses_tool_compatibility(
+            &cache_key,
+            ResponsesToolCompatibilityMode::NoMcp,
+        );
+        mark_cached_responses_tool_compatibility_ready_for_reprobe(&cache_key);
+
+        assert_eq!(
+            load_cached_responses_tool_compatibility(&cache_key),
+            ResponsesToolCompatibilityMode::Full
+        );
+    }
+
+    #[test]
+    fn responses_tool_compatibility_cache_key_tracks_tool_catalog_fingerprint() {
+        let builtin_only = build_tool_catalog(&[], QuestionAnswerProtocol::Responses);
+        let with_mcp = build_tool_catalog(
+            &[AcpMcpServerConfig::Http(AcpMcpServerHttpConfig {
+                name: "WebMCP".to_string(),
+                url: "https://example.com/mcp".to_string(),
+                headers: Vec::new(),
+            })],
+            QuestionAnswerProtocol::Responses,
+        );
+
+        let builtin_key = responses_tool_compatibility_cache_key(
+            "https://example.com/v1",
+            "gpt-test",
+            &builtin_only,
+        );
+        let with_mcp_key =
+            responses_tool_compatibility_cache_key("https://example.com/v1", "gpt-test", &with_mcp);
+
+        assert_ne!(builtin_key, with_mcp_key);
     }
 
     #[test]
@@ -2481,6 +1559,73 @@ mod tests {
             &tool_catalog,
             &client_error
         ));
+    }
+
+    #[tokio::test]
+    async fn open_target_tool_rejects_when_current_question_does_not_request_open() {
+        let workspace_root = temp_test_root("open-tool-no-intent");
+        std::fs::create_dir_all(&workspace_root).expect("create workspace root");
+        let runtime = QuestionToolRuntime {
+            data_dir: &workspace_root,
+            workspace_root: &workspace_root,
+            rag_settings: &RagSettings::default(),
+            llm_settings: &LlmSettings::default(),
+            allow_open_target: false,
+            progress_event_tx: None,
+        };
+
+        let error = execute_open_target_tool(
+            &runtime,
+            &serde_json::json!({
+                "target": "https://tauri.app"
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "当前问题没有明确要求打开目标，禁止调用 wabity.system.open"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_target_tool_rejects_local_paths_outside_allowed_roots() {
+        let root = temp_test_root("open-tool-outside");
+        let workspace_root = root.join("workspace");
+        let outside_root = root.join("outside");
+        std::fs::create_dir_all(&workspace_root).expect("create workspace root");
+        std::fs::create_dir_all(&outside_root).expect("create outside root");
+
+        let workspace_root = workspace_root
+            .canonicalize()
+            .expect("canonicalize workspace root");
+        let outside_file = outside_root.join("secret.md");
+        std::fs::write(&outside_file, "secret").expect("write outside file");
+        let outside_file = outside_file
+            .canonicalize()
+            .expect("canonicalize outside file");
+        let runtime = QuestionToolRuntime {
+            data_dir: &workspace_root,
+            workspace_root: &workspace_root,
+            rag_settings: &RagSettings::default(),
+            llm_settings: &LlmSettings::default(),
+            allow_open_target: true,
+            progress_event_tx: None,
+        };
+
+        let error = execute_open_target_tool(
+            &runtime,
+            &serde_json::json!({
+                "target": outside_file.to_string_lossy()
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("路径超出允许范围，只能打开当前 workspace 或显式配置的 RAG 目录"));
     }
 
     #[test]
@@ -2564,6 +1709,7 @@ mod tests {
             workspace_root: &workspace_root,
             rag_settings: &RagSettings::default(),
             llm_settings: &LlmSettings::default(),
+            allow_open_target: false,
             progress_event_tx: None,
         };
         let executed = execute_read_file_tool(
@@ -2581,6 +1727,19 @@ mod tests {
         assert!(executed.output.contains("Alpha paragraph."));
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn local_tool_timeout_reports_tool_name() {
+        let error = execute_with_timeout("wabity.test.timeout", Duration::from_millis(10), async {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .expect_err("slow tool should time out");
+
+        assert!(error.to_string().contains("wabity.test.timeout"));
+        assert!(error.to_string().contains("执行超时"));
     }
 
     #[test]

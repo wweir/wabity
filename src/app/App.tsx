@@ -1,8 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { LauncherPage } from "../features/launcher/LauncherPage";
 import { getAppSettings } from "../lib/tauri/client";
-import type { AppearanceSettings } from "../lib/tauri/types";
-import { applyAppearanceSettings, defaultAppearanceSettings } from "./appearance";
+import { defaultAppearanceSettings, syncAppearanceSettings } from "./appearance";
 
 const SettingsPage = lazy(() =>
 	import("../features/settings/SettingsPage").then((module) => ({
@@ -14,46 +13,10 @@ export type AppView = "launcher" | "settings";
 
 export function App() {
 	const [currentView, setCurrentView] = useState<AppView>("launcher");
-	const [appearanceSettings, setAppearanceSettings] =
-		useState<AppearanceSettings>(defaultAppearanceSettings);
+	const [appearanceSettings, setAppearanceSettings] = useState(defaultAppearanceSettings);
 
 	useEffect(() => {
-		let removeMediaListener: (() => void) | null = null;
-
-		const bindSystemThemeListener = (themePreference: string) => {
-			removeMediaListener?.();
-			removeMediaListener = null;
-
-			if (themePreference !== "auto" || typeof window.matchMedia !== "function") {
-				return;
-			}
-
-			const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
-			const handleChange = () => {
-				const fontSize =
-					document.documentElement.dataset.fontSize ?? defaultAppearanceSettings.fontSize;
-				applyAppearanceSettings({
-					theme: "auto",
-					fontSize,
-				});
-			};
-
-			if (typeof mediaQuery.addEventListener === "function") {
-				mediaQuery.addEventListener("change", handleChange);
-				removeMediaListener = () => mediaQuery.removeEventListener("change", handleChange);
-				return;
-			}
-
-			mediaQuery.addListener(handleChange);
-			removeMediaListener = () => mediaQuery.removeListener(handleChange);
-		};
-
-		applyAppearanceSettings(appearanceSettings);
-		bindSystemThemeListener(appearanceSettings.theme);
-
-		return () => {
-			removeMediaListener?.();
-		};
+		return syncAppearanceSettings(appearanceSettings);
 	}, [appearanceSettings]);
 
 	useEffect(() => {

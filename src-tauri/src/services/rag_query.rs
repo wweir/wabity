@@ -10,6 +10,7 @@ use lancedb::{
 use serde::Serialize;
 
 use crate::domain::settings::{LlmProviderConfig, LlmSettings, RagSettings};
+use crate::services::document_extract::DocumentKind;
 use crate::services::rag::{self, RAG_TABLE_NAME};
 
 const MAX_TOP_K: usize = 20;
@@ -31,14 +32,24 @@ pub struct RagSearchHit {
     pub source_root: String,
     pub absolute_path: String,
     pub path: String,
+    pub document_kind: DocumentKind,
     pub chunk_index: i32,
-    pub line_start: i32,
-    pub line_end: i32,
-    pub paragraph_line_start: i32,
+    pub line_start: Option<i32>,
+    pub line_end: Option<i32>,
+    pub paragraph_line_start: Option<i32>,
+    pub page_start: Option<i32>,
+    pub page_end: Option<i32>,
     pub heading_path: Vec<String>,
+    pub anchor_label: Option<String>,
     pub text: String,
     pub distance: f32,
     pub score: f32,
+    #[serde(skip_serializing)]
+    pub(crate) vector_score: f32,
+    #[serde(skip_serializing)]
+    pub(crate) lexical_score: f32,
+    #[serde(skip_serializing)]
+    pub(crate) has_vector_signal: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -100,8 +111,11 @@ pub async fn search_chunks(
 
     let embedding_provider = rag::resolve_embedding_provider(rag_settings, llm_settings)?;
     let candidate_limit = expanded_candidate_limit(top_k);
-    let hits =
-        search_similar_chunks(data_dir, trimmed_query, embedding_provider, candidate_limit).await?;
+    let (vector_hits, lexical_hits) = tokio::join!(
+        search_similar_chunks(data_dir, trimmed_query, embedding_provider, candidate_limit),
+        search_lexical_chunks(data_dir, trimmed_query, candidate_limit),
+    );
+    let hits = merge_search_hits(vector_hits?, lexical_hits?);
     let ranked_hits = rerank_search_hits(trimmed_query, hits);
     let filtered_hits = prune_search_hits(ranked_hits, top_k, min_score);
     let metadata_path = rag::rag_metadata_database_path(data_dir);
@@ -155,11 +169,15 @@ async fn search_similar_chunks(
         .select(Select::columns(&[
             "source_root",
             "absolute_path",
+            "document_kind",
             "chunk_index",
             "line_start",
             "line_end",
             "paragraph_line_start",
+            "page_start",
+            "page_end",
             "heading_path",
+            "anchor_label",
             "text",
             "_distance",
         ]))
@@ -194,11 +212,15 @@ fn parse_search_batch(batch: &RecordBatch) -> Result<Vec<RagSearchHit>> {
 
     let source_roots = downcast_string_column(batch, "source_root")?;
     let absolute_paths = downcast_string_column(batch, "absolute_path")?;
+    let document_kinds = downcast_string_column(batch, "document_kind")?;
     let chunk_indexes = downcast_int32_column(batch, "chunk_index")?;
     let line_starts = downcast_int32_column(batch, "line_start")?;
     let line_ends = downcast_int32_column(batch, "line_end")?;
     let paragraph_line_starts = downcast_int32_column(batch, "paragraph_line_start")?;
+    let page_starts = downcast_int32_column(batch, "page_start")?;
+    let page_ends = downcast_int32_column(batch, "page_end")?;
     let heading_paths = downcast_string_column(batch, "heading_path")?;
+    let anchor_labels = downcast_string_column(batch, "anchor_label")?;
     let texts = downcast_string_column(batch, "text")?;
     let distance_column = column_by_name(batch, "_distance")?;
 
@@ -206,23 +228,75 @@ fn parse_search_batch(batch: &RecordBatch) -> Result<Vec<RagSearchHit>> {
     for row_index in 0..batch.num_rows() {
         let distance = float_value_at(distance_column.as_ref(), row_index)
             .with_context(|| format!("failed to read LanceDB distance at row {row_index}"))?;
+        let vector_score = distance_to_score(distance);
         let absolute_path = absolute_paths.value(row_index).to_string();
         hits.push(RagSearchHit {
             source_root: source_roots.value(row_index).to_string(),
             path: rag::display_path_for_prompt(&absolute_path),
             absolute_path,
+            document_kind: rag::parse_document_kind(document_kinds.value(row_index))?,
             chunk_index: chunk_indexes.value(row_index),
-            line_start: line_starts.value(row_index),
-            line_end: line_ends.value(row_index),
-            paragraph_line_start: paragraph_line_starts.value(row_index),
+            line_start: optional_int32_value_at(line_starts, row_index),
+            line_end: optional_int32_value_at(line_ends, row_index),
+            paragraph_line_start: optional_int32_value_at(paragraph_line_starts, row_index),
+            page_start: optional_int32_value_at(page_starts, row_index),
+            page_end: optional_int32_value_at(page_ends, row_index),
             heading_path: rag::parse_heading_path(heading_paths.value(row_index))?,
+            anchor_label: optional_string_value_at(anchor_labels, row_index),
             text: texts.value(row_index).to_string(),
             distance,
-            score: distance_to_score(distance),
+            score: vector_score,
+            vector_score,
+            lexical_score: 0.0,
+            has_vector_signal: true,
         });
     }
 
     Ok(hits)
+}
+
+async fn search_lexical_chunks(
+    data_dir: &Path,
+    query: &str,
+    top_k: usize,
+) -> Result<Vec<RagSearchHit>> {
+    let Some(match_query) = build_lexical_match_query(query) else {
+        return Ok(Vec::new());
+    };
+
+    let metadata_path = rag::rag_metadata_database_path(data_dir);
+    let rows = tokio::task::spawn_blocking(move || {
+        rag::search_lexical_chunks(&metadata_path, &match_query, top_k)
+    })
+    .await
+    .context("failed to join RAG lexical search task")??;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let lexical_score = bm25_rank_to_score(row.bm25_rank);
+            RagSearchHit {
+                source_root: row.source_root,
+                absolute_path: row.absolute_path.clone(),
+                path: rag::display_path_for_prompt(&row.absolute_path),
+                document_kind: row.document_kind,
+                chunk_index: row.chunk_index,
+                line_start: row.line_start,
+                line_end: row.line_end,
+                paragraph_line_start: row.paragraph_line_start,
+                page_start: row.page_start,
+                page_end: row.page_end,
+                heading_path: row.heading_path,
+                anchor_label: row.anchor_label,
+                text: row.text,
+                distance: lexical_distance_for_score(lexical_score),
+                score: lexical_score,
+                vector_score: 0.0,
+                lexical_score,
+                has_vector_signal: false,
+            }
+        })
+        .collect())
 }
 
 fn downcast_string_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray> {
@@ -237,6 +311,14 @@ fn downcast_int32_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a I
         .as_any()
         .downcast_ref::<Int32Array>()
         .with_context(|| format!("column `{name}` is not an Int32Array"))
+}
+
+fn optional_int32_value_at(values: &Int32Array, row_index: usize) -> Option<i32> {
+    (!values.is_null(row_index)).then(|| values.value(row_index))
+}
+
+fn optional_string_value_at(values: &StringArray, row_index: usize) -> Option<String> {
+    (!values.is_null(row_index)).then(|| values.value(row_index).to_string())
 }
 
 fn column_by_name<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a std::sync::Arc<dyn Array>> {
@@ -265,11 +347,82 @@ fn distance_to_score(distance: f32) -> f32 {
     1.0 / (1.0 + distance.max(0.0))
 }
 
+fn bm25_rank_to_score(rank: f32) -> f32 {
+    let magnitude = rank.abs();
+    magnitude / (1.0 + magnitude)
+}
+
+fn lexical_distance_for_score(score: f32) -> f32 {
+    (1.0 - score).clamp(0.0, 1.0)
+}
+
 fn expanded_candidate_limit(top_k: usize) -> usize {
     let requested_limit = top_k.clamp(1, MAX_TOP_K);
     requested_limit
         .saturating_mul(CANDIDATE_EXPANSION_FACTOR)
         .max(CANDIDATE_LIMIT_FLOOR)
+}
+
+fn merge_search_hits(
+    vector_hits: Vec<RagSearchHit>,
+    lexical_hits: Vec<RagSearchHit>,
+) -> Vec<RagSearchHit> {
+    let mut merged = HashMap::<String, RagSearchHit>::new();
+    for hit in vector_hits.into_iter().chain(lexical_hits) {
+        merged
+            .entry(search_hit_key(&hit))
+            .and_modify(|existing| merge_search_hit(existing, &hit))
+            .or_insert(hit);
+    }
+
+    let mut hits = merged.into_values().collect::<Vec<_>>();
+    hits.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                left.distance
+                    .partial_cmp(&right.distance)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+    hits
+}
+
+fn search_hit_key(hit: &RagSearchHit) -> String {
+    format!("{}#{}", hit.absolute_path, hit.chunk_index)
+}
+
+fn merge_search_hit(existing: &mut RagSearchHit, incoming: &RagSearchHit) {
+    existing.vector_score = existing.vector_score.max(incoming.vector_score);
+    existing.lexical_score = existing.lexical_score.max(incoming.lexical_score);
+    existing.has_vector_signal = existing.has_vector_signal || incoming.has_vector_signal;
+    if incoming.has_vector_signal && incoming.distance < existing.distance {
+        existing.distance = incoming.distance;
+    }
+    if existing.heading_path.is_empty() {
+        existing.heading_path = incoming.heading_path.clone();
+    }
+    if existing.anchor_label.is_none() {
+        existing.anchor_label = incoming.anchor_label.clone();
+    }
+    if existing.text.is_empty() {
+        existing.text = incoming.text.clone();
+    }
+    existing.score = hybrid_candidate_score(existing.vector_score, existing.lexical_score);
+    if !existing.has_vector_signal {
+        existing.distance = lexical_distance_for_score(existing.lexical_score);
+    }
+}
+
+fn hybrid_candidate_score(vector_score: f32, lexical_score: f32) -> f32 {
+    let base = vector_score.max(lexical_score);
+    if vector_score > 0.0 && lexical_score > 0.0 {
+        (base + vector_score.min(lexical_score) * 0.15).min(1.0)
+    } else {
+        base
+    }
 }
 
 fn prune_search_hits(
@@ -292,20 +445,15 @@ fn prune_search_hits(
     let mut file_order = Vec::new();
 
     for ranked_hit in hits.into_iter().filter(|ranked_hit| {
-        ranked_hit.hit.score >= effective_min_score
-            && ranked_hit.combined_score >= relative_combined_floor
-            && distance_ceiling.is_none_or(|ceiling| ranked_hit.hit.distance <= ceiling)
-            && !is_low_information_hit(&ranked_hit.hit)
-            && (ranked_hit.term_coverage >= term_coverage_floor
-                || ranked_hit.exact_query_match
-                || term_coverage_floor == 0.0)
-            && (lexical_presence_floor == 0
-                || ranked_hit.exact_query_match
-                || ranked_hit.has_structural_anchor
-                || ranked_hit.matched_query_terms >= lexical_presence_floor)
-            && (matched_terms_floor == 0
-                || ranked_hit.has_structural_anchor
-                || ranked_hit.matched_query_terms >= matched_terms_floor)
+        should_keep_ranked_hit(
+            ranked_hit,
+            effective_min_score,
+            relative_combined_floor,
+            term_coverage_floor,
+            lexical_presence_floor,
+            matched_terms_floor,
+            distance_ceiling,
+        )
     }) {
         let hit = ranked_hit.hit;
         if !file_buckets.contains_key(&hit.absolute_path) {
@@ -343,6 +491,52 @@ fn prune_search_hits(
     }
 
     selected
+}
+
+fn should_keep_ranked_hit(
+    ranked_hit: &RankedSearchHit,
+    effective_min_score: f32,
+    relative_combined_floor: f32,
+    term_coverage_floor: f32,
+    lexical_presence_floor: usize,
+    matched_terms_floor: usize,
+    distance_ceiling: Option<f32>,
+) -> bool {
+    ranked_hit.hit.score >= effective_min_score
+        && ranked_hit.combined_score >= relative_combined_floor
+        && within_distance_ceiling(ranked_hit, distance_ceiling)
+        && !is_low_information_hit(&ranked_hit.hit)
+        && meets_term_coverage_floor(ranked_hit, term_coverage_floor)
+        && meets_lexical_presence_floor(ranked_hit, lexical_presence_floor)
+        && meets_anchor_term_floor(ranked_hit, matched_terms_floor)
+}
+
+fn within_distance_ceiling(ranked_hit: &RankedSearchHit, distance_ceiling: Option<f32>) -> bool {
+    distance_ceiling.is_none_or(|ceiling| {
+        !ranked_hit.hit.has_vector_signal || ranked_hit.hit.distance <= ceiling
+    })
+}
+
+fn meets_term_coverage_floor(ranked_hit: &RankedSearchHit, term_coverage_floor: f32) -> bool {
+    ranked_hit.term_coverage >= term_coverage_floor
+        || ranked_hit.exact_query_match
+        || term_coverage_floor == 0.0
+}
+
+fn meets_lexical_presence_floor(
+    ranked_hit: &RankedSearchHit,
+    lexical_presence_floor: usize,
+) -> bool {
+    lexical_presence_floor == 0
+        || ranked_hit.exact_query_match
+        || ranked_hit.has_structural_anchor
+        || ranked_hit.matched_query_terms >= lexical_presence_floor
+}
+
+fn meets_anchor_term_floor(ranked_hit: &RankedSearchHit, matched_terms_floor: usize) -> bool {
+    matched_terms_floor == 0
+        || ranked_hit.has_structural_anchor
+        || ranked_hit.matched_query_terms >= matched_terms_floor
 }
 
 fn rerank_search_hits(query: &str, hits: Vec<RagSearchHit>) -> Vec<RankedSearchHit> {
@@ -436,6 +630,7 @@ fn structural_match_signals(
 ) -> StructuralMatchSignals {
     let path = normalize_text(&hit.path);
     let headings = normalize_text(&hit.heading_path.join(" "));
+    let anchor = normalize_text(hit.anchor_label.as_deref().unwrap_or_default());
     let mut score = 0.0;
     let mut has_anchor = false;
     if !normalized_query.is_empty() && path.contains(normalized_query) {
@@ -444,6 +639,10 @@ fn structural_match_signals(
     }
     if !normalized_query.is_empty() && headings.contains(normalized_query) {
         score += 0.6;
+        has_anchor = true;
+    }
+    if !normalized_query.is_empty() && !anchor.is_empty() && anchor.contains(normalized_query) {
+        score += 0.3;
         has_anchor = true;
     }
     if !query_terms.is_empty() {
@@ -455,9 +654,14 @@ fn structural_match_signals(
             .iter()
             .filter(|term| headings.contains(term.as_str()))
             .count();
+        let anchor_terms = query_terms
+            .iter()
+            .filter(|term| anchor.contains(term.as_str()))
+            .count();
         score += path_terms as f32 / query_terms.len() as f32 * 0.35;
         score += heading_terms as f32 / query_terms.len() as f32 * 0.25;
-        has_anchor = has_anchor || path_terms > 0 || heading_terms > 0;
+        score += anchor_terms as f32 / query_terms.len() as f32 * 0.1;
+        has_anchor = has_anchor || path_terms > 0 || heading_terms > 0 || anchor_terms > 0;
     }
     StructuralMatchSignals { score, has_anchor }
 }
@@ -530,8 +734,29 @@ fn min_anchor_term_matches(best_hit: &RankedSearchHit) -> usize {
 }
 
 fn distance_ceiling_for_strong_query(best_hit: &RankedSearchHit) -> Option<f32> {
-    (best_hit.term_coverage >= 0.8 && best_hit.matched_query_terms >= 2)
+    (best_hit.hit.has_vector_signal
+        && best_hit.term_coverage >= 0.8
+        && best_hit.matched_query_terms >= 2)
         .then_some(best_hit.hit.distance + STRONG_QUERY_MAX_DISTANCE_DELTA)
+}
+
+fn build_lexical_match_query(query: &str) -> Option<String> {
+    let terms = extract_query_terms(query);
+    if terms.is_empty() {
+        return None;
+    }
+
+    Some(
+        terms
+            .into_iter()
+            .map(|term| format!("\"{}\"", escape_fts_phrase(&term)))
+            .collect::<Vec<_>>()
+            .join(" OR "),
+    )
+}
+
+fn escape_fts_phrase(term: &str) -> String {
+    term.replace('"', "\"\"")
 }
 
 fn is_low_information_hit(hit: &RagSearchHit) -> bool {
@@ -581,11 +806,37 @@ fn is_base64_like_chunk(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::services::document_extract::DocumentKind;
+
     use super::{
-        distance_to_score, expanded_candidate_limit, is_base64_like_chunk, is_heading_only_chunk,
+        bm25_rank_to_score, build_lexical_match_query, distance_to_score, expanded_candidate_limit,
+        hybrid_candidate_score, is_base64_like_chunk, is_heading_only_chunk,
         min_anchor_term_matches, min_lexical_presence, min_relevance_score, prune_search_hits,
         rerank_search_hits, RagSearchHit, RankedSearchHit,
     };
+
+    fn test_search_hit(path: &str, text: impl Into<String>) -> RagSearchHit {
+        RagSearchHit {
+            source_root: "/docs".to_string(),
+            absolute_path: path.to_string(),
+            path: format!("~{}", path),
+            document_kind: DocumentKind::Markdown,
+            chunk_index: 0,
+            line_start: Some(1),
+            line_end: Some(2),
+            paragraph_line_start: Some(1),
+            page_start: None,
+            page_end: None,
+            heading_path: Vec::new(),
+            anchor_label: None,
+            text: text.into(),
+            distance: 0.08,
+            score: 0.92,
+            vector_score: 0.92,
+            lexical_score: 0.0,
+            has_vector_signal: true,
+        }
+    }
 
     #[test]
     fn distance_score_is_clamped_to_positive_domain() {
@@ -601,6 +852,26 @@ mod tests {
     }
 
     #[test]
+    fn bm25_rank_score_prefers_stronger_matches() {
+        assert!(bm25_rank_to_score(-4.0) > bm25_rank_to_score(-0.5));
+        assert!(bm25_rank_to_score(0.0) <= 0.01);
+    }
+
+    #[test]
+    fn lexical_match_query_quotes_terms_for_fts() {
+        assert_eq!(
+            build_lexical_match_query("alpha timeout root cause").as_deref(),
+            Some("\"alpha\" OR \"timeout\" OR \"root\" OR \"cause\"")
+        );
+    }
+
+    #[test]
+    fn hybrid_candidate_score_rewards_dual_signal_without_overflow() {
+        assert!(hybrid_candidate_score(0.7, 0.6) > 0.7);
+        assert!(hybrid_candidate_score(0.95, 0.9) <= 1.0);
+    }
+
+    #[test]
     fn search_hits_are_capped_per_file_before_final_limit() {
         let hits = (0..5)
             .map(|index| RankedSearchHit {
@@ -610,17 +881,13 @@ mod tests {
                 matched_query_terms: 2,
                 has_structural_anchor: true,
                 hit: RagSearchHit {
-                    source_root: "/docs".to_string(),
-                    absolute_path: "/docs/a.md".to_string(),
-                    path: "~/docs/a.md".to_string(),
                     chunk_index: index,
-                    line_start: index,
-                    line_end: index + 1,
-                    paragraph_line_start: index,
-                    heading_path: Vec::new(),
-                    text: format!("a-{index}"),
+                    line_start: Some(index),
+                    line_end: Some(index + 1),
+                    paragraph_line_start: Some(index),
                     distance: 0.02 + (index as f32 * 0.01),
                     score: 0.82 - (index as f32 * 0.01),
+                    ..test_search_hit("/docs/a.md", format!("a-{index}"))
                 },
             })
             .chain((0..3).map(|index| RankedSearchHit {
@@ -630,17 +897,13 @@ mod tests {
                 matched_query_terms: 2,
                 has_structural_anchor: true,
                 hit: RagSearchHit {
-                    source_root: "/docs".to_string(),
-                    absolute_path: "/docs/b.md".to_string(),
-                    path: "~/docs/b.md".to_string(),
                     chunk_index: index,
-                    line_start: index,
-                    line_end: index + 1,
-                    paragraph_line_start: index,
-                    heading_path: Vec::new(),
-                    text: format!("b-{index}"),
+                    line_start: Some(index),
+                    line_end: Some(index + 1),
+                    paragraph_line_start: Some(index),
                     distance: 0.05 + (index as f32 * 0.01),
                     score: 0.74 - (index as f32 * 0.01),
+                    ..test_search_hit("/docs/b.md", format!("b-{index}"))
                 },
             }))
             .collect::<Vec<_>>();
@@ -674,17 +937,10 @@ mod tests {
                 matched_query_terms: 3,
                 has_structural_anchor: true,
                 hit: RagSearchHit {
-                    source_root: "/docs".to_string(),
-                    absolute_path: "/docs/exact.md".to_string(),
-                    path: "~/docs/exact.md".to_string(),
-                    chunk_index: 0,
-                    line_start: 1,
-                    line_end: 2,
-                    paragraph_line_start: 1,
                     heading_path: vec!["Alpha".to_string()],
-                    text: "Alpha timeout root cause".to_string(),
                     distance: 0.08,
                     score: 0.92,
+                    ..test_search_hit("/docs/exact.md", "Alpha timeout root cause")
                 },
             },
             RankedSearchHit {
@@ -694,17 +950,10 @@ mod tests {
                 matched_query_terms: 1,
                 has_structural_anchor: false,
                 hit: RagSearchHit {
-                    source_root: "/docs".to_string(),
-                    absolute_path: "/docs/noise.md".to_string(),
-                    path: "~/docs/noise.md".to_string(),
-                    chunk_index: 0,
-                    line_start: 1,
-                    line_end: 2,
-                    paragraph_line_start: 1,
                     heading_path: vec!["Noise".to_string()],
-                    text: "Beta export notes".to_string(),
                     distance: 0.18,
                     score: 0.84,
+                    ..test_search_hit("/docs/noise.md", "Beta export notes")
                 },
             },
         ];
@@ -728,17 +977,10 @@ mod tests {
     fn moderate_strong_query_requires_at_least_one_lexical_term() {
         let best_hit = RankedSearchHit {
             hit: RagSearchHit {
-                source_root: "/docs".to_string(),
-                absolute_path: "/docs/a.md".to_string(),
-                path: "~/docs/a.md".to_string(),
-                chunk_index: 0,
-                line_start: 1,
-                line_end: 2,
-                paragraph_line_start: 1,
                 heading_path: vec!["Alpha".to_string()],
-                text: "alpha timeout root cause".to_string(),
                 distance: 0.2,
                 score: 0.83,
+                ..test_search_hit("/docs/a.md", "alpha timeout root cause")
             },
             combined_score: 1.6,
             term_coverage: 0.66,
@@ -754,17 +996,10 @@ mod tests {
     fn strong_query_requires_at_least_two_anchor_terms() {
         let best_hit = RankedSearchHit {
             hit: RagSearchHit {
-                source_root: "/docs".to_string(),
-                absolute_path: "/docs/a.md".to_string(),
-                path: "~/docs/a.md".to_string(),
-                chunk_index: 0,
-                line_start: 1,
-                line_end: 2,
-                paragraph_line_start: 1,
                 heading_path: vec!["国富论".to_string()],
-                text: "国富论 亚当 斯密 经济学".to_string(),
                 distance: 0.8,
                 score: 0.55,
+                ..test_search_hit("/docs/a.md", "国富论 亚当 斯密 经济学")
             },
             combined_score: 1.4,
             term_coverage: 1.0,
@@ -786,17 +1021,10 @@ mod tests {
                 matched_query_terms: 3,
                 has_structural_anchor: true,
                 hit: RagSearchHit {
-                    source_root: "/docs".to_string(),
-                    absolute_path: "/docs/exact.md".to_string(),
-                    path: "~/docs/exact.md".to_string(),
-                    chunk_index: 0,
-                    line_start: 1,
-                    line_end: 2,
-                    paragraph_line_start: 1,
                     heading_path: vec!["Alpha".to_string()],
-                    text: "alpha timeout root cause".to_string(),
                     distance: 0.08,
                     score: 0.92,
+                    ..test_search_hit("/docs/exact.md", "alpha timeout root cause")
                 },
             },
             RankedSearchHit {
@@ -806,17 +1034,10 @@ mod tests {
                 matched_query_terms: 0,
                 has_structural_anchor: false,
                 hit: RagSearchHit {
-                    source_root: "/docs".to_string(),
-                    absolute_path: "/docs/semantic-noise.md".to_string(),
-                    path: "~/docs/semantic-noise.md".to_string(),
-                    chunk_index: 0,
-                    line_start: 1,
-                    line_end: 2,
-                    paragraph_line_start: 1,
                     heading_path: vec!["General".to_string()],
-                    text: "generic system checklist".to_string(),
                     distance: 0.1,
                     score: 0.9,
+                    ..test_search_hit("/docs/semantic-noise.md", "generic system checklist")
                 },
             },
         ];
@@ -843,30 +1064,22 @@ mod tests {
             "alpha timeout root cause",
             vec![
                 RagSearchHit {
-                    source_root: "/docs".to_string(),
-                    absolute_path: "/docs/generic.md".to_string(),
-                    path: "~/docs/generic.md".to_string(),
-                    chunk_index: 0,
-                    line_start: 1,
-                    line_end: 2,
-                    paragraph_line_start: 1,
                     heading_path: vec!["General".to_string()],
-                    text: "General timeout checklist for all services.".to_string(),
                     distance: 0.05,
                     score: 0.95,
+                    ..test_search_hit(
+                        "/docs/generic.md",
+                        "General timeout checklist for all services.",
+                    )
                 },
                 RagSearchHit {
-                    source_root: "/docs".to_string(),
-                    absolute_path: "/docs/exact.md".to_string(),
-                    path: "~/docs/exact.md".to_string(),
-                    chunk_index: 0,
-                    line_start: 1,
-                    line_end: 2,
-                    paragraph_line_start: 1,
                     heading_path: vec!["Alpha".to_string(), "Root Cause".to_string()],
-                    text: "Alpha timeout root cause analysis and mitigation.".to_string(),
                     distance: 0.08,
                     score: 0.92,
+                    ..test_search_hit(
+                        "/docs/exact.md",
+                        "Alpha timeout root cause analysis and mitigation.",
+                    )
                 },
             ],
         );

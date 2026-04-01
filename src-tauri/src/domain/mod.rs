@@ -1,6 +1,7 @@
 pub mod acp;
 pub mod actions;
 pub mod application;
+pub mod clipboard;
 pub mod execution;
 pub mod file_search;
 pub mod notification;

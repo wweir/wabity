@@ -13,6 +13,7 @@ import type { InputMode } from "../types";
 import { usesInlineInputControl } from "../inputMode";
 
 interface LauncherComposerProps {
+	inputAnchorRef: RefObject<HTMLDivElement | null>;
 	inputMode: InputMode;
 	inputRef: RefObject<HTMLInputElement | HTMLTextAreaElement | null>;
 	rawText: string;
@@ -170,6 +171,7 @@ function LauncherStatusBar({
 }
 
 export function LauncherComposer({
+	inputAnchorRef,
 	inputMode,
 	inputRef,
 	rawText,
@@ -237,33 +239,35 @@ export function LauncherComposer({
 
 	return (
 		<>
-			<label className="sr-only" htmlFor={inputId}>
-				{inputLabel}
-			</label>
-			{usesInlineInputControl(inputMode) ? (
-				<input
-					{...inputProps}
-					{...sharedAccessibilityProps}
-					className="launcher-input inline"
-					id={inputId}
-					role="combobox"
-					ref={(element) => {
-						inputRef.current = element;
-					}}
-					type="text"
-				/>
-			) : (
-				<textarea
-					{...inputProps}
-					{...sharedAccessibilityProps}
-					className="launcher-input multiline"
-					id={inputId}
-					ref={(element) => {
-						inputRef.current = element;
-					}}
-					rows={4}
-				/>
-			)}
+			<div className="launcher-input-anchor" ref={inputAnchorRef}>
+				<label className="sr-only" htmlFor={inputId}>
+					{inputLabel}
+				</label>
+				{usesInlineInputControl(inputMode) ? (
+					<input
+						{...inputProps}
+						{...sharedAccessibilityProps}
+						className="launcher-input inline"
+						id={inputId}
+						role="combobox"
+						ref={(element) => {
+							inputRef.current = element;
+						}}
+						type="text"
+					/>
+				) : (
+					<textarea
+						{...inputProps}
+						{...sharedAccessibilityProps}
+						className="launcher-input multiline"
+						id={inputId}
+						ref={(element) => {
+							inputRef.current = element;
+						}}
+						rows={4}
+					/>
+				)}
+			</div>
 
 			<div className="control-row">
 				<LauncherStatusBar

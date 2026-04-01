@@ -23,6 +23,41 @@ pub struct AcpAgentCatalog {
 #[serde(rename_all = "camelCase")]
 pub struct AcpMcpServerCatalog {
     pub servers: Vec<AcpMcpServerConfig>,
+    #[serde(default)]
+    pub builtin: BuiltinMcpConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BuiltinMcpConfig {
+    pub enabled: bool,
+    #[serde(default)]
+    pub enabled_modules: Vec<BuiltinMcpModuleKey>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Ord, PartialOrd)]
+#[serde(rename_all = "snake_case")]
+pub enum BuiltinMcpModuleKey {
+    Rag,
+    Document,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuiltinMcpModuleStatus {
+    pub key: BuiltinMcpModuleKey,
+    pub title: String,
+    pub summary: String,
+    pub tool_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuiltinMcpServerStatus {
+    pub server: AcpMcpServerConfig,
+    pub running: bool,
+    pub last_error: Option<String>,
+    pub available_modules: Vec<BuiltinMcpModuleStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -2,9 +2,11 @@ use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
 use serde_json::json;
 
-use crate::domain::execution::{ExecutionRequest, ExecutionResult};
+use crate::{
+    domain::execution::{ExecutionRequest, ExecutionResult},
+    services::command_prefix::extract_prefixed_payload,
+};
 
-const OPEN_URL_COMMAND_ALIASES: [&str; 1] = ["/open"];
 const UPPERCASE_TEXT_COMMAND_ALIASES: [&str; 1] = ["/upper"];
 const TITLE_CASE_TEXT_COMMAND_ALIASES: [&str; 1] = ["/title"];
 const LOWERCASE_TEXT_COMMAND_ALIASES: [&str; 1] = ["/lower"];
@@ -31,7 +33,6 @@ impl ExecutorService {
         let normalized_text = action_payload_or_text(&request.action_id, &request.query.raw_text);
 
         match request.action_id.as_str() {
-            "open_url" => execute_open_url(normalized_text),
             "copy_text" => Ok(success_result(
                 Some(normalized_text.to_string()),
                 Some("已通过前端副作用复制到剪贴板".to_string()),
@@ -89,18 +90,6 @@ impl ExecutorService {
             other => bail!("unknown action id: {other}"),
         }
     }
-}
-
-fn execute_open_url(text: &str) -> Result<ExecutionResult> {
-    let normalized = normalize_url(text).context("cannot infer url from input")?;
-
-    Ok(success_result(
-        Some(normalized.clone()),
-        Some("将通过前端 opener 打开链接".to_string()),
-        Some(json!({ "effect": "open_url", "url": normalized })),
-        vec![],
-        true,
-    ))
 }
 
 fn execute_pretty_json(text: &str) -> Result<ExecutionResult> {
@@ -176,27 +165,8 @@ fn execute_markdown_render(text: &str) -> Result<ExecutionResult> {
     ))
 }
 
-fn normalize_url(text: &str) -> Option<String> {
-    if text.is_empty() {
-        return None;
-    }
-
-    if text.starts_with("http://") || text.starts_with("https://") {
-        return Some(text.to_string());
-    }
-
-    if text.contains('.') && !text.contains(' ') {
-        return Some(format!("https://{text}"));
-    }
-
-    None
-}
-
 fn action_payload_or_text<'a>(action_id: &str, text: &'a str) -> &'a str {
     match action_id {
-        "open_url" => extract_prefixed_payload(text, &OPEN_URL_COMMAND_ALIASES)
-            .unwrap_or(text)
-            .trim(),
         "copy_text" => text.trim(),
         "uppercase_text" => extract_prefixed_payload(text, &UPPERCASE_TEXT_COMMAND_ALIASES)
             .unwrap_or(text)
@@ -245,55 +215,6 @@ fn extract_base64_payload(text: &str) -> Option<&str> {
 
 fn extract_markdown_render_payload(text: &str) -> Option<&str> {
     extract_prefixed_payload(text, &MARKDOWN_RENDER_COMMAND_ALIASES)
-}
-
-fn extract_prefixed_payload<'a>(text: &'a str, aliases: &[&str]) -> Option<&'a str> {
-    let trimmed = text.trim_start();
-
-    for alias in aliases {
-        let Some(remainder) = trimmed.strip_prefix(alias) else {
-            continue;
-        };
-
-        if remainder.is_empty() {
-            return None;
-        }
-
-        let next_character = remainder.chars().next();
-        if !matches!(next_character, Some(character) if character.is_whitespace()) {
-            continue;
-        }
-
-        let payload = remainder.trim();
-        return (!payload.is_empty()).then_some(payload);
-    }
-
-    for alias in aliases {
-        let max_prefix_length = alias.len().min(trimmed.len().saturating_sub(1));
-        for prefix_length in (2..=max_prefix_length).rev() {
-            let Some(alias_prefix) = alias.get(..prefix_length) else {
-                continue;
-            };
-            let Some(candidate_prefix) = trimmed.get(..prefix_length) else {
-                continue;
-            };
-            if !candidate_prefix.eq_ignore_ascii_case(alias_prefix) {
-                continue;
-            }
-
-            let Some(remainder) = trimmed.get(prefix_length..) else {
-                continue;
-            };
-            let payload = remainder.trim();
-            if payload.is_empty() {
-                continue;
-            }
-
-            return Some(payload);
-        }
-    }
-
-    None
 }
 
 fn try_decode_base64_text(text: &str) -> Result<Option<String>> {
@@ -625,25 +546,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.primary_text.as_deref(), Some("2"));
-    }
-
-    #[test]
-    fn open_url_action_normalizes_domain_and_requests_launcher_close() {
-        let service = ExecutorService::new();
-        let result = service
-            .execute(&request("open_url", "/open tauri.app"))
-            .unwrap();
-
-        assert_eq!(result.primary_text.as_deref(), Some("https://tauri.app"));
-        assert_eq!(
-            result
-                .structured_payload
-                .as_ref()
-                .and_then(|payload| payload.get("effect"))
-                .and_then(|effect| effect.as_str()),
-            Some("open_url")
-        );
-        assert!(result.should_close_launcher);
     }
 
     #[test]

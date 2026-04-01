@@ -14,12 +14,14 @@ import type {
 	AcpAgentConfig,
 	AcpMcpServerCatalog,
 	AcpMcpServerConfig,
+	ClipboardHistorySnapshot,
+	OpenClipboardHistoryPanelEvent,
 	AcpRestoreNotice,
 	AcpSessionDetail,
 	AcpSessionSummary,
 	AppSettings,
 	BuiltinLlmProviderTemplate,
-	BuiltinRagMcpServerStatus,
+	BuiltinMcpServerStatus,
 	LlmProviderConfig,
 	LlmProviderModelEntry,
 	LlmSettings,
@@ -40,6 +42,12 @@ import {
 const browserShortcutConfig: ShortcutConfig = {
 	toggle_launcher: "Alt+Space",
 	ocr_translate: "Alt+D",
+	open_clipboard_history: "Alt+V",
+};
+
+const browserClipboardHistorySnapshot: ClipboardHistorySnapshot = {
+	pinnedEntries: [],
+	recentEntries: [],
 };
 
 export const defaultRagIgnoreGlobs = [
@@ -149,11 +157,220 @@ const browserPublicSkillCatalog: PublicSkillCatalog = {
 
 const browserBuiltinLlmProviderTemplates: BuiltinLlmProviderTemplate[] = [
 	{
+		id: "openai",
+		displayName: "OpenAI",
+		description:
+			"官方 API 模板。先登录 OpenAI 平台、创建 API Key，再从常用 Responses / Embedding 模型里选择。",
+		registrationLabel: "注册 / 登录",
+		registrationUrl: "https://platform.openai.com/signup",
+		apiKeyLabel: "API Key 页面",
+		apiKeyUrl: "https://platform.openai.com/api-keys",
+		docsLabel: "模型与 API 文档",
+		docsUrl: "https://platform.openai.com/docs/overview",
+		defaultBaseUrl: "https://api.openai.com/v1",
+		supportsModelListing: true,
+		models: [
+			{
+				id: "gpt-5.4-mini",
+				displayName: "GPT-5.4-mini",
+				model: "gpt-5.4-mini",
+				modelType: "llm",
+				protocol: "responses",
+				supportsMultimodal: true,
+				supportsStateful: true,
+				recommendedFor: ["translation", "rag_answer", "ocr"],
+				summary: "通用小型模型，适合翻译、问答和截图理解，默认成本比旗舰档更低。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+			{
+				id: "gpt-5.4",
+				displayName: "GPT-5.4",
+				model: "gpt-5.4",
+				modelType: "llm",
+				protocol: "responses",
+				supportsMultimodal: true,
+				supportsStateful: true,
+				recommendedFor: ["translation", "rag_answer", "ocr"],
+				summary: "旗舰通用模型，适合高质量翻译、复杂问答和多模态理解。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+			{
+				id: "gpt-5.4-nano",
+				displayName: "GPT-5.4-nano",
+				model: "gpt-5.4-nano",
+				modelType: "llm",
+				protocol: "responses",
+				supportsMultimodal: true,
+				supportsStateful: true,
+				recommendedFor: ["translation", "rag_answer", "ocr"],
+				summary: "更轻量的通用模型，适合低延迟翻译和基础问答。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+			{
+				id: "text-embedding-3-small",
+				displayName: "text-embedding-3-small",
+				model: "text-embedding-3-small",
+				modelType: "embedding",
+				protocol: "responses",
+				supportsMultimodal: false,
+				supportsStateful: false,
+				recommendedFor: ["embedding"],
+				summary: "常用 Embedding 模型，适合给 RAG 建立通用文本向量索引。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+			{
+				id: "text-embedding-3-large",
+				displayName: "text-embedding-3-large",
+				model: "text-embedding-3-large",
+				modelType: "embedding",
+				protocol: "responses",
+				supportsMultimodal: false,
+				supportsStateful: false,
+				recommendedFor: ["embedding"],
+				summary: "更高质量的 Embedding 模型，适合更重视召回质量的 RAG 场景。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+		],
+	},
+	{
+		id: "openrouter",
+		displayName: "OpenRouter",
+		description:
+			"聚合网关模板。先登录 OpenRouter、创建 API Key，再按当前账号可见的远端模型目录选择模型。",
+		registrationLabel: "注册 / 登录",
+		registrationUrl: "https://openrouter.ai/",
+		apiKeyLabel: "API Key 页面",
+		apiKeyUrl: "https://openrouter.ai/settings/keys",
+		docsLabel: "官方文档",
+		docsUrl: "https://openrouter.ai/docs/quickstart",
+		defaultBaseUrl: "https://openrouter.ai/api/v1",
+		supportsModelListing: true,
+		models: [],
+	},
+	{
+		id: "deepseek",
+		displayName: "DeepSeek",
+		description:
+			"官方 API 模板。先登录 DeepSeek 平台、创建 API Key，再从常用聊天或推理模型里选择。",
+		registrationLabel: "注册 / 登录",
+		registrationUrl: "https://platform.deepseek.com/",
+		apiKeyLabel: "API Key 页面",
+		apiKeyUrl: "https://platform.deepseek.com/api_keys",
+		docsLabel: "官方文档",
+		docsUrl: "https://api-docs.deepseek.com/",
+		defaultBaseUrl: "https://api.deepseek.com",
+		supportsModelListing: true,
+		models: [
+			{
+				id: "deepseek-chat",
+				displayName: "DeepSeek-Chat",
+				model: "deepseek-chat",
+				modelType: "llm",
+				protocol: "chat_completions",
+				supportsMultimodal: false,
+				supportsStateful: false,
+				recommendedFor: ["translation", "rag_answer"],
+				summary: "通用对话模型，适合翻译、日常问答和轻量文本生成。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+			{
+				id: "deepseek-reasoner",
+				displayName: "DeepSeek-Reasoner",
+				model: "deepseek-reasoner",
+				modelType: "llm",
+				protocol: "chat_completions",
+				supportsMultimodal: false,
+				supportsStateful: false,
+				recommendedFor: ["rag_answer"],
+				summary: "推理模型，适合复杂问答、分析和需要多步思考的场景。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+		],
+	},
+	{
+		id: "ollama",
+		displayName: "Ollama",
+		description:
+			"本地 OpenAI-compatible 模板。先安装 Ollama 并 pull 模型；默认连接本机 `http://localhost:11434/v1`，API Key 可以留空。",
+		registrationLabel: "下载 / 安装",
+		registrationUrl: "https://ollama.com/download",
+		apiKeyLabel: "OpenAI 兼容说明",
+		apiKeyUrl: "https://docs.ollama.com/openai",
+		docsLabel: "模型与文档",
+		docsUrl: "https://docs.ollama.com/",
+		defaultBaseUrl: "http://localhost:11434/v1",
+		supportsModelListing: true,
+		models: [
+			{
+				id: "qwen3-8b",
+				displayName: "Qwen3 8B",
+				model: "qwen3:8b",
+				modelType: "llm",
+				protocol: "responses",
+				supportsMultimodal: false,
+				supportsStateful: false,
+				recommendedFor: ["translation", "rag_answer"],
+				summary: "常见本地文本模型，适合日常翻译、问答和低成本试配。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+			{
+				id: "gpt-oss-20b",
+				displayName: "gpt-oss 20B",
+				model: "gpt-oss:20b",
+				modelType: "llm",
+				protocol: "chat_completions",
+				supportsMultimodal: false,
+				supportsStateful: false,
+				recommendedFor: ["rag_answer"],
+				summary: "常见本地推理模型，适合复杂问答、解释和代码辅助场景。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+			{
+				id: "qwen3-vl-8b",
+				displayName: "Qwen3-VL 8B",
+				model: "qwen3-vl:8b",
+				modelType: "llm",
+				protocol: "chat_completions",
+				supportsMultimodal: true,
+				supportsStateful: false,
+				recommendedFor: ["rag_answer"],
+				summary: "常见本地图像理解模型，适合截图和文档理解；当前不会进入 OCR 列表。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+			{
+				id: "embeddinggemma",
+				displayName: "EmbeddingGemma",
+				model: "embeddinggemma",
+				modelType: "embedding",
+				protocol: "responses",
+				supportsMultimodal: false,
+				supportsStateful: false,
+				recommendedFor: ["embedding"],
+				summary: "常见本地 Embedding 模型，适合给 RAG 建立向量索引。",
+				selectableInCurrentApp: true,
+				disabledReason: null,
+			},
+		],
+	},
+	{
 		id: "zhipu",
 		displayName: "智谱 AI",
 		description: "官方免费模型目录模板。先注册智谱开放平台、创建 API Key，再从白名单里选择模型。",
+		registrationLabel: "注册 / 登录",
 		registrationUrl: "https://bigmodel.cn/login?redirect=%2Fusercenter%2Fproj-mgmt%2Fapikeys",
+		apiKeyLabel: "API Key 页面",
 		apiKeyUrl: "https://bigmodel.cn/login?redirect=%2Fusercenter%2Fproj-mgmt%2Fapikeys",
+		docsLabel: "官方文档",
 		docsUrl: "https://docs.bigmodel.cn/cn/guide/start/quick-start",
 		defaultBaseUrl: "https://open.bigmodel.cn/api/paas/v4",
 		supportsModelListing: true,
@@ -256,8 +473,11 @@ const browserBuiltinLlmProviderTemplates: BuiltinLlmProviderTemplate[] = [
 		displayName: "SiliconFlow",
 		description:
 			"官方免费语言模型目录模板。先注册 SiliconFlow、创建 API Key，再从白名单里选择模型。",
+		registrationLabel: "注册 / 登录",
 		registrationUrl: "https://account.siliconflow.cn",
+		apiKeyLabel: "API Key 页面",
 		apiKeyUrl: "https://cloud.siliconflow.cn/account/ak",
+		docsLabel: "官方文档",
 		docsUrl: "https://docs.siliconflow.cn/cn/api-reference/chat-completions/chat-completions",
 		defaultBaseUrl: "https://api.siliconflow.cn/v1",
 		supportsModelListing: true,
@@ -452,15 +672,29 @@ const browserRagRuntimeStatus: RagRuntimeStatus = {
 	updatedAtMs: 0,
 };
 
-const browserBuiltinRagMcpServerStatus: BuiltinRagMcpServerStatus = {
+const browserBuiltinMcpServerStatus: BuiltinMcpServerStatus = {
 	server: {
 		transport: "http",
-		name: "Wabity RAG Query",
-		url: "http://127.0.0.1:43189/internal/mcp/rag",
+		name: "Wabity Built-in MCP",
+		url: "http://127.0.0.1:43189/internal/mcp",
 		headers: [],
 	},
 	running: false,
 	lastError: "仅桌面端运行时提供内置 MCP server。",
+	availableModules: [
+		{
+			key: "rag",
+			title: "RAG 检索",
+			summary: "向量检索本地索引，返回命中 chunk、路径和分数。",
+			toolCount: 1,
+		},
+		{
+			key: "document",
+			title: "文档读取",
+			summary: "按精确行号或 chunk 读取允许范围内的文本与文档摘录。",
+			toolCount: 2,
+		},
+	],
 };
 
 function canUseTauriInvoke() {
@@ -642,6 +876,12 @@ export async function onShortcutUpdated(
 	return listenIfDesktop("shortcut-updated", callback);
 }
 
+export async function onOpenClipboardHistoryPanel(
+	callback: (payload: OpenClipboardHistoryPanelEvent) => void,
+): Promise<UnlistenFn | null> {
+	return listenIfDesktop("open-clipboard-history-panel", callback);
+}
+
 export async function getAppSettings(): Promise<AppSettings> {
 	return invokeOrDefault("get_app_settings", browserAppSettings);
 }
@@ -650,8 +890,8 @@ export async function setAppSettings(settings: AppSettings): Promise<AppSettings
 	return invokeOrDefault("set_app_settings", settings, { settings });
 }
 
-export async function getBuiltinRagMcpServerStatus(): Promise<BuiltinRagMcpServerStatus> {
-	return invokeOrDefault("get_builtin_rag_mcp_server_status", browserBuiltinRagMcpServerStatus);
+export async function getBuiltinMcpServerStatus(): Promise<BuiltinMcpServerStatus> {
+	return invokeOrDefault("get_builtin_mcp_server_status", browserBuiltinMcpServerStatus);
 }
 
 export async function listLlmProviderModels(
@@ -733,6 +973,40 @@ export async function onWorkspaceUpdated(
 	return listenIfDesktop("workspace-updated", callback);
 }
 
+export async function getClipboardHistory(): Promise<ClipboardHistorySnapshot> {
+	return invokeOrDefault("get_clipboard_history", browserClipboardHistorySnapshot);
+}
+
+export async function toggleClipboardHistoryEntryPin(
+	entryId: string,
+): Promise<ClipboardHistorySnapshot> {
+	return invokeOrDefault("toggle_clipboard_history_entry_pin", browserClipboardHistorySnapshot, {
+		entryId,
+	});
+}
+
+export async function deleteClipboardHistoryEntry(
+	entryId: string,
+): Promise<ClipboardHistorySnapshot> {
+	return invokeOrDefault("delete_clipboard_history_entry", browserClipboardHistorySnapshot, {
+		entryId,
+	});
+}
+
+export async function pasteClipboardHistoryEntry(
+	entryId: string,
+): Promise<ClipboardHistorySnapshot> {
+	return invokeOrDefault("paste_clipboard_history_entry", browserClipboardHistorySnapshot, {
+		entryId,
+	});
+}
+
+export async function onClipboardHistoryUpdated(
+	callback: (snapshot: ClipboardHistorySnapshot) => void,
+): Promise<UnlistenFn | null> {
+	return listenIfDesktop("clipboard-history-updated", callback);
+}
+
 export async function getAcpAgents(): Promise<AcpAgentCatalog> {
 	return invokeOrDefault("get_acp_agents", { agents: [], defaultAgentId: null });
 }
@@ -745,13 +1019,20 @@ export async function setAcpAgents(
 }
 
 export async function getAcpMcpServers(): Promise<AcpMcpServerCatalog> {
-	return invokeOrDefault("get_acp_mcp_servers", { servers: [] });
+	return invokeOrDefault("get_acp_mcp_servers", {
+		servers: [],
+		builtin: {
+			enabled: false,
+			enabledModules: [],
+		},
+	});
 }
 
 export async function setAcpMcpServers(
 	servers: AcpMcpServerConfig[],
+	builtin: AcpMcpServerCatalog["builtin"],
 ): Promise<AcpMcpServerCatalog> {
-	return invokeOrDefault("set_acp_mcp_servers", { servers }, { servers });
+	return invokeOrDefault("set_acp_mcp_servers", { servers, builtin }, { servers, builtin });
 }
 
 export async function listAcpSessions(): Promise<AcpSessionSummary[]> {

@@ -68,6 +68,7 @@ interface UseAutoResizeWindowOptions {
 	enabled?: boolean;
 	allowShrink?: boolean;
 	onResizeSettled?: () => void;
+	resetKey?: string | number;
 }
 
 export function useAutoResizeWindow(
@@ -75,10 +76,17 @@ export function useAutoResizeWindow(
 	options: UseAutoResizeWindowOptions = {},
 ) {
 	const desktopRuntimeAvailable = isDesktopRuntimeAvailable();
-	const { enabled = true, allowShrink = true, onResizeSettled } = options;
+	const { enabled = true, allowShrink = true, onResizeSettled, resetKey } = options;
 	const lastMeasuredSizeRef = useRef<{ width: number; height: number } | null>(null);
+	const lastResetKeyRef = useRef<string | number | undefined>(resetKey);
 
 	useLayoutEffect(() => {
+		const shouldResetMeasuredSize = lastResetKeyRef.current !== resetKey;
+		lastResetKeyRef.current = resetKey;
+		if (shouldResetMeasuredSize) {
+			lastMeasuredSizeRef.current = null;
+		}
+
 		if (!desktopRuntimeAvailable || !enabled) {
 			return;
 		}
@@ -205,5 +213,5 @@ export function useAutoResizeWindow(
 			mutationObserver?.disconnect();
 			window.removeEventListener("resize", syncWindowSize);
 		};
-	}, [allowShrink, desktopRuntimeAvailable, enabled, onResizeSettled, rootRef]);
+	}, [allowShrink, desktopRuntimeAvailable, enabled, onResizeSettled, resetKey, rootRef]);
 }

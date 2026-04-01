@@ -82,7 +82,7 @@ function scoreAction(
 		matched = true;
 	}
 
-	if (normalized.startsWith("http") && descriptor.id === "open_url") {
+	if (normalized.startsWith("http") && descriptor.id === "open_target") {
 		score += 60;
 		matched = true;
 	}
@@ -131,15 +131,27 @@ export function executeActionFallback(request: ExecutionRequest): ExecutionResul
 	const text = stripActionCommandPrefix(request.actionId, request.query.rawText);
 
 	switch (request.actionId) {
-		case "open_url": {
-			const url = normalizeUrl(text.trim());
-			if (!url) {
-				return fallbackResult("error", null, "当前输入不是有效 URL。", null, []);
+		case "open_target": {
+			const payload = text.trim();
+			if (!payload) {
+				return fallbackResult("error", null, "请输入要打开的链接、文件或目录。", null, []);
 			}
+
+			const url = normalizeUrl(payload);
+			if (url) {
+				return fallbackResult(
+					"success",
+					url,
+					"浏览器模式下将使用浏览器打开链接。",
+					{ effect: "open_url", url },
+					[],
+				);
+			}
+
 			return fallbackResult(
-				"success",
-				url,
-				"浏览器模式下只返回链接，不调用桌面 opener。",
+				"warning",
+				payload,
+				"浏览器模式不能打开本地文件或目录；请在桌面端执行该命令。",
 				{ effect: "noop" },
 				[],
 			);

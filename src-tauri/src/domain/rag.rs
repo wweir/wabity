@@ -1,4 +1,3 @@
-use crate::domain::acp::AcpMcpServerConfig;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,14 +32,6 @@ pub struct RagRuntimeStatus {
     pub pending_file_count: usize,
     pub last_error: Option<String>,
     pub updated_at_ms: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BuiltinRagMcpServerStatus {
-    pub server: AcpMcpServerConfig,
-    pub running: bool,
-    pub last_error: Option<String>,
 }
 
 impl Default for RagRuntimeStatus {

@@ -6,7 +6,6 @@ use tauri::{
     ipc::{Invoke, InvokeError},
     AppHandle, Emitter, State, Wry,
 };
-use tauri_plugin_opener::OpenerExt;
 
 use crate::{
     domain::{
@@ -85,7 +84,6 @@ pub fn launch_app(state: State<'_, AppState>, path: String) -> Result<ExecutionR
 }
 
 pub async fn open_document_reference(
-    app: AppHandle,
     state: State<'_, AppState>,
     path: String,
 ) -> Result<(), String> {
@@ -115,11 +113,8 @@ pub async fn open_document_reference(
         ));
     }
 
-    app.opener()
-        .open_path(
-            canonical_path.to_string_lossy().into_owned(),
-            None::<String>,
-        )
+    state
+        .open_document_path(&canonical_path)
         .map_err(|error| error.to_string())
 }
 
@@ -291,11 +286,10 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
         "open_document_reference" => {
             let resolver = invoke.resolver.clone();
             resolver.respond_async(async move {
-                let app = super::parse_arg(&invoke, "open_document_reference", "app")?;
                 let state = super::parse_arg(&invoke, "open_document_reference", "state")?;
                 let path = super::parse_arg(&invoke, "open_document_reference", "path")?;
 
-                open_document_reference(app, state, path)
+                open_document_reference(state, path)
                     .await
                     .map_err(InvokeError::from)
             });

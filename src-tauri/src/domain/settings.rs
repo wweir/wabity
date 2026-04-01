@@ -194,8 +194,11 @@ pub struct BuiltinLlmProviderTemplate {
     pub id: String,
     pub display_name: String,
     pub description: String,
+    pub registration_label: String,
     pub registration_url: String,
+    pub api_key_label: String,
     pub api_key_url: String,
+    pub docs_label: String,
     pub docs_url: String,
     pub default_base_url: String,
     pub supports_model_listing: bool,
@@ -449,15 +452,259 @@ pub struct LlmProviderModelEntry {
 pub fn builtin_llm_provider_templates() -> Vec<BuiltinLlmProviderTemplate> {
     vec![
         BuiltinLlmProviderTemplate {
+            id: "openai".to_string(),
+            display_name: "OpenAI".to_string(),
+            description:
+                "官方 API 模板。先登录 OpenAI 平台、创建 API Key，再从常用 Responses / Embedding 模型里选择。"
+                    .to_string(),
+            registration_label: "注册 / 登录".to_string(),
+            registration_url: "https://platform.openai.com/signup".to_string(),
+            api_key_label: "API Key 页面".to_string(),
+            api_key_url: "https://platform.openai.com/api-keys".to_string(),
+            docs_label: "模型与 API 文档".to_string(),
+            docs_url: "https://platform.openai.com/docs/overview".to_string(),
+            default_base_url: "https://api.openai.com/v1".to_string(),
+            supports_model_listing: true,
+            models: vec![
+                BuiltinLlmProviderTemplateModel {
+                    id: "gpt-5.4-mini".to_string(),
+                    display_name: "GPT-5.4-mini".to_string(),
+                    model: "gpt-5.4-mini".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::Responses,
+                    supports_multimodal: true,
+                    supports_stateful: true,
+                    recommended_for: vec![
+                        BuiltinLlmTemplateUseCase::Translation,
+                        BuiltinLlmTemplateUseCase::RagAnswer,
+                        BuiltinLlmTemplateUseCase::Ocr,
+                    ],
+                    summary:
+                        "通用小型模型，适合翻译、问答和截图理解，默认成本比旗舰档更低。"
+                            .to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "gpt-5.4".to_string(),
+                    display_name: "GPT-5.4".to_string(),
+                    model: "gpt-5.4".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::Responses,
+                    supports_multimodal: true,
+                    supports_stateful: true,
+                    recommended_for: vec![
+                        BuiltinLlmTemplateUseCase::Translation,
+                        BuiltinLlmTemplateUseCase::RagAnswer,
+                        BuiltinLlmTemplateUseCase::Ocr,
+                    ],
+                    summary: "旗舰通用模型，适合高质量翻译、复杂问答和多模态理解。"
+                        .to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "gpt-5.4-nano".to_string(),
+                    display_name: "GPT-5.4-nano".to_string(),
+                    model: "gpt-5.4-nano".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::Responses,
+                    supports_multimodal: true,
+                    supports_stateful: true,
+                    recommended_for: vec![
+                        BuiltinLlmTemplateUseCase::Translation,
+                        BuiltinLlmTemplateUseCase::RagAnswer,
+                        BuiltinLlmTemplateUseCase::Ocr,
+                    ],
+                    summary: "更轻量的通用模型，适合低延迟翻译和基础问答。".to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "text-embedding-3-small".to_string(),
+                    display_name: "text-embedding-3-small".to_string(),
+                    model: "text-embedding-3-small".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Embedding,
+                    protocol: BuiltinLlmTemplateModelProtocol::Responses,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: vec![BuiltinLlmTemplateUseCase::Embedding],
+                    summary: "常用 Embedding 模型，适合给 RAG 建立通用文本向量索引。"
+                        .to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "text-embedding-3-large".to_string(),
+                    display_name: "text-embedding-3-large".to_string(),
+                    model: "text-embedding-3-large".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Embedding,
+                    protocol: BuiltinLlmTemplateModelProtocol::Responses,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: vec![BuiltinLlmTemplateUseCase::Embedding],
+                    summary:
+                        "更高质量的 Embedding 模型，适合更重视召回质量的 RAG 场景。"
+                            .to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+            ],
+        },
+        BuiltinLlmProviderTemplate {
+            id: "openrouter".to_string(),
+            display_name: "OpenRouter".to_string(),
+            description:
+                "聚合网关模板。先登录 OpenRouter、创建 API Key，再按当前账号可见的远端模型目录选择模型。"
+                    .to_string(),
+            registration_label: "注册 / 登录".to_string(),
+            registration_url: "https://openrouter.ai/".to_string(),
+            api_key_label: "API Key 页面".to_string(),
+            api_key_url: "https://openrouter.ai/settings/keys".to_string(),
+            docs_label: "官方文档".to_string(),
+            docs_url: "https://openrouter.ai/docs/quickstart".to_string(),
+            default_base_url: "https://openrouter.ai/api/v1".to_string(),
+            supports_model_listing: true,
+            models: vec![],
+        },
+        BuiltinLlmProviderTemplate {
+            id: "deepseek".to_string(),
+            display_name: "DeepSeek".to_string(),
+            description:
+                "官方 API 模板。先登录 DeepSeek 平台、创建 API Key，再从常用聊天或推理模型里选择。"
+                    .to_string(),
+            registration_label: "注册 / 登录".to_string(),
+            registration_url: "https://platform.deepseek.com/".to_string(),
+            api_key_label: "API Key 页面".to_string(),
+            api_key_url: "https://platform.deepseek.com/api_keys".to_string(),
+            docs_label: "官方文档".to_string(),
+            docs_url: "https://api-docs.deepseek.com/".to_string(),
+            default_base_url: "https://api.deepseek.com".to_string(),
+            supports_model_listing: true,
+            models: vec![
+                BuiltinLlmProviderTemplateModel {
+                    id: "deepseek-chat".to_string(),
+                    display_name: "DeepSeek-Chat".to_string(),
+                    model: "deepseek-chat".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: vec![
+                        BuiltinLlmTemplateUseCase::Translation,
+                        BuiltinLlmTemplateUseCase::RagAnswer,
+                    ],
+                    summary: "通用对话模型，适合翻译、日常问答和轻量文本生成。"
+                        .to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "deepseek-reasoner".to_string(),
+                    display_name: "DeepSeek-Reasoner".to_string(),
+                    model: "deepseek-reasoner".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: vec![BuiltinLlmTemplateUseCase::RagAnswer],
+                    summary: "推理模型，适合复杂问答、分析和需要多步思考的场景。"
+                        .to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+            ],
+        },
+        BuiltinLlmProviderTemplate {
+            id: "ollama".to_string(),
+            display_name: "Ollama".to_string(),
+            description:
+                "本地 OpenAI-compatible 模板。先安装 Ollama 并 pull 模型；默认连接本机 `http://localhost:11434/v1`，API Key 可以留空。"
+                    .to_string(),
+            registration_label: "下载 / 安装".to_string(),
+            registration_url: "https://ollama.com/download".to_string(),
+            api_key_label: "OpenAI 兼容说明".to_string(),
+            api_key_url: "https://docs.ollama.com/openai".to_string(),
+            docs_label: "模型与文档".to_string(),
+            docs_url: "https://docs.ollama.com/".to_string(),
+            default_base_url: "http://localhost:11434/v1".to_string(),
+            supports_model_listing: true,
+            models: vec![
+                BuiltinLlmProviderTemplateModel {
+                    id: "qwen3-8b".to_string(),
+                    display_name: "Qwen3 8B".to_string(),
+                    model: "qwen3:8b".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::Responses,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: vec![
+                        BuiltinLlmTemplateUseCase::Translation,
+                        BuiltinLlmTemplateUseCase::RagAnswer,
+                    ],
+                    summary: "常见本地文本模型，适合日常翻译、问答和低成本试配。"
+                        .to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "gpt-oss-20b".to_string(),
+                    display_name: "gpt-oss 20B".to_string(),
+                    model: "gpt-oss:20b".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: vec![BuiltinLlmTemplateUseCase::RagAnswer],
+                    summary: "常见本地推理模型，适合复杂问答、解释和代码辅助场景。"
+                        .to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "qwen3-vl-8b".to_string(),
+                    display_name: "Qwen3-VL 8B".to_string(),
+                    model: "qwen3-vl:8b".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: true,
+                    supports_stateful: false,
+                    recommended_for: vec![BuiltinLlmTemplateUseCase::RagAnswer],
+                    summary:
+                        "常见本地图像理解模型，适合截图和文档理解；当前不会进入 OCR 列表。"
+                            .to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "embeddinggemma".to_string(),
+                    display_name: "EmbeddingGemma".to_string(),
+                    model: "embeddinggemma".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Embedding,
+                    protocol: BuiltinLlmTemplateModelProtocol::Responses,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: vec![BuiltinLlmTemplateUseCase::Embedding],
+                    summary: "常见本地 Embedding 模型，适合给 RAG 建立向量索引。"
+                        .to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+            ],
+        },
+        BuiltinLlmProviderTemplate {
             id: "zhipu".to_string(),
             display_name: "智谱 AI".to_string(),
             description:
                 "官方免费模型目录模板。先注册智谱开放平台、创建 API Key，再从白名单里选择模型。"
                     .to_string(),
+            registration_label: "注册 / 登录".to_string(),
             registration_url:
                 "https://bigmodel.cn/login?redirect=%2Fusercenter%2Fproj-mgmt%2Fapikeys".to_string(),
+            api_key_label: "API Key 页面".to_string(),
             api_key_url: "https://bigmodel.cn/login?redirect=%2Fusercenter%2Fproj-mgmt%2Fapikeys"
                 .to_string(),
+            docs_label: "官方文档".to_string(),
             docs_url: "https://docs.bigmodel.cn/cn/guide/start/quick-start".to_string(),
             default_base_url: "https://open.bigmodel.cn/api/paas/v4".to_string(),
             supports_model_listing: true,
@@ -580,8 +827,11 @@ pub fn builtin_llm_provider_templates() -> Vec<BuiltinLlmProviderTemplate> {
             description:
                 "官方免费语言模型目录模板。先注册 SiliconFlow、创建 API Key，再从白名单里选择模型。"
                     .to_string(),
+            registration_label: "注册 / 登录".to_string(),
             registration_url: "https://account.siliconflow.cn".to_string(),
+            api_key_label: "API Key 页面".to_string(),
             api_key_url: "https://cloud.siliconflow.cn/account/ak".to_string(),
+            docs_label: "官方文档".to_string(),
             docs_url:
                 "https://docs.siliconflow.cn/cn/api-reference/chat-completions/chat-completions"
                     .to_string(),

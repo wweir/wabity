@@ -4,6 +4,7 @@ use tauri::{
 };
 
 pub mod acp;
+pub mod clipboard;
 pub mod launcher;
 pub mod rag;
 pub mod settings;
@@ -29,19 +30,22 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
         | "set_launcher_blur_auto_hide_enabled"
         | "get_shortcut"
         | "set_shortcut" => launcher::handle_invoke(invoke),
+        "get_clipboard_history"
+        | "toggle_clipboard_history_entry_pin"
+        | "delete_clipboard_history_entry"
+        | "paste_clipboard_history_entry" => clipboard::handle_invoke(invoke),
         "get_app_settings"
         | "set_app_settings"
         | "list_llm_provider_models"
         | "list_builtin_llm_provider_templates" => settings::handle_invoke(invoke),
-        "scan_rag_sources" | "get_rag_runtime_status" | "get_builtin_rag_mcp_server_status" => {
-            rag::handle_invoke(invoke)
-        }
+        "scan_rag_sources" | "get_rag_runtime_status" => rag::handle_invoke(invoke),
         "get_public_skill_catalog" => skills::handle_invoke(invoke),
         "get_workspace" | "set_workspace" => workspace::handle_invoke(invoke),
         "get_acp_agents"
         | "set_acp_agents"
         | "get_acp_mcp_servers"
         | "set_acp_mcp_servers"
+        | "get_builtin_mcp_server_status"
         | "list_acp_sessions"
         | "take_acp_restore_notices"
         | "get_acp_session_detail"

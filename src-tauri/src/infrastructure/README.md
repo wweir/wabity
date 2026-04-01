@@ -5,6 +5,7 @@
 - `autostart`：同步 `general.autoStart` 与系统登录启动项状态
 - `notification`：封装系统通知后端；当前先落地 macOS，并给其他桌面平台保留 `noop` 扩展口
 - `window`：管理 launcher 主窗口的显示、隐藏、聚焦与平台窗口行为
+- `clipboard`：封装系统剪贴板读写、粘贴快捷键模拟和历史文件持久化
 - `hotkey`：解析、注册、注销全局快捷键
 - `config`：集中处理本地配置、workspace 历史读写与缓存
 - `openai_compatible`：集中封装 OpenAI-compatible 的薄 client 和公共传输细节，包括 base URL 归一化、鉴权注入、请求发送、错误体提取、`responses`/`chat` 文本提取、SSE 流式消费与归并、`/models` 列表提取
@@ -15,6 +16,9 @@
 - `notification` 只负责把结构化通知 payload 投影到操作系统通知中心，不负责决定“什么时候该通知”；是否触发、是否只在后台态触发、是否显示响应摘要都由服务层决定。macOS 原生通知样式主要受系统控制，基础设施层只映射标题、正文和发送者应用身份这类稳定字段；当前 macOS backend 会优先把通知发送者绑定到 `Wabity` 的 bundle identifier，让系统尽量使用 `Wabity` 自己的应用图标；如果当前运行方式下系统拒绝绑定，则记录告警后回退到默认发送者，但不能因此把整条通知直接吞掉
 - `autostart` 同步分两条链路：启动时做一次配置与系统状态对账，设置保存时对变更即时生效；启动阶段失败只记日志，不阻塞主窗口拉起
 - `window` 只负责窗口壳层行为，不承载业务状态或动作匹配逻辑
+- `clipboard` 只负责系统剪贴板读写、平台粘贴快捷键和 `clipboard-history.toml` 落盘，不负责 pin 规则、最近项裁剪或监听轮询策略；这些业务语义仍在服务层
+- 单实例约束在 Tauri 入口层完成；`window` 只提供“把已有 launcher 幂等拉到前台”的 reveal 能力，不负责自己做进程互斥
+- macOS 下 Dock 展示与否是应用级策略，不是 `window` 模块的显隐职责；launcher 启动时和设置保存后都必须按 `general.showInDock` 同步应用激活策略与 Dock 图标可见性，避免窗口已经是工具面板但应用仍作为普通前台程序挂在 Dock，或用户明明要求显示 Dock 却始终不生效
 - `config` 统一将用户配置写入用户配置目录下的 `wabity/config.toml`，其中包含翻译提示词、ACP agent 与全局 MCP 清单；workspace 最近目录历史写入 `wabity/workspace-history.toml`
 - `config` 里的快捷键字段当前只保留 `toggle_launcher` / `ocr_translate` 两个稳定键名；运行时访问统一经 `ShortcutKey + ShortcutConfig::{get,set}`，不要在其他模块重复手写字符串分发
 - `config` 负责 TOML 序列化、原子 `safe_write`、磁盘读写和内存缓存；启动时由 `AppState::new` 先读取，再把配置投影到运行时状态

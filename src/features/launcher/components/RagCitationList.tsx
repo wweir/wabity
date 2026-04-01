@@ -10,26 +10,36 @@ interface RagCitationListProps {
 
 interface ActiveTooltip {
 	citation: RagCitation;
-	fileName: string;
 	rect: DOMRect;
 }
 
 const tooltipHorizontalPadding = 12;
 const tooltipWidth = 420;
 
-function splitRelativePath(path: string) {
+function getFileNameFromPath(path: string): string {
 	const segments = path.split(/[\\/]+/u).filter((segment) => segment.length > 0);
 	if (segments.length === 0) {
-		return {
-			fileName: path,
-			parentPath: "",
-		};
+		return path;
 	}
 
-	return {
-		fileName: segments[segments.length - 1] ?? path,
-		parentPath: segments.slice(0, -1).join("/"),
-	};
+	return segments[segments.length - 1] ?? path;
+}
+
+function formatCitationLocation(citation: RagCitation): string {
+	if (citation.pageStart !== null) {
+		if (citation.pageEnd !== null && citation.pageEnd !== citation.pageStart) {
+			return `pages ${citation.pageStart}-${citation.pageEnd}`;
+		}
+		return `page ${citation.pageStart}`;
+	}
+
+	if (citation.lineStart !== null && citation.lineEnd !== null) {
+		const paragraph =
+			citation.paragraphLineStart !== null ? ` · paragraph ${citation.paragraphLineStart}` : "";
+		return `lines ${citation.lineStart}-${citation.lineEnd}${paragraph}`;
+	}
+
+	return `chunk #${citation.chunkIndex}`;
 }
 
 export function RagCitationList({ citations, retrieval, onOpenCitation }: RagCitationListProps) {
@@ -55,14 +65,16 @@ export function RagCitationList({ citations, retrieval, onOpenCitation }: RagCit
 				return;
 			}
 
-			setActiveTooltip((current) =>
-				current
-					? {
-							...current,
-							rect: nextTrigger.getBoundingClientRect(),
-						}
-					: current,
-			);
+			setActiveTooltip((current) => {
+				if (!current) {
+					return current;
+				}
+
+				return {
+					...current,
+					rect: nextTrigger.getBoundingClientRect(),
+				};
+			});
 		};
 
 		window.addEventListener("resize", updatePosition);
@@ -99,16 +111,14 @@ export function RagCitationList({ citations, retrieval, onOpenCitation }: RagCit
 	function showTooltip(
 		event: MouseEvent<HTMLButtonElement> | FocusEvent<HTMLButtonElement>,
 		citation: RagCitation,
-		fileName: string,
-	) {
+	): void {
 		setActiveTooltip({
 			citation,
-			fileName,
 			rect: event.currentTarget.getBoundingClientRect(),
 		});
 	}
 
-	function hideTooltip() {
+	function hideTooltip(): void {
 		setActiveTooltip(null);
 	}
 
@@ -125,7 +135,7 @@ export function RagCitationList({ citations, retrieval, onOpenCitation }: RagCit
 				</div>
 				<ul className="rag-citation-items">
 					{citations.map((citation) => {
-						const { fileName } = splitRelativePath(citation.path);
+						const fileName = getFileNameFromPath(citation.path);
 						const citationKey = `${citation.absolutePath}#${citation.chunkIndex}`;
 						return (
 							<li className="rag-citation-entry" key={citationKey}>
@@ -134,9 +144,9 @@ export function RagCitationList({ citations, retrieval, onOpenCitation }: RagCit
 									className="rag-citation-item"
 									data-rag-citation-key={citationKey}
 									onClick={() => void onOpenCitation(citation)}
-									onFocus={(event) => showTooltip(event, citation, fileName)}
+									onFocus={(event) => showTooltip(event, citation)}
 									onBlur={hideTooltip}
-									onMouseEnter={(event) => showTooltip(event, citation, fileName)}
+									onMouseEnter={(event) => showTooltip(event, citation)}
 									onMouseLeave={hideTooltip}
 								>
 									<span className="rag-citation-index">[{citation.id}]</span>
@@ -165,12 +175,19 @@ export function RagCitationList({ citations, retrieval, onOpenCitation }: RagCit
 							<div className="rag-citation-tooltip-row">
 								<span className="rag-citation-tooltip-label">命中</span>
 								<span className="rag-citation-tooltip-value">
-									chunk #{activeTooltip.citation.chunkIndex} · lines{" "}
-									{activeTooltip.citation.lineStart}-{activeTooltip.citation.lineEnd} · paragraph{" "}
-									{activeTooltip.citation.paragraphLineStart} · score{" "}
+									chunk #{activeTooltip.citation.chunkIndex} ·{" "}
+									{formatCitationLocation(activeTooltip.citation)} · score{" "}
 									{activeTooltip.citation.score.toFixed(3)}
 								</span>
 							</div>
+							{activeTooltip.citation.anchorLabel ? (
+								<div className="rag-citation-tooltip-row">
+									<span className="rag-citation-tooltip-label">锚点</span>
+									<span className="rag-citation-tooltip-value">
+										{activeTooltip.citation.anchorLabel}
+									</span>
+								</div>
+							) : null}
 							{activeTooltip.citation.headingPath.length > 0 ? (
 								<div className="rag-citation-tooltip-row">
 									<span className="rag-citation-tooltip-label">标题</span>
