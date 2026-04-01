@@ -537,3 +537,5 @@ ACP 是独立于 launcher 轻量问答的第二条交互链。
 这个结构本身已经表达了当前架构：前端只保留 UI feature，Rust 侧按边界清晰分层，`docs/` 承接大型方案，而不是把所有信息继续压进一个总文档。
 
 静态品牌源图当前集中在 `public/wabity.svg`；桌面端打包所需的 `png/icns/ico` 派生图标统一落在 `src-tauri/icons/`，避免前端和打包链各自维护一份不同语义的图标。
+
+发布链当前收敛为三层边界：仓库内的 `scripts/tauri-build-macos-dmg.sh` 负责本地和 CI 共用的 macOS DMG 构建容错；GitHub Actions 的 [`.github/workflows/build-debug.yml`](/Users/wweir/Sites/Mine/wabity/.github/workflows/build-debug.yml) 负责普通分支推送后的 debug 编译校验；[`.github/workflows/release-macos-dmg.yml`](/Users/wweir/Sites/Mine/wabity/.github/workflows/release-macos-dmg.yml) 则只在版本 tag 触发后调用 DMG 构建脚本、校验 tag 与应用版本一致，并把产物上传到 GitHub Release。也就是说，编译校验、打包容错和正式分发各自独立，不互相挟持职责。

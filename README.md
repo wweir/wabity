@@ -57,6 +57,27 @@ npm run tauri:build:macos:dmg
 
 当前把 macOS 的 bundle 目标单独放在 `src-tauri/tauri.macos.conf.json`，避免污染其他平台的默认打包目标；Tauri 会在 macOS 构建时自动合并这份平台配置。
 
+## GitHub Release
+
+仓库现在包含 tag 驱动的 GitHub Actions 工作流 [`.github/workflows/release-macos-dmg.yml`](/Users/wweir/Sites/Mine/wabity/.github/workflows/release-macos-dmg.yml)。
+
+推送形如 `v0.1.0` 的 tag 时，工作流会在 `macos-latest` 上执行下面的固定流程：
+
+1. 校验 tag 版本是否和 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 一致
+2. 执行现有的 `npm run tauri:build:macos:dmg`
+3. 把生成的 `src-tauri/target/release/bundle/dmg/*.dmg` 上传到对应的 GitHub Release
+
+示例：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+这个工作流只负责生成并上传未签名的 `dmg`。如果后续要分发给普通 macOS 用户并降低系统拦截，还需要额外补代码签名和 notarization；那是另一条发布约束，不能和“先把 DMG 自动挂到 Release”混为一谈。
+
+另外，普通分支推送会触发单独的校验工作流 [`.github/workflows/build-debug.yml`](/Users/wweir/Sites/Mine/wabity/.github/workflows/build-debug.yml)。它只做一次 macOS debug 编译校验：安装依赖、构建前端，并执行 `tauri build --debug --no-bundle`，目标是尽早发现“代码已经不能编译”的问题，而不是顺便发版。
+
 当前原生启动阶段的异步初始化统一挂到 `tauri::async_runtime`，不要在 `setup` 中直接依赖 `tokio::runtime::Handle::current()`；那会在 Tauri 尚未进入 Tokio 上下文时直接 panic。
 
 ## 当前范围
