@@ -160,7 +160,7 @@ function AiTaskPromptCard({
 							onClick={() => onSelectSection("llm")}
 							type="button"
 						>
-							前往 LLM 配置
+							前往模型接入
 						</button>
 					</span>
 				) : null}
@@ -173,7 +173,7 @@ function AiTaskPromptCard({
 					<button
 						aria-controls={promptPanelId}
 						aria-expanded={promptExpanded}
-						className="settings-text-link"
+						className="settings-text-link settings-text-link-action settings-text-link-action-quiet settings-task-toggle-button"
 						onClick={togglePromptExpanded}
 						type="button"
 					>
@@ -197,22 +197,24 @@ function AiTaskPromptCard({
 				) : null}
 			</div>
 			<div className="settings-task-card-actions">
-				<button
-					className="settings-button settings-agent-secondary"
-					disabled={savingAiTaskConfig}
-					onClick={onRestoreDefault}
-					type="button"
-				>
-					恢复默认
-				</button>
-				<button
-					className="settings-button settings-agent-secondary"
-					disabled={savingAiTaskConfig || !hasUnsavedChanges}
-					onClick={onDiscardDraft}
-					type="button"
-				>
-					{DISCARD_DRAFT_BUTTON_LABEL}
-				</button>
+				<div className="settings-task-card-secondary-actions">
+					<button
+						className="settings-text-link settings-text-link-action settings-text-link-action-quiet settings-task-secondary-action"
+						disabled={savingAiTaskConfig}
+						onClick={onRestoreDefault}
+						type="button"
+					>
+						恢复默认
+					</button>
+					<button
+						className="settings-text-link settings-text-link-action settings-text-link-action-quiet settings-task-secondary-action"
+						disabled={savingAiTaskConfig || !hasUnsavedChanges}
+						onClick={onDiscardDraft}
+						type="button"
+					>
+						{DISCARD_DRAFT_BUTTON_LABEL}
+					</button>
+				</div>
 				<button
 					className="settings-button settings-task-card-save"
 					disabled={savingAiTaskConfig || !hasUnsavedChanges}

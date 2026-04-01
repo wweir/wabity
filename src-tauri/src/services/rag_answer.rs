@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     path::Path,
     sync::{Arc, Mutex, OnceLock},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{bail, Context, Result};
@@ -74,8 +74,11 @@ const MAX_READ_FILE_BYTES: u64 = 512 * 1024;
 const DEFAULT_RAG_TOOL_TOP_K: usize = 6;
 const DEFAULT_RAG_TOOL_MIN_SCORE: f32 = 0.35;
 const CITATION_SNIPPET_MAX_CHARS: usize = 240;
+const LOCAL_TOOL_EXECUTION_TIMEOUT: Duration = Duration::from_secs(20);
+const RESPONSES_TOOL_COMPATIBILITY_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
+const RESPONSES_TOOL_COMPATIBILITY_REPROBE_AFTER: Duration = Duration::from_secs(90);
 static RESPONSES_TOOL_COMPATIBILITY_CACHE: OnceLock<
-    Mutex<HashMap<String, ResponsesToolCompatibilityMode>>,
+    Mutex<HashMap<String, CachedResponsesToolCompatibility>>,
 > = OnceLock::new();
 
 #[derive(Debug, Clone)]
@@ -124,6 +127,7 @@ struct ToolCatalog {
     request_tools: Vec<Value>,
     available_names: Vec<String>,
     skipped_mcp_servers: Vec<String>,
+    compatibility_fingerprint: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +141,12 @@ enum ResponsesToolCompatibilityMode {
     Full,
     NoMcp,
     NoTools,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CachedResponsesToolCompatibility {
+    mode: ResponsesToolCompatibilityMode,
+    stored_at: Instant,
 }
 
 pub struct QuestionAnswerRequest<'a> {
@@ -339,8 +349,11 @@ async fn answer_with_responses(
     let mut previous_response_id = initial_previous_response_id;
     let mcp_free_tool_catalog = tool_catalog_without_mcp_tools(request.tool_catalog);
     let tool_free_tool_catalog = tool_catalog_without_all_tools(request.tool_catalog);
-    let compatibility_cache_key =
-        responses_tool_compatibility_cache_key(request.base_url, request.model);
+    let compatibility_cache_key = responses_tool_compatibility_cache_key(
+        request.base_url,
+        request.model,
+        request.tool_catalog,
+    );
     let mut compatibility_mode = load_cached_responses_tool_compatibility(&compatibility_cache_key);
     let mut disabled_mcp_tools_for_compat = matches!(
         compatibility_mode,
@@ -920,7 +933,7 @@ mod tests {
     use std::{
         io::{Cursor, Write},
         path::{Path, PathBuf},
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     use super::{
@@ -943,13 +956,16 @@ mod tests {
         },
         result::deduplicate_and_number_citations,
         tool_catalog::{
-            build_tool_catalog, load_cached_responses_tool_compatibility,
+            build_tool_catalog, expire_cached_responses_tool_compatibility,
+            load_cached_responses_tool_compatibility,
+            mark_cached_responses_tool_compatibility_ready_for_reprobe,
             open_target_tool_description, responses_tool_compatibility_cache_key,
             store_cached_responses_tool_compatibility, tool_catalog_without_all_tools,
             tool_catalog_without_mcp_tools,
         },
         tool_execute::{
-            execute_open_target_tool, execute_read_file_tool, resolve_readable_file_path,
+            execute_open_target_tool, execute_read_file_tool, execute_with_timeout,
+            resolve_readable_file_path,
         },
     };
     use crate::domain::{
@@ -962,6 +978,7 @@ mod tests {
         settings::{LlmSettings, RagSettings},
     };
     use crate::infrastructure::openai_compatible::{body_preview, parse_json_or_sse_payload};
+    use crate::services::builtin_mcp;
     use zip::{write::SimpleFileOptions, ZipWriter};
 
     fn test_provider() -> LlmProviderConfig {
@@ -1363,10 +1380,31 @@ mod tests {
     }
 
     #[test]
+    fn build_tool_catalog_skips_builtin_mcp_server_for_responses() {
+        let tool_catalog = build_tool_catalog(
+            &[builtin_mcp::builtin_server_config()],
+            QuestionAnswerProtocol::Responses,
+        );
+
+        assert_eq!(tool_catalog.request_tools.len(), 4);
+        assert_eq!(
+            tool_catalog.available_names,
+            vec![
+                READ_FILE_TOOL_NAME.to_string(),
+                READ_DOCUMENT_EXCERPT_TOOL_NAME.to_string(),
+                RAG_QUERY_TOOL_NAME.to_string(),
+                OPEN_TARGET_TOOL_NAME.to_string(),
+            ]
+        );
+        assert!(tool_catalog.skipped_mcp_servers.is_empty());
+    }
+
+    #[test]
     fn responses_tool_compatibility_cache_only_degrades() {
         let cache_key = responses_tool_compatibility_cache_key(
             "https://example.com/v1",
             &format!("gpt-test-{}", std::process::id()),
+            &build_tool_catalog(&[], QuestionAnswerProtocol::Responses),
         );
 
         store_cached_responses_tool_compatibility(
@@ -1387,6 +1425,69 @@ mod tests {
             load_cached_responses_tool_compatibility(&cache_key),
             ResponsesToolCompatibilityMode::NoTools
         );
+    }
+
+    #[test]
+    fn responses_tool_compatibility_cache_expires_stale_entries() {
+        let tool_catalog = build_tool_catalog(&[], QuestionAnswerProtocol::Responses);
+        let cache_key = responses_tool_compatibility_cache_key(
+            "https://example.com/v1",
+            &format!("gpt-expire-{}", std::process::id()),
+            &tool_catalog,
+        );
+        store_cached_responses_tool_compatibility(
+            &cache_key,
+            ResponsesToolCompatibilityMode::NoMcp,
+        );
+        expire_cached_responses_tool_compatibility(&cache_key);
+
+        assert_eq!(
+            load_cached_responses_tool_compatibility(&cache_key),
+            ResponsesToolCompatibilityMode::Full
+        );
+    }
+
+    #[test]
+    fn responses_tool_compatibility_cache_reprobes_degraded_entries() {
+        let tool_catalog = build_tool_catalog(&[], QuestionAnswerProtocol::Responses);
+        let cache_key = responses_tool_compatibility_cache_key(
+            "https://example.com/v1",
+            &format!("gpt-reprobe-{}", std::process::id()),
+            &tool_catalog,
+        );
+        store_cached_responses_tool_compatibility(
+            &cache_key,
+            ResponsesToolCompatibilityMode::NoMcp,
+        );
+        mark_cached_responses_tool_compatibility_ready_for_reprobe(&cache_key);
+
+        assert_eq!(
+            load_cached_responses_tool_compatibility(&cache_key),
+            ResponsesToolCompatibilityMode::Full
+        );
+    }
+
+    #[test]
+    fn responses_tool_compatibility_cache_key_tracks_tool_catalog_fingerprint() {
+        let builtin_only = build_tool_catalog(&[], QuestionAnswerProtocol::Responses);
+        let with_mcp = build_tool_catalog(
+            &[AcpMcpServerConfig::Http(AcpMcpServerHttpConfig {
+                name: "WebMCP".to_string(),
+                url: "https://example.com/mcp".to_string(),
+                headers: Vec::new(),
+            })],
+            QuestionAnswerProtocol::Responses,
+        );
+
+        let builtin_key = responses_tool_compatibility_cache_key(
+            "https://example.com/v1",
+            "gpt-test",
+            &builtin_only,
+        );
+        let with_mcp_key =
+            responses_tool_compatibility_cache_key("https://example.com/v1", "gpt-test", &with_mcp);
+
+        assert_ne!(builtin_key, with_mcp_key);
     }
 
     #[test]
@@ -1626,6 +1727,19 @@ mod tests {
         assert!(executed.output.contains("Alpha paragraph."));
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn local_tool_timeout_reports_tool_name() {
+        let error = execute_with_timeout("wabity.test.timeout", Duration::from_millis(10), async {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .expect_err("slow tool should time out");
+
+        assert!(error.to_string().contains("wabity.test.timeout"));
+        assert!(error.to_string().contains("执行超时"));
     }
 
     #[test]

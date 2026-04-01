@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::domain::acp::{
     AcpAgentConfig, AcpMcpServerConfig, AcpMcpServerHttpConfig, AcpMcpServerSseConfig,
-    AcpMcpServerStdioConfig, AcpNameValuePair,
+    AcpMcpServerStdioConfig, AcpNameValuePair, BuiltinMcpConfig, BuiltinMcpModuleKey,
 };
 use crate::domain::notification::NotificationSettings;
 use crate::domain::settings::{
@@ -18,6 +18,8 @@ use crate::domain::settings::{
 const CONFIG_FILE_NAME: &str = "config.toml";
 const WORKSPACE_HISTORY_FILE_NAME: &str = "workspace-history.toml";
 pub const RECENT_WORKSPACE_LIMIT: usize = 3;
+const BUILTIN_MCP_SERVER_URL: &str = "http://127.0.0.1:43189/internal/mcp";
+const LEGACY_BUILTIN_RAG_MCP_SERVER_URL: &str = "http://127.0.0.1:43189/internal/mcp/rag";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
@@ -50,12 +52,15 @@ pub struct ShortcutConfig {
     pub toggle_launcher: String,
     /// Format: "modifiers+key", e.g., "Alt+D"
     pub ocr_translate: String,
+    /// Format: "modifiers+key", e.g., "Alt+V"
+    pub open_clipboard_history: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShortcutKey {
     ToggleLauncher,
     OcrTranslate,
+    OpenClipboardHistory,
 }
 
 impl ShortcutKey {
@@ -63,6 +68,7 @@ impl ShortcutKey {
         match value {
             "toggle_launcher" => Ok(Self::ToggleLauncher),
             "ocr_translate" => Ok(Self::OcrTranslate),
+            "open_clipboard_history" => Ok(Self::OpenClipboardHistory),
             other => anyhow::bail!("unknown shortcut key: {other}"),
         }
     }
@@ -71,6 +77,7 @@ impl ShortcutKey {
         match self {
             Self::ToggleLauncher => "toggle_launcher",
             Self::OcrTranslate => "ocr_translate",
+            Self::OpenClipboardHistory => "open_clipboard_history",
         }
     }
 
@@ -78,6 +85,7 @@ impl ShortcutKey {
         match self {
             Self::ToggleLauncher => "launcher",
             Self::OcrTranslate => "OCR translate",
+            Self::OpenClipboardHistory => "clipboard history",
         }
     }
 }
@@ -87,6 +95,7 @@ impl Default for ShortcutConfig {
         Self {
             toggle_launcher: "Alt+Space".to_string(),
             ocr_translate: "Alt+D".to_string(),
+            open_clipboard_history: "Alt+V".to_string(),
         }
     }
 }
@@ -96,6 +105,7 @@ impl ShortcutConfig {
         match key {
             ShortcutKey::ToggleLauncher => &self.toggle_launcher,
             ShortcutKey::OcrTranslate => &self.ocr_translate,
+            ShortcutKey::OpenClipboardHistory => &self.open_clipboard_history,
         }
     }
 
@@ -103,6 +113,7 @@ impl ShortcutConfig {
         match key {
             ShortcutKey::ToggleLauncher => self.toggle_launcher = shortcut.into(),
             ShortcutKey::OcrTranslate => self.ocr_translate = shortcut.into(),
+            ShortcutKey::OpenClipboardHistory => self.open_clipboard_history = shortcut.into(),
         }
     }
 
@@ -110,6 +121,7 @@ impl ShortcutConfig {
         match key {
             ShortcutKey::ToggleLauncher => "Alt+Space",
             ShortcutKey::OcrTranslate => "Alt+D",
+            ShortcutKey::OpenClipboardHistory => "Alt+V",
         }
     }
 }
@@ -146,6 +158,8 @@ pub struct AcpConfig {
     pub default_agent_id: Option<String>,
     #[serde(default)]
     pub mcp_servers: Vec<AcpMcpServerConfig>,
+    #[serde(default)]
+    pub builtin_mcp: BuiltinMcpConfig,
     #[serde(default)]
     pub saved_sessions: Vec<SavedAcpSession>,
     #[serde(default)]
@@ -227,7 +241,9 @@ impl AcpConfig {
             used_ids.insert(agent.id.clone());
         }
 
+        self.migrate_legacy_builtin_mcp_server_entries();
         self.mcp_servers = sanitize_mcp_servers(&self.mcp_servers);
+        self.builtin_mcp = normalize_builtin_mcp_config(&self.builtin_mcp);
 
         if !self
             .default_agent_id
@@ -246,6 +262,26 @@ impl AcpConfig {
                 );
             }
         }
+    }
+
+    fn migrate_legacy_builtin_mcp_server_entries(&mut self) {
+        let mut remaining_servers = Vec::with_capacity(self.mcp_servers.len());
+        let mut enabled_modules = self.builtin_mcp.enabled_modules.clone();
+        let mut enable_builtin = self.builtin_mcp.enabled;
+
+        for server in std::mem::take(&mut self.mcp_servers) {
+            if let Some(module_key) = legacy_builtin_module_key_for_server(&server) {
+                enable_builtin = true;
+                enabled_modules.push(module_key);
+                continue;
+            }
+
+            remaining_servers.push(server);
+        }
+
+        self.mcp_servers = remaining_servers;
+        self.builtin_mcp.enabled = enable_builtin;
+        self.builtin_mcp.enabled_modules = enabled_modules;
     }
 }
 
@@ -612,6 +648,49 @@ impl RagSettings {
 
 fn sanitize_mcp_servers(servers: &[AcpMcpServerConfig]) -> Vec<AcpMcpServerConfig> {
     servers.iter().map(sanitize_mcp_server).collect()
+}
+
+fn normalize_builtin_mcp_config(config: &BuiltinMcpConfig) -> BuiltinMcpConfig {
+    let mut enabled_modules = config.enabled_modules.clone();
+    enabled_modules.sort();
+    enabled_modules.dedup();
+
+    BuiltinMcpConfig {
+        enabled: config.enabled,
+        enabled_modules,
+    }
+}
+
+fn legacy_builtin_module_key_for_server(
+    server: &AcpMcpServerConfig,
+) -> Option<BuiltinMcpModuleKey> {
+    match server {
+        AcpMcpServerConfig::Http(config) => {
+            let normalized_url = config.url.trim().trim_end_matches('/');
+            if normalized_url == LEGACY_BUILTIN_RAG_MCP_SERVER_URL.trim_end_matches('/') {
+                return Some(BuiltinMcpModuleKey::Rag);
+            }
+
+            if normalized_url == BUILTIN_MCP_SERVER_URL.trim_end_matches('/') {
+                return Some(BuiltinMcpModuleKey::Rag);
+            }
+
+            None
+        }
+        AcpMcpServerConfig::Sse(config) => {
+            let normalized_url = config.url.trim().trim_end_matches('/');
+            if normalized_url == LEGACY_BUILTIN_RAG_MCP_SERVER_URL.trim_end_matches('/') {
+                return Some(BuiltinMcpModuleKey::Rag);
+            }
+
+            if normalized_url == BUILTIN_MCP_SERVER_URL.trim_end_matches('/') {
+                return Some(BuiltinMcpModuleKey::Rag);
+            }
+
+            None
+        }
+        AcpMcpServerConfig::Stdio(_) => None,
+    }
 }
 
 fn expand_llm_provider(provider: LlmProviderConfig) -> Vec<LlmProviderConfig> {
@@ -1039,20 +1118,22 @@ mod tests {
         let config = ShortcutConfig::default();
         assert_eq!(config.toggle_launcher, "Alt+Space");
         assert_eq!(config.ocr_translate, "Alt+D");
+        assert_eq!(config.open_clipboard_history, "Alt+V");
     }
 
     #[test]
     fn shortcut_key_round_trips_config_access() {
         let mut config = ShortcutConfig::default();
-        let key = ShortcutKey::parse("ocr_translate").expect("known shortcut key should parse");
+        let key =
+            ShortcutKey::parse("open_clipboard_history").expect("known shortcut key should parse");
 
-        assert_eq!(key.as_str(), "ocr_translate");
-        assert_eq!(config.get(key), "Alt+D");
+        assert_eq!(key.as_str(), "open_clipboard_history");
+        assert_eq!(config.get(key), "Alt+V");
 
-        config.set(key, "Cmd+Alt+D");
+        config.set(key, "Cmd+Alt+V");
 
-        assert_eq!(config.get(key), "Cmd+Alt+D");
-        assert_eq!(ShortcutConfig::default_value(key), "Alt+D");
+        assert_eq!(config.get(key), "Cmd+Alt+V");
+        assert_eq!(ShortcutConfig::default_value(key), "Alt+V");
     }
 
     #[test]
@@ -1153,6 +1234,10 @@ mod tests {
             parsed.shortcuts.toggle_launcher,
             config.shortcuts.toggle_launcher
         );
+        assert_eq!(
+            parsed.shortcuts.open_clipboard_history,
+            config.shortcuts.open_clipboard_history
+        );
         assert_eq!(parsed.general.language, config.general.language);
         assert_eq!(parsed.appearance.theme, config.appearance.theme);
         assert_eq!(parsed.prompts, config.prompts);
@@ -1190,6 +1275,7 @@ saved_sessions = []
         let parsed = parse_config_content(content).expect("legacy config should parse");
 
         assert_eq!(parsed.shortcuts.ocr_translate, "Alt+D");
+        assert_eq!(parsed.shortcuts.open_clipboard_history, "Alt+V");
         assert_eq!(parsed.ocr, OcrSettings::default());
         assert_eq!(parsed.llm, LlmSettings::default());
         assert_eq!(
@@ -1269,6 +1355,28 @@ saved_sessions = []
     }
 
     #[test]
+    fn parse_config_content_migrates_legacy_builtin_rag_mcp_entry() {
+        let content = r#"
+[acp]
+
+[[acp.mcp_servers]]
+transport = "http"
+name = "Wabity RAG Query"
+url = "http://127.0.0.1:43189/internal/mcp/rag"
+"#;
+
+        let parsed =
+            parse_config_content(content).expect("legacy built-in MCP server should parse");
+
+        assert!(parsed.acp.mcp_servers.is_empty());
+        assert!(parsed.acp.builtin_mcp.enabled);
+        assert_eq!(
+            parsed.acp.builtin_mcp.enabled_modules,
+            vec![BuiltinMcpModuleKey::Rag]
+        );
+    }
+
+    #[test]
     fn parse_config_content_ignores_legacy_ocr_capture_shortcut() {
         let content = r#"
 [shortcuts]
@@ -1282,6 +1390,7 @@ ocr_translate = "Alt+D"
 
         assert_eq!(parsed.shortcuts.toggle_launcher, "Alt+Space");
         assert_eq!(parsed.shortcuts.ocr_translate, "Alt+D");
+        assert_eq!(parsed.shortcuts.open_clipboard_history, "Alt+V");
     }
 
     #[test]

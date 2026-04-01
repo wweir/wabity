@@ -13,7 +13,7 @@ export const settingsSections: ReadonlyArray<{
 }> = [
 	{ id: "general", label: "通用" },
 	{ id: "prompts", label: "AI 功能" },
-	{ id: "llm", label: "LLM" },
+	{ id: "llm", label: "模型接入" },
 	{ id: "rag", label: "RAG" },
 	{ id: "acp", label: "ACP Agent" },
 	{ id: "mcp", label: "MCP" },
@@ -32,10 +32,7 @@ export const settingsQuickLinks: Readonly<Record<SettingsSectionId, readonly Set
 			{ id: "llm-catalog", label: "条目列表", hint: "已配置条目" },
 			{ id: "llm-editor", label: "编辑区", hint: "连接信息与能力" },
 		],
-		rag: [
-			{ id: "rag-pipeline", label: "索引配置", hint: "Embedding 与目录" },
-			{ id: "rag-scan-result", label: "扫描结果", hint: "最近一次重建" },
-		],
+		rag: [],
 		acp: [
 			{ id: "acp-catalog", label: "Agent 列表", hint: "已配置条目" },
 			{ id: "acp-presets", label: "模板", hint: "预设与安装提示" },

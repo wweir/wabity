@@ -1,6 +1,26 @@
 export interface ShortcutConfig {
 	toggle_launcher: string;
 	ocr_translate: string;
+	open_clipboard_history: string;
+}
+
+export interface ClipboardHistoryEntry {
+	id: string;
+	text: string;
+	pinned: boolean;
+	lastSeenAtMs: number;
+	pinnedAtMs: number | null;
+}
+
+export interface ClipboardHistorySnapshot {
+	pinnedEntries: ClipboardHistoryEntry[];
+	recentEntries: ClipboardHistoryEntry[];
+}
+
+export type ClipboardHistorySelectionMode = "insert_into_launcher" | "paste_externally";
+
+export interface OpenClipboardHistoryPanelEvent {
+	selectionMode: ClipboardHistorySelectionMode;
 }
 
 export interface GeneralSettings {
@@ -75,8 +95,11 @@ export interface BuiltinLlmProviderTemplate {
 	id: string;
 	displayName: string;
 	description: string;
+	registrationLabel: string;
 	registrationUrl: string;
+	apiKeyLabel: string;
 	apiKeyUrl: string;
+	docsLabel: string;
 	docsUrl: string;
 	defaultBaseUrl: string;
 	supportsModelListing: boolean;
@@ -124,10 +147,25 @@ export interface RagRuntimeStatus {
 	updatedAtMs: number;
 }
 
-export interface BuiltinRagMcpServerStatus {
+export type BuiltinMcpModuleKey = "rag" | "document";
+
+export interface BuiltinMcpConfig {
+	enabled: boolean;
+	enabledModules: BuiltinMcpModuleKey[];
+}
+
+export interface BuiltinMcpModuleStatus {
+	key: BuiltinMcpModuleKey;
+	title: string;
+	summary: string;
+	toolCount: number;
+}
+
+export interface BuiltinMcpServerStatus {
 	server: AcpMcpServerConfig;
 	running: boolean;
 	lastError: string | null;
+	availableModules: BuiltinMcpModuleStatus[];
 }
 
 export interface AppSettings {
@@ -232,6 +270,7 @@ export interface AcpAgentCatalog {
 
 export interface AcpMcpServerCatalog {
 	servers: AcpMcpServerConfig[];
+	builtin: BuiltinMcpConfig;
 }
 
 export type AcpSessionStatus = "starting" | "idle" | "running" | "error" | "exited";

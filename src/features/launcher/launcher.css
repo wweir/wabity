@@ -389,6 +389,132 @@
 	font-size: 11px;
 }
 
+.clipboard-history-panel-header,
+.clipboard-history-panel-heading,
+.clipboard-history-panel-section-header,
+.clipboard-history-panel-item {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.clipboard-history-panel-header {
+	display: grid;
+	gap: 4px;
+	padding: 0 2px;
+}
+
+.clipboard-history-panel-heading {
+	display: grid;
+	gap: 4px;
+}
+
+.clipboard-history-panel-heading-title {
+	color: var(--text-primary);
+	font-size: var(--text-sm);
+	font-weight: 600;
+	line-height: 1.2;
+}
+
+.clipboard-history-panel-heading-summary,
+.clipboard-history-panel-section-count,
+.clipboard-history-panel-empty {
+	color: var(--text-muted);
+	font-size: var(--text-xs);
+	line-height: 1.45;
+}
+
+.clipboard-history-panel-section {
+	display: grid;
+	gap: 8px;
+}
+
+.clipboard-history-panel-section-header {
+	justify-content: space-between;
+	padding: 0 2px;
+}
+
+.clipboard-history-panel-section-title {
+	color: var(--text-secondary);
+	font-size: var(--text-xs);
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+}
+
+.clipboard-history-panel-list {
+	display: grid;
+	gap: 8px;
+	max-height: 240px;
+	overflow-y: auto;
+	padding-right: 2px;
+}
+
+.clipboard-history-panel-item {
+	justify-content: space-between;
+	align-items: stretch;
+	min-width: 0;
+	padding: 10px 10px 10px 12px;
+	border-radius: 14px;
+	border: 1px solid var(--border-soft);
+	background: var(--surface-raised);
+}
+
+.clipboard-history-panel-item-main {
+	display: flex;
+	align-items: flex-start;
+	justify-content: flex-start;
+	flex: 1 1 auto;
+	min-width: 0;
+	min-height: 44px;
+	padding: 0;
+	border: 0;
+	background: transparent;
+	color: var(--text-primary);
+	cursor: pointer;
+	text-align: left;
+}
+
+.clipboard-history-panel-item-text {
+	display: -webkit-box;
+	color: var(--text-primary);
+	font-size: 12px;
+	line-height: 1.5;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	-webkit-box-orient: vertical;
+	-webkit-line-clamp: 3;
+}
+
+.clipboard-history-panel-item-actions {
+	display: inline-flex;
+	flex-shrink: 0;
+	align-items: center;
+	gap: 6px;
+}
+
+.clipboard-history-panel-item-action {
+	min-height: 32px;
+	padding: 0 10px;
+	border: 1px solid var(--border-soft);
+	border-radius: 999px;
+	background: var(--surface-control-soft);
+	color: var(--text-secondary);
+	font-size: 11px;
+	line-height: 1;
+	white-space: nowrap;
+	cursor: pointer;
+}
+
+.clipboard-history-panel-item-action.danger {
+	color: var(--status-error-fg);
+}
+
+.clipboard-history-panel-item.active {
+	border-color: var(--border-selected);
+	background: var(--surface-card-selected);
+}
+
 .session-panel {
 	--floating-gap: 8px;
 	--floating-padding: 12px;
@@ -2158,7 +2284,8 @@
 }
 
 .workspace-picker-input.active,
-.agent-picker-trigger.active {
+.agent-picker-trigger.active,
+.session-panel-toggle.active {
 	--outlined-background-hover: var(--launcher-toggle-active-hover);
 }
 
@@ -2166,7 +2293,10 @@
 .workspace-picker-input.active .workspace-picker-caret,
 .agent-picker-trigger.active .agent-picker-trigger-label,
 .agent-picker-trigger.active .agent-picker-trigger-value,
-.agent-picker-trigger.active .agent-picker-trigger-caret {
+.agent-picker-trigger.active .agent-picker-trigger-caret,
+.session-panel-toggle.active .session-panel-toggle-label,
+.session-panel-toggle.active .session-panel-toggle-summary,
+.session-panel-toggle.active .session-panel-toggle-count {
 	color: var(--launcher-toggle-active-fg);
 }
 
@@ -2194,7 +2324,8 @@
 
 .workspace-picker-item,
 .agent-picker-item,
-.session-panel-item {
+.session-panel-item,
+.clipboard-history-panel-item {
 	border: 1px solid var(--border-soft);
 	background: var(--surface-raised);
 	color: var(--text-primary);
@@ -2203,12 +2334,14 @@
 
 .workspace-picker-item:hover,
 .agent-picker-item:hover,
-.session-panel-item:hover {
+.session-panel-item:hover,
+.clipboard-history-panel-item:hover {
 	background: var(--surface-raised-hover);
 }
 
 .agent-picker-item.active,
-.session-panel-item.active {
+.session-panel-item.active,
+.clipboard-history-panel-item.active {
 	border-color: var(--border-selected);
 	background: var(--surface-card-selected);
 	color: var(--text-strong);
@@ -2217,6 +2350,7 @@
 .workspace-picker-section-title,
 .agent-picker-item-meta,
 .session-panel-heading-summary,
+.clipboard-history-panel-heading-summary,
 .session-panel-path {
 	color: var(--text-muted);
 }
@@ -2288,6 +2422,32 @@
 	--floating-background: var(--surface-panel);
 	--floating-shadow: 0 18px 40px rgba(4, 7, 10, 0.28);
 	--floating-backdrop: none;
+}
+
+.clipboard-history-panel {
+	--floating-gap: 10px;
+	--floating-padding: 12px;
+	--floating-radius: var(--radius-card);
+	--floating-border: var(--border-strong);
+	--floating-background: var(--surface-panel);
+	--floating-shadow: 0 18px 40px rgba(4, 7, 10, 0.28);
+	--floating-backdrop: none;
+	--floating-z: 95;
+	gap: 12px;
+}
+
+.launcher-shell-clipboard-only {
+	padding: 0;
+}
+
+.clipboard-history-panel-standalone {
+	position: relative;
+	width: 460px;
+	max-width: 460px;
+}
+
+.launcher-input-anchor {
+	display: grid;
 }
 
 .launcher-input {

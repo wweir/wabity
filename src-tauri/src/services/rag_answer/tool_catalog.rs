@@ -3,16 +3,21 @@ use std::{
     env,
     process::Command,
     sync::{Mutex, OnceLock},
+    time::Instant,
 };
 
 use serde_json::{json, Value};
 
 use super::{
-    HostSystemContext, QuestionAnswerProtocol, ResponsesToolCompatibilityMode, ToolCatalog,
-    OPEN_TARGET_TOOL_NAME, RAG_QUERY_TOOL_NAME, READ_DOCUMENT_EXCERPT_TOOL_NAME,
-    READ_FILE_TOOL_NAME, RESPONSES_TOOL_COMPATIBILITY_CACHE,
+    CachedResponsesToolCompatibility, HostSystemContext, QuestionAnswerProtocol,
+    ResponsesToolCompatibilityMode, ToolCatalog, OPEN_TARGET_TOOL_NAME, RAG_QUERY_TOOL_NAME,
+    READ_DOCUMENT_EXCERPT_TOOL_NAME, READ_FILE_TOOL_NAME, RESPONSES_TOOL_COMPATIBILITY_CACHE,
+    RESPONSES_TOOL_COMPATIBILITY_CACHE_TTL, RESPONSES_TOOL_COMPATIBILITY_REPROBE_AFTER,
 };
-use crate::domain::acp::{AcpMcpServerConfig, AcpNameValuePair};
+use crate::{
+    domain::acp::{AcpMcpServerConfig, AcpNameValuePair},
+    services::builtin_mcp,
+};
 
 static HOST_SYSTEM_CONTEXT: OnceLock<HostSystemContext> = OnceLock::new();
 
@@ -35,6 +40,10 @@ pub(super) fn build_tool_catalog(
     let mut skipped_mcp_servers = Vec::new();
 
     for server in mcp_servers {
+        if builtin_mcp::is_builtin_server(server) {
+            continue;
+        }
+
         if protocol == QuestionAnswerProtocol::ChatCompletions {
             let name = match server {
                 AcpMcpServerConfig::Http(server) => &server.name,
@@ -72,10 +81,14 @@ pub(super) fn build_tool_catalog(
         }
     }
 
+    let compatibility_fingerprint =
+        build_tool_catalog_compatibility_fingerprint(&request_tools, &available_names);
+
     ToolCatalog {
         request_tools,
         available_names,
         skipped_mcp_servers,
+        compatibility_fingerprint,
     }
 }
 
@@ -93,20 +106,26 @@ pub(super) fn tool_catalog_without_mcp_tools(tool_catalog: &ToolCatalog) -> Tool
             }),
     );
 
+    let request_tools = tool_catalog
+        .request_tools
+        .iter()
+        .filter(|tool| !is_mcp_tool_definition(tool))
+        .cloned()
+        .collect::<Vec<_>>();
+    let available_names = tool_catalog
+        .available_names
+        .iter()
+        .filter(|name| !name.starts_with("mcp:"))
+        .cloned()
+        .collect::<Vec<_>>();
+    let compatibility_fingerprint =
+        build_tool_catalog_compatibility_fingerprint(&request_tools, &available_names);
+
     ToolCatalog {
-        request_tools: tool_catalog
-            .request_tools
-            .iter()
-            .filter(|tool| !is_mcp_tool_definition(tool))
-            .cloned()
-            .collect(),
-        available_names: tool_catalog
-            .available_names
-            .iter()
-            .filter(|name| !name.starts_with("mcp:"))
-            .cloned()
-            .collect(),
+        request_tools,
+        available_names,
         skipped_mcp_servers,
+        compatibility_fingerprint,
     }
 }
 
@@ -117,19 +136,37 @@ pub(super) fn tool_catalog_without_all_tools(tool_catalog: &ToolCatalog) -> Tool
     stripped
 }
 
-pub(super) fn responses_tool_compatibility_cache_key(base_url: &str, model: &str) -> String {
-    format!("responses::{base_url}::{model}")
+pub(super) fn responses_tool_compatibility_cache_key(
+    base_url: &str,
+    model: &str,
+    tool_catalog: &ToolCatalog,
+) -> String {
+    format!(
+        "responses::{base_url}::{model}::{}",
+        tool_catalog.compatibility_fingerprint
+    )
 }
 
 pub(super) fn load_cached_responses_tool_compatibility(
     compatibility_cache_key: &str,
 ) -> ResponsesToolCompatibilityMode {
-    responses_tool_compatibility_cache()
+    let mut cache = responses_tool_compatibility_cache()
         .lock()
-        .expect("responses tool compatibility cache lock poisoned")
-        .get(compatibility_cache_key)
-        .copied()
-        .unwrap_or(ResponsesToolCompatibilityMode::Full)
+        .expect("responses tool compatibility cache lock poisoned");
+    let Some(entry) = cache.get(compatibility_cache_key).copied() else {
+        return ResponsesToolCompatibilityMode::Full;
+    };
+    if entry.stored_at.elapsed() > RESPONSES_TOOL_COMPATIBILITY_CACHE_TTL {
+        cache.remove(compatibility_cache_key);
+        return ResponsesToolCompatibilityMode::Full;
+    }
+    if entry.mode != ResponsesToolCompatibilityMode::Full
+        && entry.stored_at.elapsed() > RESPONSES_TOOL_COMPATIBILITY_REPROBE_AFTER
+    {
+        cache.remove(compatibility_cache_key);
+        return ResponsesToolCompatibilityMode::Full;
+    }
+    entry.mode
 }
 
 pub(super) fn store_cached_responses_tool_compatibility(
@@ -139,21 +176,96 @@ pub(super) fn store_cached_responses_tool_compatibility(
     let mut cache = responses_tool_compatibility_cache()
         .lock()
         .expect("responses tool compatibility cache lock poisoned");
-    let entry = cache
-        .entry(compatibility_cache_key.to_string())
-        .or_insert(ResponsesToolCompatibilityMode::Full);
-    if mode > *entry {
-        *entry = mode;
+    let entry = cache.entry(compatibility_cache_key.to_string()).or_insert(
+        CachedResponsesToolCompatibility {
+            mode: ResponsesToolCompatibilityMode::Full,
+            stored_at: Instant::now(),
+        },
+    );
+    if entry.stored_at.elapsed() > RESPONSES_TOOL_COMPATIBILITY_CACHE_TTL || mode >= entry.mode {
+        *entry = CachedResponsesToolCompatibility {
+            mode,
+            stored_at: Instant::now(),
+        };
     }
 }
 
 pub(super) fn responses_tool_compatibility_cache(
-) -> &'static Mutex<HashMap<String, ResponsesToolCompatibilityMode>> {
+) -> &'static Mutex<HashMap<String, CachedResponsesToolCompatibility>> {
     RESPONSES_TOOL_COMPATIBILITY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 pub(super) fn is_mcp_tool_definition(tool: &Value) -> bool {
     tool.get("type").and_then(Value::as_str) == Some("mcp")
+}
+
+#[cfg(test)]
+pub(super) fn expire_cached_responses_tool_compatibility(compatibility_cache_key: &str) {
+    age_cached_responses_tool_compatibility(
+        compatibility_cache_key,
+        RESPONSES_TOOL_COMPATIBILITY_CACHE_TTL + std::time::Duration::from_secs(1),
+    );
+}
+
+#[cfg(test)]
+pub(super) fn mark_cached_responses_tool_compatibility_ready_for_reprobe(
+    compatibility_cache_key: &str,
+) {
+    age_cached_responses_tool_compatibility(
+        compatibility_cache_key,
+        RESPONSES_TOOL_COMPATIBILITY_REPROBE_AFTER + std::time::Duration::from_secs(1),
+    );
+}
+
+#[cfg(test)]
+fn age_cached_responses_tool_compatibility(
+    compatibility_cache_key: &str,
+    age: std::time::Duration,
+) {
+    let Some(stale_instant) = Instant::now().checked_sub(age) else {
+        return;
+    };
+    let mut cache = responses_tool_compatibility_cache()
+        .lock()
+        .expect("responses tool compatibility cache lock poisoned");
+    if let Some(entry) = cache.get_mut(compatibility_cache_key) {
+        entry.stored_at = stale_instant;
+    }
+}
+
+fn build_tool_catalog_compatibility_fingerprint(
+    request_tools: &[Value],
+    available_names: &[String],
+) -> String {
+    let mut builtin_names = available_names
+        .iter()
+        .filter(|name| !name.starts_with("mcp:"))
+        .cloned()
+        .collect::<Vec<_>>();
+    builtin_names.sort();
+
+    let mut mcp_servers = request_tools
+        .iter()
+        .filter(|tool| is_mcp_tool_definition(tool))
+        .map(|tool| {
+            let server_label = tool
+                .get("server_label")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let server_url = tool
+                .get("server_url")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            format!("{server_label}@{server_url}")
+        })
+        .collect::<Vec<_>>();
+    mcp_servers.sort();
+
+    format!(
+        "builtin={};mcp={}",
+        builtin_names.join(","),
+        mcp_servers.join(",")
+    )
 }
 
 fn build_read_file_tool(protocol: QuestionAnswerProtocol) -> Value {

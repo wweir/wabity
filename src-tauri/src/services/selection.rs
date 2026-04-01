@@ -13,6 +13,8 @@ use objc2_app_kit::NSPasteboard;
 const COPY_SETTLE_DELAY_MS: u64 = 20;
 #[cfg(target_os = "macos")]
 const COPY_SETTLE_POLL_ATTEMPTS: usize = 5;
+#[cfg(target_os = "macos")]
+const MACOS_ANSI_C_KEYCODE: u16 = 0x08;
 
 /// Get the currently selected text by simulating a copy operation.
 /// This temporarily saves the clipboard, copies the selection, reads it,
@@ -116,8 +118,7 @@ fn copy_selection() -> Result<()> {
 
     // Simulate Command+C (Meta+C)
     enigo.key(Key::Meta, Direction::Press)?;
-    enigo.key(Key::Unicode('c'), Direction::Press)?;
-    enigo.key(Key::Unicode('c'), Direction::Release)?;
+    enigo.raw(MACOS_ANSI_C_KEYCODE, Direction::Click)?;
     enigo.key(Key::Meta, Direction::Release)?;
 
     Ok(())

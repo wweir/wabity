@@ -22,10 +22,47 @@ use crate::{
     state::{AppState, ShortcutAction, ShortcutRuntimeState},
 };
 
+#[cfg(target_os = "macos")]
+use tauri::ActivationPolicy;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ShortcutTranslationSource {
     mode: window::ShortcutTranslationSourceMode,
     text: String,
+}
+
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+fn handle_secondary_launch(app: &tauri::AppHandle<Wry>, argv_count: usize) {
+    tracing::info!(
+        argv_count,
+        "detected secondary launch and redirecting to the existing instance"
+    );
+    if let Err(error) = window::reveal_main_window(app) {
+        tracing::error!(
+            ?error,
+            "failed to reveal existing instance after secondary launch"
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_activation_policy(show_in_dock: bool) -> ActivationPolicy {
+    if show_in_dock {
+        ActivationPolicy::Regular
+    } else {
+        ActivationPolicy::Accessory
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn sync_macos_app_visibility(app: &tauri::AppHandle, show_in_dock: bool) -> Result<()> {
+    app.set_activation_policy(macos_activation_policy(show_in_dock))
+        .with_context(|| {
+            format!("failed to set macOS activation policy for show_in_dock={show_in_dock}")
+        })?;
+    app.set_dock_visibility(show_in_dock)
+        .with_context(|| format!("failed to set macOS Dock visibility to {show_in_dock}"))?;
+    Ok(())
 }
 
 pub fn run() -> Result<()> {
@@ -40,6 +77,11 @@ pub fn run() -> Result<()> {
     let shortcut_for_handler = shortcut_state.clone();
 
     let builder = tauri::Builder::<Wry>::default();
+
+    #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+        handle_secondary_launch(app, argv.len());
+    }));
 
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(tauri_nspanel::init());
@@ -131,6 +173,16 @@ pub fn run() -> Result<()> {
                                         }
                                     });
                                 }
+                                ShortcutAction::OpenClipboardHistory => {
+                                    if let Err(error) =
+                                        window::show_main_window_with_clipboard_history_panel(_app)
+                                    {
+                                        tracing::error!(
+                                            ?error,
+                                            "failed to show clipboard history panel from shortcut"
+                                        );
+                                    }
+                                }
                             }
                         }
                         ShortcutState::Released => {
@@ -155,6 +207,14 @@ pub fn run() -> Result<()> {
                 MatcherService::new(),
                 ExecutorService::new(),
             ))?;
+
+            #[cfg(target_os = "macos")]
+            {
+                let show_in_dock = tauri::async_runtime::block_on(app_state.app_config())?
+                    .general
+                    .show_in_dock;
+                sync_macos_app_visibility(app.handle(), show_in_dock)?;
+            }
 
             app.manage(app_state.clone());
             app.manage(shortcut_state.clone());
@@ -233,6 +293,7 @@ fn shortcut_action_name(action: ShortcutAction) -> &'static str {
     match action {
         ShortcutAction::ToggleLauncher => "toggle_launcher",
         ShortcutAction::OcrTranslate => "ocr_translate",
+        ShortcutAction::OpenClipboardHistory => "open_clipboard_history",
     }
 }
 
@@ -264,6 +325,15 @@ async fn initialize_shortcuts(
         shortcut_state,
         &config.shortcuts,
         ShortcutKey::OcrTranslate,
+        ShortcutRegistrationMode::Optional,
+    )
+    .await?;
+    register_startup_shortcut(
+        app,
+        app_state,
+        shortcut_state,
+        &config.shortcuts,
+        ShortcutKey::OpenClipboardHistory,
         ShortcutRegistrationMode::Optional,
     )
     .await?;
@@ -450,6 +520,8 @@ fn start_application_cache_tasks(application: crate::services::application::Appl
 mod tests {
     use super::resolve_shortcut_translation_source;
     use crate::infrastructure::window::ShortcutTranslationSourceMode;
+    #[cfg(target_os = "macos")]
+    use tauri::ActivationPolicy;
 
     #[test]
     fn shortcut_translation_prefers_selected_text() {
@@ -479,5 +551,18 @@ mod tests {
             Some("\n".to_string()),
         )
         .is_none());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_activation_policy_tracks_show_in_dock_setting() {
+        assert!(matches!(
+            super::macos_activation_policy(true),
+            ActivationPolicy::Regular
+        ));
+        assert!(matches!(
+            super::macos_activation_policy(false),
+            ActivationPolicy::Accessory
+        ));
     }
 }

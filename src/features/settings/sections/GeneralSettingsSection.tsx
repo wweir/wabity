@@ -158,6 +158,16 @@ export function GeneralSettingsSection({
 					statusId="shortcut-ocr-translate-status"
 					triggerId="shortcut-ocr-translate-trigger"
 				/>
+				<ShortcutRecorderField
+					instructionsId="general-shortcuts-instructions"
+					isRecording={isRecording("open_clipboard_history")}
+					isSaving={savingShortcutKey === "open_clipboard_history"}
+					label="打开历史剪贴板"
+					onActivate={() => onShortcutClick("open_clipboard_history")}
+					shortcutValue={shortcutSettings.open_clipboard_history}
+					statusId="shortcut-open-clipboard-history-status"
+					triggerId="shortcut-open-clipboard-history-trigger"
+				/>
 			</div>
 
 			<div
@@ -394,7 +404,7 @@ export function GeneralSettingsSection({
 							</span>
 							{eligibleOcrProviders.length === 0 ? (
 								<span className="settings-help-text settings-help-text-tight">
-									当前没有可用的 OCR 模型。先到 LLM 页面添加支持多模态的普通 LLM 条目。
+									当前没有可用的 OCR 模型。先到模型接入页添加支持多模态的普通 LLM 条目。
 								</span>
 							) : null}
 						</div>

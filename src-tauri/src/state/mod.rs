@@ -17,6 +17,8 @@ use crate::services::ocr::MacOsVisionOcrProvider;
 use crate::services::{
     acp::AcpService,
     application::ApplicationService,
+    builtin_mcp::{self, BuiltinMcpServerService},
+    clipboard::ClipboardService,
     executor::ExecutorService,
     file_search::FileSearchService,
     matcher::MatcherService,
@@ -25,7 +27,6 @@ use crate::services::{
     open_target::OpenTargetService,
     question_answer_backend,
     rag::RagIndexService,
-    rag_mcp::RagMcpServerService,
     translate,
 };
 use crate::{
@@ -33,9 +34,10 @@ use crate::{
         acp::{
             AcpAgentCatalog, AcpAgentConfig, AcpMcpServerCatalog, AcpMcpServerConfig,
             AcpNameValuePair, AcpRestoreNotice, AcpSessionDetail, AcpSessionSummary,
+            BuiltinMcpConfig, BuiltinMcpServerStatus,
         },
         execution::{ExecutionProgressEvent, ExecutionRequest, ExecutionResult},
-        rag::{BuiltinRagMcpServerStatus, RagRuntimeStatus, RagScanResult},
+        rag::{RagRuntimeStatus, RagScanResult},
         settings::{
             builtin_llm_provider_templates, find_builtin_llm_provider_template, AppSettings,
             BuiltinLlmProviderTemplate, BuiltinLlmTemplateModelProtocol,
@@ -69,11 +71,12 @@ pub struct AppState {
     open_target: OpenTargetService,
     application: ApplicationService,
     file_search: FileSearchService,
+    clipboard: ClipboardService,
     notification: NotificationService,
     acp: AcpService,
     ocr_provider: Arc<StdRwLock<Arc<dyn OcrProvider>>>,
     rag_index: RagIndexService,
-    rag_mcp: RagMcpServerService,
+    builtin_mcp: BuiltinMcpServerService,
     config_store: Arc<AsyncRwLock<ConfigStore>>,
     workspace_state: Arc<AsyncRwLock<WorkspaceState>>,
 }
@@ -108,8 +111,16 @@ impl AppState {
         rag_index
             .apply_settings(config.rag.clone(), config.llm.clone())
             .await;
-        let rag_mcp = RagMcpServerService::new(ConfigStore::data_dir()?, config_store.clone());
-        rag_mcp.start().await;
+        let clipboard = ClipboardService::new(app_handle.clone()).await?;
+        let builtin_mcp = BuiltinMcpServerService::new(
+            ConfigStore::data_dir()?,
+            normalize_workspace_root(&root_path)?,
+            config.rag.clone(),
+            config.llm.clone(),
+            config.acp.builtin_mcp.clone(),
+        );
+        builtin_mcp.start().await;
+        clipboard.start();
         let notification =
             NotificationService::new(app_handle, shortcut_state, config_store.clone());
 
@@ -119,11 +130,12 @@ impl AppState {
             open_target: OpenTargetService::new(),
             application: ApplicationService::new()?,
             file_search: FileSearchService::new()?,
+            clipboard,
             notification: notification.clone(),
             acp: AcpService::new(notification),
             ocr_provider: Arc::new(StdRwLock::new(build_ocr_provider(&config.ocr, &config.llm))),
             rag_index,
-            rag_mcp,
+            builtin_mcp,
             config_store,
             workspace_state: Arc::new(AsyncRwLock::new(initial_workspace)),
         })
@@ -165,7 +177,7 @@ impl AppState {
                 let data_dir = ConfigStore::data_dir()?;
                 let workspace = self.workspace().await?;
                 let workspace_root = normalize_workspace_root(&workspace.root_path)?;
-                let mcp_servers = self.acp_mcp_servers().await?.servers;
+                let mcp_servers = self.effective_acp_mcp_servers().await?;
                 let result = question_answer_backend::answer_question(
                     question_answer_backend::QuestionAnswerBackendRequest {
                         data_dir: &data_dir,
@@ -207,6 +219,10 @@ impl AppState {
         &self.application
     }
 
+    pub fn clipboard(&self) -> &ClipboardService {
+        &self.clipboard
+    }
+
     pub fn open_document_path(&self, path: &Path) -> Result<()> {
         self.open_target.open_path(path)
     }
@@ -244,7 +260,14 @@ impl AppState {
         let config = self.app_config().await?;
         Ok(AcpMcpServerCatalog {
             servers: config.acp.mcp_servers,
+            builtin: config.acp.builtin_mcp,
         })
+    }
+
+    pub async fn effective_acp_mcp_servers(&self) -> Result<Vec<AcpMcpServerConfig>> {
+        let catalog = self.acp_mcp_servers().await?;
+        let builtin_running = self.builtin_mcp.status().await.running;
+        Ok(effective_mcp_servers(&catalog, builtin_running))
     }
 
     pub async fn app_settings(&self) -> Result<AppSettings> {
@@ -314,6 +337,16 @@ impl AppState {
         }
 
         *self.workspace_state.write().await = next_workspace.clone();
+        let settings = self.app_settings().await?;
+        let builtin_config = self.acp_mcp_servers().await?.builtin;
+        self.builtin_mcp
+            .apply_runtime_config(
+                normalize_workspace_root(&next_workspace.root_path)?,
+                settings.rag,
+                settings.llm,
+                builtin_config,
+            )
+            .await;
 
         Ok(next_workspace)
     }
@@ -336,7 +369,17 @@ impl AppState {
         let mut config = store.load().await?;
         let normalized_catalog = normalize_acp_mcp_server_catalog(catalog)?;
         config.acp.mcp_servers = normalized_catalog.servers.clone();
+        config.acp.builtin_mcp = normalized_catalog.builtin.clone();
         store.save(&config).await?;
+        let workspace = self.workspace().await?;
+        self.builtin_mcp
+            .apply_runtime_config(
+                normalize_workspace_root(&workspace.root_path)?,
+                config.rag.clone(),
+                config.llm.clone(),
+                config.acp.builtin_mcp.clone(),
+            )
+            .await;
         Ok(normalized_catalog)
     }
 
@@ -358,6 +401,15 @@ impl AppState {
         *self.ocr_provider.write().unwrap() = build_ocr_provider(&config.ocr, &config.llm);
         self.rag_index
             .apply_settings(config.rag.clone(), config.llm.clone())
+            .await;
+        let workspace = self.workspace().await?;
+        self.builtin_mcp
+            .apply_runtime_config(
+                normalize_workspace_root(&workspace.root_path)?,
+                config.rag.clone(),
+                config.llm.clone(),
+                config.acp.builtin_mcp.clone(),
+            )
             .await;
         Ok(AppSettings {
             general: config.general,
@@ -385,14 +437,14 @@ impl AppState {
         self.rag_index.runtime_status().await
     }
 
-    pub async fn builtin_rag_mcp_server_status(&self) -> BuiltinRagMcpServerStatus {
-        self.rag_mcp.status().await
+    pub async fn builtin_mcp_server_status(&self) -> BuiltinMcpServerStatus {
+        self.builtin_mcp.status().await
     }
 
     pub async fn create_acp_session(&self, agent_id: Option<String>) -> Result<AcpSessionDetail> {
         let workspace = self.workspace().await?;
         let agent = self.resolve_acp_agent(agent_id.as_deref()).await?;
-        let mcp_servers = self.acp_mcp_servers().await?.servers;
+        let mcp_servers = self.effective_acp_mcp_servers().await?;
         let runtime_agent = hydrate_runtime_agent(agent.clone(), mcp_servers.clone());
         let workspace_root = normalize_workspace_root(&workspace.root_path)?;
         let detail = self
@@ -450,10 +502,14 @@ impl AppState {
         let config = self.app_config().await?;
         let snapshots = config.acp.saved_sessions.clone();
         let active_session_id = config.acp.active_session_id.clone();
+        let builtin_catalog = self.acp_mcp_servers().await?;
+        let builtin_running = self.builtin_mcp.status().await.running;
         let mut restored = Vec::new();
         let mut retained = Vec::new();
 
         for snapshot in snapshots {
+            let snapshot =
+                reconcile_saved_session_builtin_mcp(snapshot, &builtin_catalog, builtin_running);
             let result = self.acp.restore_session(snapshot.clone()).await;
             if result.keep_snapshot {
                 retained.push(snapshot.clone());
@@ -726,10 +782,9 @@ fn validate_builtin_llm_provider_binding(provider: &LlmProviderConfig) -> Result
         anyhow::bail!("内置模板条目的 Base URL 必须与模板默认值一致，或先关闭模板管理");
     }
 
-    let model_id = provider
-        .builtin_preset_model_id
-        .as_deref()
-        .context("内置模板条目缺少模型目录绑定")?;
+    let Some(model_id) = provider.builtin_preset_model_id.as_deref() else {
+        return Ok(());
+    };
     let template_model = template
         .models
         .iter()
@@ -914,7 +969,50 @@ fn normalize_acp_agent_catalog(catalog: AcpAgentCatalog) -> Result<AcpAgentCatal
 fn normalize_acp_mcp_server_catalog(catalog: AcpMcpServerCatalog) -> Result<AcpMcpServerCatalog> {
     Ok(AcpMcpServerCatalog {
         servers: normalize_mcp_servers(catalog.servers, "全局 MCP server")?,
+        builtin: normalize_builtin_mcp_config(catalog.builtin),
     })
+}
+
+fn normalize_builtin_mcp_config(config: BuiltinMcpConfig) -> BuiltinMcpConfig {
+    let mut enabled_modules = config.enabled_modules;
+    enabled_modules.sort();
+    enabled_modules.dedup();
+
+    BuiltinMcpConfig {
+        enabled: config.enabled,
+        enabled_modules,
+    }
+}
+
+fn effective_mcp_servers(
+    catalog: &AcpMcpServerCatalog,
+    builtin_running: bool,
+) -> Vec<AcpMcpServerConfig> {
+    let mut servers = catalog.servers.clone();
+    if builtin_mcp_should_be_available(catalog, builtin_running) {
+        servers.push(builtin_mcp::builtin_server_config());
+    }
+    servers
+}
+
+fn builtin_mcp_should_be_available(catalog: &AcpMcpServerCatalog, builtin_running: bool) -> bool {
+    builtin_running && catalog.builtin.enabled && !catalog.builtin.enabled_modules.is_empty()
+}
+
+fn reconcile_saved_session_builtin_mcp(
+    mut snapshot: SavedAcpSession,
+    catalog: &AcpMcpServerCatalog,
+    builtin_running: bool,
+) -> SavedAcpSession {
+    snapshot
+        .mcp_servers
+        .retain(|server| !builtin_mcp::is_builtin_server(server));
+    if builtin_mcp_should_be_available(catalog, builtin_running) {
+        snapshot
+            .mcp_servers
+            .push(builtin_mcp::builtin_server_config());
+    }
+    snapshot
 }
 
 fn normalize_mcp_servers(
@@ -1023,6 +1121,7 @@ fn normalize_name_value_pairs(
 pub struct ShortcutRuntimeState {
     launcher_shortcut: Arc<StdRwLock<Option<Shortcut>>>,
     ocr_translate_shortcut: Arc<StdRwLock<Option<Shortcut>>>,
+    open_clipboard_history_shortcut: Arc<StdRwLock<Option<Shortcut>>>,
     launcher_visible: Arc<AtomicBool>,
     launcher_blur_auto_hide_enabled: Arc<AtomicBool>,
     launcher_resize_reposition_until: Arc<StdRwLock<Option<Instant>>>,
@@ -1030,8 +1129,11 @@ pub struct ShortcutRuntimeState {
     launcher_blur_auto_hide_sequence: Arc<AtomicUsize>,
     launcher_shortcut_pressed: Arc<StdRwLock<ShortcutPressGate>>,
     ocr_translate_shortcut_pressed: Arc<StdRwLock<ShortcutPressGate>>,
+    open_clipboard_history_shortcut_pressed: Arc<StdRwLock<ShortcutPressGate>>,
     ocr_capture_active: Arc<AtomicBool>,
     transient_window_interactions: Arc<AtomicUsize>,
+    #[cfg(target_os = "macos")]
+    clipboard_external_paste_target_pid: Arc<StdRwLock<Option<i32>>>,
 }
 
 impl Default for ShortcutRuntimeState {
@@ -1039,6 +1141,7 @@ impl Default for ShortcutRuntimeState {
         Self {
             launcher_shortcut: Arc::new(StdRwLock::new(None)),
             ocr_translate_shortcut: Arc::new(StdRwLock::new(None)),
+            open_clipboard_history_shortcut: Arc::new(StdRwLock::new(None)),
             launcher_visible: Arc::new(AtomicBool::new(false)),
             launcher_blur_auto_hide_enabled: Arc::new(AtomicBool::new(true)),
             launcher_resize_reposition_until: Arc::new(StdRwLock::new(None)),
@@ -1046,8 +1149,13 @@ impl Default for ShortcutRuntimeState {
             launcher_blur_auto_hide_sequence: Arc::new(AtomicUsize::new(0)),
             launcher_shortcut_pressed: Arc::new(StdRwLock::new(ShortcutPressGate::default())),
             ocr_translate_shortcut_pressed: Arc::new(StdRwLock::new(ShortcutPressGate::default())),
+            open_clipboard_history_shortcut_pressed: Arc::new(StdRwLock::new(
+                ShortcutPressGate::default(),
+            )),
             ocr_capture_active: Arc::new(AtomicBool::new(false)),
             transient_window_interactions: Arc::new(AtomicUsize::new(0)),
+            #[cfg(target_os = "macos")]
+            clipboard_external_paste_target_pid: Arc::new(StdRwLock::new(None)),
         }
     }
 }
@@ -1056,6 +1164,7 @@ impl Default for ShortcutRuntimeState {
 pub enum ShortcutAction {
     ToggleLauncher,
     OcrTranslate,
+    OpenClipboardHistory,
 }
 
 impl ShortcutRuntimeState {
@@ -1063,6 +1172,10 @@ impl ShortcutRuntimeState {
         for (key, action) in [
             (ShortcutKey::ToggleLauncher, ShortcutAction::ToggleLauncher),
             (ShortcutKey::OcrTranslate, ShortcutAction::OcrTranslate),
+            (
+                ShortcutKey::OpenClipboardHistory,
+                ShortcutAction::OpenClipboardHistory,
+            ),
         ] {
             if self.current_shortcut(key) == Some(shortcut) {
                 return Some(action);
@@ -1076,6 +1189,9 @@ impl ShortcutRuntimeState {
         match key {
             ShortcutKey::ToggleLauncher => *self.launcher_shortcut.read().unwrap(),
             ShortcutKey::OcrTranslate => *self.ocr_translate_shortcut.read().unwrap(),
+            ShortcutKey::OpenClipboardHistory => {
+                *self.open_clipboard_history_shortcut.read().unwrap()
+            }
         }
     }
 
@@ -1084,6 +1200,9 @@ impl ShortcutRuntimeState {
             ShortcutKey::ToggleLauncher => *self.launcher_shortcut.write().unwrap() = shortcut,
             ShortcutKey::OcrTranslate => {
                 *self.ocr_translate_shortcut.write().unwrap() = shortcut;
+            }
+            ShortcutKey::OpenClipboardHistory => {
+                *self.open_clipboard_history_shortcut.write().unwrap() = shortcut;
             }
         }
     }
@@ -1167,6 +1286,7 @@ impl ShortcutRuntimeState {
         Self::begin_shortcut_press_gate(match action {
             ShortcutAction::ToggleLauncher => &self.launcher_shortcut_pressed,
             ShortcutAction::OcrTranslate => &self.ocr_translate_shortcut_pressed,
+            ShortcutAction::OpenClipboardHistory => &self.open_clipboard_history_shortcut_pressed,
         })
     }
 
@@ -1174,6 +1294,7 @@ impl ShortcutRuntimeState {
         Self::end_shortcut_press_gate(match action {
             ShortcutAction::ToggleLauncher => &self.launcher_shortcut_pressed,
             ShortcutAction::OcrTranslate => &self.ocr_translate_shortcut_pressed,
+            ShortcutAction::OpenClipboardHistory => &self.open_clipboard_history_shortcut_pressed,
         });
     }
 
@@ -1200,6 +1321,19 @@ impl ShortcutRuntimeState {
 
     pub fn is_transient_window_interaction_active(&self) -> bool {
         self.transient_window_interactions.load(Ordering::SeqCst) > 0
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn remember_clipboard_external_paste_target_pid(&self, pid: Option<i32>) {
+        *self.clipboard_external_paste_target_pid.write().unwrap() = pid;
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn take_clipboard_external_paste_target_pid(&self) -> Option<i32> {
+        self.clipboard_external_paste_target_pid
+            .write()
+            .unwrap()
+            .take()
     }
 
     fn begin_shortcut_press_gate(gate: &StdRwLock<ShortcutPressGate>) -> bool {
@@ -1231,13 +1365,20 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        normalize_mcp_remote_url, validate_llm_provider_config, validate_rag_settings,
-        ShortcutAction, ShortcutRuntimeState, SHORTCUT_PRESS_STALE_AFTER,
+        effective_mcp_servers, normalize_mcp_remote_url, reconcile_saved_session_builtin_mcp,
+        validate_llm_provider_config, validate_rag_settings, ShortcutAction, ShortcutRuntimeState,
+        SHORTCUT_PRESS_STALE_AFTER,
     };
-    use crate::domain::settings::{
-        LlmProviderConfig, LlmProviderModelEntry, LlmSettings, RagSettings,
+    use crate::domain::{
+        acp::{
+            AcpMcpServerCatalog, AcpMcpServerConfig, AcpMcpServerHttpConfig, BuiltinMcpConfig,
+            BuiltinMcpModuleKey,
+        },
+        settings::{LlmProviderConfig, LlmProviderModelEntry, LlmSettings, RagSettings},
     };
+    use crate::infrastructure::config::SavedAcpSession;
     use crate::infrastructure::openai_compatible::{extract_model_entries, extract_model_ids};
+    use crate::services::builtin_mcp;
     use serde_json::json;
 
     #[test]
@@ -1262,6 +1403,29 @@ mod tests {
         state.end_shortcut_press(ShortcutAction::OcrTranslate);
 
         assert!(state.begin_shortcut_press(ShortcutAction::OcrTranslate));
+    }
+
+    #[test]
+    fn clipboard_history_shortcut_press_only_triggers_once_until_release() {
+        let state = ShortcutRuntimeState::default();
+
+        assert!(state.begin_shortcut_press(ShortcutAction::OpenClipboardHistory));
+        assert!(!state.begin_shortcut_press(ShortcutAction::OpenClipboardHistory));
+
+        state.end_shortcut_press(ShortcutAction::OpenClipboardHistory);
+
+        assert!(state.begin_shortcut_press(ShortcutAction::OpenClipboardHistory));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn clipboard_external_paste_target_pid_round_trips_once() {
+        let state = ShortcutRuntimeState::default();
+
+        state.remember_clipboard_external_paste_target_pid(Some(4242));
+
+        assert_eq!(state.take_clipboard_external_paste_target_pid(), Some(4242));
+        assert_eq!(state.take_clipboard_external_paste_target_pid(), None);
     }
 
     #[test]
@@ -1450,7 +1614,25 @@ mod tests {
     }
 
     #[test]
-    fn builtin_provider_rejects_models_outside_whitelist() {
+    fn builtin_provider_allows_custom_model_without_catalog_binding() {
+        let provider = LlmProviderConfig {
+            id: "zhipu".to_string(),
+            name: "智谱 AI".to_string(),
+            base_url: "https://open.bigmodel.cn/api/paas/v4".to_string(),
+            api_key: "key".to_string(),
+            model: "glm-4.9".to_string(),
+            protocol: crate::domain::settings::LlmProviderProtocol::ChatCompletions,
+            builtin_preset_id: Some("zhipu".to_string()),
+            managed_base_url: true,
+            ..LlmProviderConfig::default()
+        };
+
+        validate_llm_provider_config(&provider)
+            .expect("builtin provider should allow custom model without catalog binding");
+    }
+
+    #[test]
+    fn builtin_provider_rejects_mismatched_bound_catalog_model() {
         let provider = LlmProviderConfig {
             id: "zhipu".to_string(),
             name: "智谱 AI".to_string(),
@@ -1465,7 +1647,7 @@ mod tests {
         };
 
         let error = validate_llm_provider_config(&provider)
-            .expect_err("builtin provider must stay inside whitelist");
+            .expect_err("bound builtin model metadata must stay consistent");
         assert!(error.to_string().contains("白名单"));
     }
 
@@ -1580,5 +1762,80 @@ mod tests {
             normalize_mcp_remote_url("foo", "MCP URL").expect_err("incomplete URL should fail");
 
         assert!(error.to_string().contains("不是合法 URL"));
+    }
+
+    #[test]
+    fn effective_mcp_servers_requires_running_builtin_server() {
+        let catalog = AcpMcpServerCatalog {
+            servers: vec![AcpMcpServerConfig::Http(AcpMcpServerHttpConfig {
+                name: "WebMCP".to_string(),
+                url: "https://example.com/mcp".to_string(),
+                headers: Vec::new(),
+            })],
+            builtin: BuiltinMcpConfig {
+                enabled: true,
+                enabled_modules: vec![BuiltinMcpModuleKey::Document],
+            },
+        };
+
+        let without_builtin = effective_mcp_servers(&catalog, false);
+        let with_builtin = effective_mcp_servers(&catalog, true);
+
+        assert_eq!(without_builtin.len(), 1);
+        assert_eq!(with_builtin.len(), 2);
+        assert!(with_builtin.iter().any(builtin_mcp::is_builtin_server));
+    }
+
+    #[test]
+    fn reconcile_saved_session_builtin_mcp_uses_current_runtime_availability() {
+        let snapshot = SavedAcpSession {
+            session_id: "session-1".to_string(),
+            workspace_root: "/tmp/workspace".to_string(),
+            title: "workspace".to_string(),
+            agent_id: Some("agent-1".to_string()),
+            agent_name: "Codex".to_string(),
+            agent_program: "codex-acp".to_string(),
+            agent_args: Vec::new(),
+            agent_shell_command: None,
+            mcp_servers: vec![
+                builtin_mcp::builtin_server_config(),
+                AcpMcpServerConfig::Http(AcpMcpServerHttpConfig {
+                    name: "WebMCP".to_string(),
+                    url: "https://example.com/mcp".to_string(),
+                    headers: Vec::new(),
+                }),
+            ],
+            last_updated_at_ms: 0,
+        };
+        let catalog = AcpMcpServerCatalog {
+            servers: vec![AcpMcpServerConfig::Http(AcpMcpServerHttpConfig {
+                name: "WebMCP".to_string(),
+                url: "https://example.com/mcp".to_string(),
+                headers: Vec::new(),
+            })],
+            builtin: BuiltinMcpConfig {
+                enabled: true,
+                enabled_modules: vec![BuiltinMcpModuleKey::Rag],
+            },
+        };
+
+        let without_builtin =
+            reconcile_saved_session_builtin_mcp(snapshot.clone(), &catalog, false);
+        let with_builtin = reconcile_saved_session_builtin_mcp(snapshot, &catalog, true);
+
+        assert_eq!(without_builtin.mcp_servers.len(), 1);
+        assert!(!without_builtin
+            .mcp_servers
+            .iter()
+            .any(builtin_mcp::is_builtin_server));
+        assert_eq!(with_builtin.mcp_servers.len(), 2);
+        assert_eq!(
+            with_builtin
+                .mcp_servers
+                .iter()
+                .filter(|server| builtin_mcp::is_builtin_server(server))
+                .count(),
+            1
+        );
     }
 }

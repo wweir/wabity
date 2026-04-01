@@ -1,11 +1,11 @@
 use std::{
     collections::HashMap,
     io::{Cursor, Read},
-    panic::{catch_unwind, AssertUnwindSafe},
     path::Path,
 };
 
 use anyhow::{bail, Context, Result};
+use lopdf::Document as PdfDocument;
 use roxmltree::{Document, Node};
 use serde::{Deserialize, Serialize};
 use zip::ZipArchive;
@@ -17,7 +17,7 @@ const MARKDOWN_DOCUMENT_EXTENSIONS: &[&str] = &["md", "mdx", "markdown"];
 const PLAIN_TEXT_DOCUMENT_EXTENSIONS: &[&str] = &["txt", "rst", "adoc"];
 const PLAIN_TEXT_EXTRACTOR_FINGERPRINT: &str = "plain-text/v1";
 const DOCX_EXTRACTOR_FINGERPRINT: &str = "docx/v1";
-const PDF_EXTRACTOR_FINGERPRINT: &str = "pdf-text/v1";
+const PDF_EXTRACTOR_FINGERPRINT: &str = "pdf-text/v2";
 const PDF_BLOCK_TARGET_CHARS: usize = 700;
 const PDF_BLOCK_MIN_SENTENCE_CHARS: usize = 280;
 
@@ -48,6 +48,31 @@ pub(crate) struct ExtractedBlock {
     pub anchor_label: Option<String>,
     pub line_start: Option<u32>,
     pub line_end: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExtractedPdfPage {
+    page_number: u32,
+    lines: Vec<String>,
+    extraction_warning: Option<String>,
+}
+
+impl ExtractedPdfPage {
+    fn from_text(page_number: u32, text: String) -> Self {
+        Self {
+            page_number,
+            lines: normalize_pdf_page_lines(&text),
+            extraction_warning: None,
+        }
+    }
+
+    fn from_error(page_number: u32, error: String) -> Self {
+        Self {
+            page_number,
+            lines: Vec::new(),
+            extraction_warning: Some(error),
+        }
+    }
 }
 
 pub(crate) fn classify_document_kind(path: &Path) -> Option<DocumentKind> {
@@ -139,21 +164,21 @@ fn extract_docx_document(bytes: &[u8]) -> Result<ExtractedDocument> {
 }
 
 fn extract_pdf_document(path: &Path, bytes: &[u8]) -> Result<ExtractedDocument> {
-    let pages = run_pdf_extract(path, || pdf_extract::extract_text_from_mem_by_pages(bytes))
+    let pages = extract_pdf_pages(path, bytes)
         .with_context(|| format!("failed to extract text from PDF: {}", path.display()))?;
-    if pages.is_empty() {
-        bail!("PDF 文档没有可提取的页面: {}", path.display());
-    }
-
     let normalized_pages = pages
-        .into_iter()
-        .map(|page| normalize_pdf_page_lines(&page))
+        .iter()
+        .map(|page| page.lines.clone())
         .collect::<Vec<_>>();
     let stripped_pages = strip_repeated_pdf_page_noise(&normalized_pages);
     let mut blocks = Vec::new();
     let mut warnings = Vec::new();
-    for (page_index, lines) in stripped_pages.into_iter().enumerate() {
-        let page_number = u32::try_from(page_index + 1).context("pdf page number exceeds u32")?;
+    for (page, lines) in pages.iter().zip(stripped_pages) {
+        let page_number = page.page_number;
+        if let Some(warning) = page.extraction_warning.as_ref() {
+            warnings.push(warning.clone());
+            continue;
+        }
         if !page_contains_readable_text(&lines) {
             warnings.push(format!("page {page_number} did not produce readable text"));
             continue;
@@ -179,17 +204,31 @@ fn extract_pdf_document(path: &Path, bytes: &[u8]) -> Result<ExtractedDocument> 
     ))
 }
 
-fn run_pdf_extract<T>(
-    path: &Path,
-    operation: impl FnOnce() -> Result<T, pdf_extract::OutputError>,
-) -> Result<T> {
-    match catch_unwind(AssertUnwindSafe(operation)) {
-        Ok(Ok(value)) => Ok(value),
-        Ok(Err(error)) => Err(error).context("pdf-extract returned an error"),
-        Err(payload) => bail!(
-            "pdf-extract panicked while parsing {}: {}",
-            path.display(),
-            panic_payload_message(&payload)
+fn extract_pdf_pages(path: &Path, bytes: &[u8]) -> Result<Vec<ExtractedPdfPage>> {
+    let mut document = PdfDocument::load_mem(bytes).context("failed to parse PDF bytes")?;
+    if document.is_encrypted() {
+        document
+            .decrypt("")
+            .context("encrypted PDF requires a password")?;
+    }
+
+    let page_numbers = document.get_pages().into_keys().collect::<Vec<_>>();
+    if page_numbers.is_empty() {
+        bail!("PDF 文档没有可提取的页面: {}", path.display());
+    }
+
+    Ok(page_numbers
+        .into_iter()
+        .map(|page_number| extract_pdf_page(&document, page_number))
+        .collect())
+}
+
+fn extract_pdf_page(document: &PdfDocument, page_number: u32) -> ExtractedPdfPage {
+    match document.extract_text(&[page_number]) {
+        Ok(text) => ExtractedPdfPage::from_text(page_number, text),
+        Err(error) => ExtractedPdfPage::from_error(
+            page_number,
+            format!("page {page_number} text extraction failed: {error}"),
         ),
     }
 }
@@ -355,17 +394,6 @@ fn build_extracted_document(
         blocks,
         warnings,
     }
-}
-
-fn panic_payload_message(payload: &Box<dyn std::any::Any + Send>) -> String {
-    if let Some(message) = payload.downcast_ref::<&str>() {
-        return (*message).to_string();
-    }
-    if let Some(message) = payload.downcast_ref::<String>() {
-        return message.clone();
-    }
-
-    "unknown panic payload".to_string()
 }
 
 fn path_has_extension(path: &Path, supported_extensions: &[&str]) -> bool {
@@ -788,18 +816,72 @@ ET";
             .contains("Second line on page one."));
     }
 
-    #[test]
-    fn pdf_extract_panic_is_converted_into_error() {
-        let path = Path::new("/tmp/broken.pdf");
-        let error = run_pdf_extract(
-            path,
-            || -> std::result::Result<Vec<String>, pdf_extract::OutputError> {
-                panic!("boom");
-            },
-        )
-        .expect_err("panic should be converted into error");
+    fn invalid_content_stream_pdf_bytes() -> Vec<u8> {
+        let content_stream = "\
+BT
+Tf
+ET";
+        let objects = [
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".to_string(),
+            "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n".to_string(),
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 144] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n".to_string(),
+            format!(
+                "4 0 obj\n<< /Length {} >>\nstream\n{}\nendstream\nendobj\n",
+                content_stream.len(),
+                content_stream
+            ),
+            "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n"
+                .to_string(),
+        ];
 
-        let message = error.to_string();
-        assert!(message.contains("pdf-extract panicked while parsing /tmp/broken.pdf: boom"));
+        let mut pdf = String::from("%PDF-1.4\n");
+        let mut object_offsets = Vec::with_capacity(objects.len() + 1);
+        object_offsets.push(0usize);
+        for object in objects {
+            object_offsets.push(pdf.len());
+            pdf.push_str(&object);
+        }
+
+        let startxref = pdf.len();
+        pdf.push_str(&format!("xref\n0 {}\n", object_offsets.len()));
+        pdf.push_str("0000000000 65535 f \n");
+        for offset in object_offsets.iter().skip(1) {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Root 1 0 R /Size {} >>\nstartxref\n{}\n%%EOF",
+            object_offsets.len(),
+            startxref
+        ));
+        pdf.into_bytes()
+    }
+
+    #[test]
+    fn pdf_page_extraction_failures_become_warnings() {
+        let extracted = extract_pdf_document(
+            Path::new("/tmp/invalid-content.pdf"),
+            &invalid_content_stream_pdf_bytes(),
+        )
+        .expect_err("invalid content stream should not produce readable text");
+
+        let message = extracted.to_string();
+        assert!(message.contains("PDF 文档没有可提取的文本内容"));
+    }
+
+    #[test]
+    fn pdf_page_extraction_surfaces_page_warnings() {
+        let pages = extract_pdf_pages(
+            Path::new("/tmp/invalid-content.pdf"),
+            &invalid_content_stream_pdf_bytes(),
+        )
+        .expect("parse invalid-content pdf container");
+
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].page_number, 1);
+        assert!(pages[0].lines.is_empty());
+        assert!(pages[0]
+            .extraction_warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("page 1 text extraction failed")));
     }
 }

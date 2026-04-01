@@ -1,8 +1,7 @@
-use std::path::PathBuf;
-
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::{future::Future, path::PathBuf, time::Duration};
 use tokio::fs;
 
 use super::{
@@ -68,15 +67,18 @@ pub(super) async fn execute_local_tool_call(
     runtime: &QuestionToolRuntime<'_>,
     call: LocalToolCall,
 ) -> Result<ExecutedToolCall> {
-    let executed = match call.name.as_str() {
-        READ_FILE_TOOL_NAME => execute_read_file_tool(runtime, &call.arguments).await,
-        READ_DOCUMENT_EXCERPT_TOOL_NAME => {
-            execute_read_document_excerpt_tool(runtime, &call.arguments).await
+    let executed = execute_with_local_tool_timeout(&call.name, async {
+        match call.name.as_str() {
+            READ_FILE_TOOL_NAME => execute_read_file_tool(runtime, &call.arguments).await,
+            READ_DOCUMENT_EXCERPT_TOOL_NAME => {
+                execute_read_document_excerpt_tool(runtime, &call.arguments).await
+            }
+            RAG_QUERY_TOOL_NAME => execute_rag_query_tool(runtime, &call.arguments).await,
+            OPEN_TARGET_TOOL_NAME => execute_open_target_tool(runtime, &call.arguments).await,
+            _ => Err(anyhow::anyhow!("未知内置工具: {}", call.name)),
         }
-        RAG_QUERY_TOOL_NAME => execute_rag_query_tool(runtime, &call.arguments).await,
-        OPEN_TARGET_TOOL_NAME => execute_open_target_tool(runtime, &call.arguments).await,
-        _ => Err(anyhow::anyhow!("未知内置工具: {}", call.name)),
-    };
+    })
+    .await;
 
     match executed {
         Ok(mut executed) => {
@@ -99,6 +101,31 @@ pub(super) async fn execute_local_tool_call(
             },
         }),
     }
+}
+
+pub(super) async fn execute_with_timeout<T, F>(
+    tool_name: &str,
+    timeout_duration: Duration,
+    future: F,
+) -> Result<T>
+where
+    F: Future<Output = Result<T>>,
+{
+    match tokio::time::timeout(timeout_duration, future).await {
+        Ok(result) => result,
+        Err(_) => bail!(
+            "内置工具 {} 执行超时（>{} ms）",
+            tool_name,
+            timeout_duration.as_millis()
+        ),
+    }
+}
+
+async fn execute_with_local_tool_timeout<T, F>(tool_name: &str, future: F) -> Result<T>
+where
+    F: Future<Output = Result<T>>,
+{
+    execute_with_timeout(tool_name, super::LOCAL_TOOL_EXECUTION_TIMEOUT, future).await
 }
 
 pub(super) async fn execute_read_file_tool(

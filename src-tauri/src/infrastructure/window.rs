@@ -8,7 +8,10 @@ use tauri::{
 use tokio::time::sleep;
 
 #[cfg(target_os = "macos")]
-use objc2_app_kit::{NSApplication, NSWindowOcclusionState};
+use objc2_app_kit::{
+    NSApplication, NSApplicationActivationOptions, NSRunningApplication, NSWindowOcclusionState,
+    NSWorkspace,
+};
 
 use crate::{
     domain::execution::ExecutionResult,
@@ -19,6 +22,7 @@ use crate::{
 const OCR_ERROR_EVENT: &str = "ocr-error";
 const OCR_TRANSLATION_STARTED_EVENT: &str = "ocr-translation-started";
 const OCR_TRANSLATION_RESULT_EVENT: &str = "ocr-translation-result";
+const OPEN_CLIPBOARD_HISTORY_PANEL_EVENT: &str = "open-clipboard-history-panel";
 const LAUNCHER_VERTICAL_CENTER_RATIO: f64 = 0.382;
 const LAUNCHER_SHOW_RESIZE_REPOSITION_GRACE_PERIOD: Duration = Duration::from_millis(250);
 const LAUNCHER_SHOW_BLUR_AUTO_HIDE_SUPPRESSION_PERIOD: Duration = Duration::from_millis(400);
@@ -125,9 +129,162 @@ struct OcrTranslationResultPayload {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
+pub enum ClipboardHistorySelectionMode {
+    InsertIntoLauncher,
+    PasteExternally,
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenClipboardHistoryPanelPayload {
+    selection_mode: ClipboardHistorySelectionMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ShortcutTranslationSourceMode {
     Ocr,
     Selection,
+}
+
+#[cfg(target_os = "macos")]
+fn frontmost_application_pid() -> Option<i32> {
+    let workspace = NSWorkspace::sharedWorkspace();
+    let frontmost_application = workspace.frontmostApplication()?;
+    Some(frontmost_application.processIdentifier())
+}
+
+#[cfg(target_os = "macos")]
+fn capture_frontmost_application_pid() -> Option<i32> {
+    let frontmost_pid = frontmost_application_pid()?;
+    let current_pid = NSRunningApplication::currentApplication().processIdentifier();
+
+    if frontmost_pid <= 0 || frontmost_pid == current_pid {
+        return None;
+    }
+
+    Some(frontmost_pid)
+}
+
+#[cfg(target_os = "macos")]
+pub fn remember_clipboard_external_paste_target(app: &AppHandle) {
+    let shortcut_state = app.state::<ShortcutRuntimeState>();
+    let target_pid = capture_frontmost_application_pid();
+    shortcut_state.remember_clipboard_external_paste_target_pid(target_pid);
+
+    tracing::info!(
+        target_pid = ?target_pid,
+        "remembered frontmost application for clipboard external paste"
+    );
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn remember_clipboard_external_paste_target(_app: &AppHandle) {}
+
+#[cfg(target_os = "macos")]
+pub fn reactivate_clipboard_external_paste_target(app: &AppHandle) -> Result<Option<i32>> {
+    let shortcut_state = app.state::<ShortcutRuntimeState>();
+    let Some(target_pid) = shortcut_state.take_clipboard_external_paste_target_pid() else {
+        tracing::info!("no remembered external paste target available");
+        return Ok(None);
+    };
+    let window = main_window(app)?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    window
+        .run_on_main_thread(move || {
+            let activated = (|| {
+                let Some(mtm) = objc2::MainThreadMarker::new() else {
+                    tracing::warn!(
+                        target_pid,
+                        "failed to acquire MainThreadMarker for clipboard external paste target activation"
+                    );
+                    return false;
+                };
+
+                let Some(target_application) =
+                    NSRunningApplication::runningApplicationWithProcessIdentifier(
+                        target_pid as libc::pid_t,
+                    )
+                else {
+                    tracing::warn!(
+                        target_pid,
+                        "failed to reacquire remembered application for clipboard external paste"
+                    );
+                    return false;
+                };
+
+                if target_application.isTerminated() {
+                    tracing::warn!(
+                        target_pid,
+                        "remembered application already terminated before clipboard external paste"
+                    );
+                    return false;
+                }
+
+                if target_application.isHidden() {
+                    let unhidden = target_application.unhide();
+                    tracing::info!(
+                        target_pid,
+                        unhidden,
+                        "requested unhide for clipboard paste target"
+                    );
+                }
+
+                let current_application = NSRunningApplication::currentApplication();
+                let shared_application = NSApplication::sharedApplication(mtm);
+                shared_application.yieldActivationToApplication(&target_application);
+                shared_application.deactivate();
+
+                let activation_options = NSApplicationActivationOptions::ActivateAllWindows;
+                let activated = target_application
+                    .activateFromApplication_options(&current_application, activation_options)
+                    || target_application.activateWithOptions(activation_options);
+                tracing::info!(
+                    target_pid,
+                    activated,
+                    current_app_pid = current_application.processIdentifier(),
+                    "requested cooperative activation for clipboard external paste target"
+                );
+                activated
+            })();
+
+            let _ = sender.send(activated);
+        })
+        .context("failed to schedule clipboard external paste target activation on main thread")?;
+
+    let activated = receiver
+        .recv_timeout(Duration::from_millis(250))
+        .context("timed out waiting for clipboard external paste target activation")?;
+
+    Ok(activated.then_some(target_pid))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn reactivate_clipboard_external_paste_target(_app: &AppHandle) -> Result<Option<i32>> {
+    Ok(None)
+}
+
+#[cfg(target_os = "macos")]
+pub async fn wait_for_frontmost_application_pid(target_pid: i32, timeout: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let poll_interval = Duration::from_millis(20);
+
+    loop {
+        if frontmost_application_pid() == Some(target_pid) {
+            return true;
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+
+        sleep(poll_interval).await;
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub async fn wait_for_frontmost_application_pid(_target_pid: i32, _timeout: Duration) -> bool {
+    false
 }
 
 pub fn configure_main_window(window: &WebviewWindow) -> Result<()> {
@@ -443,13 +600,31 @@ pub fn toggle_main_window(app: &AppHandle) -> Result<()> {
         return Ok(());
     }
 
+    reveal_main_window(app)
+}
+
+pub fn reveal_main_window(app: &AppHandle) -> Result<()> {
+    let window = main_window(app)?;
+    let launcher_state = app.state::<ShortcutRuntimeState>();
+    let was_launcher_visible = launcher_state.is_launcher_visible();
+
+    tracing::info!(
+        window_label = window.label(),
+        launcher_visible = was_launcher_visible,
+        "revealing launcher window"
+    );
+
     prepare_main_window_for_show(&window)?;
     launcher_state.cancel_launcher_blur_auto_hide_confirmation();
-    launcher_state.set_launcher_blur_auto_hide_enabled(true);
-    launcher_state.arm_launcher_resize_reposition(LAUNCHER_SHOW_RESIZE_REPOSITION_GRACE_PERIOD);
+
+    if !was_launcher_visible {
+        launcher_state.set_launcher_blur_auto_hide_enabled(true);
+        launcher_state.arm_launcher_resize_reposition(LAUNCHER_SHOW_RESIZE_REPOSITION_GRACE_PERIOD);
+        set_default_window_position(&window)?;
+    }
+
     launcher_state
         .arm_launcher_blur_auto_hide_suppression(LAUNCHER_SHOW_BLUR_AUTO_HIDE_SUPPRESSION_PERIOD);
-    set_default_window_position(&window)?;
     show_window(&window)?;
     order_main_window_front(&window)?;
     launcher_state.set_launcher_visible(true);
@@ -546,6 +721,58 @@ pub fn emit_shortcut_translation_result(
             },
         )
         .context("failed to emit OCR translation result event")?;
+    Ok(())
+}
+
+pub fn show_main_window_with_clipboard_history_panel(app: &AppHandle) -> Result<()> {
+    let window = main_window(app)?;
+    let shortcut_state = app.state::<ShortcutRuntimeState>();
+    let selection_mode = match launcher_is_effectively_foreground(app, shortcut_state.inner()) {
+        Ok(true) => ClipboardHistorySelectionMode::InsertIntoLauncher,
+        Ok(false) => ClipboardHistorySelectionMode::PasteExternally,
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                window_label = window.label(),
+                "failed to inspect launcher foreground state before opening clipboard history"
+            );
+            ClipboardHistorySelectionMode::PasteExternally
+        }
+    };
+
+    if selection_mode == ClipboardHistorySelectionMode::InsertIntoLauncher {
+        #[cfg(target_os = "macos")]
+        shortcut_state.remember_clipboard_external_paste_target_pid(None);
+        shortcut_state.cancel_launcher_blur_auto_hide_confirmation();
+        shortcut_state.arm_launcher_blur_auto_hide_suppression(
+            LAUNCHER_SHOW_BLUR_AUTO_HIDE_SUPPRESSION_PERIOD,
+        );
+        window
+            .emit(
+                OPEN_CLIPBOARD_HISTORY_PANEL_EVENT,
+                OpenClipboardHistoryPanelPayload { selection_mode },
+            )
+            .context("failed to emit clipboard history panel event")?;
+        return Ok(());
+    }
+
+    remember_clipboard_external_paste_target(app);
+    prepare_main_window_for_show(&window)?;
+    shortcut_state.cancel_launcher_blur_auto_hide_confirmation();
+    shortcut_state.set_launcher_blur_auto_hide_enabled(true);
+    shortcut_state.arm_launcher_resize_reposition(LAUNCHER_SHOW_RESIZE_REPOSITION_GRACE_PERIOD);
+    shortcut_state
+        .arm_launcher_blur_auto_hide_suppression(LAUNCHER_SHOW_BLUR_AUTO_HIDE_SUPPRESSION_PERIOD);
+    set_default_window_position(&window)?;
+    show_window(&window)?;
+    order_main_window_front(&window)?;
+    window
+        .emit(
+            OPEN_CLIPBOARD_HISTORY_PANEL_EVENT,
+            OpenClipboardHistoryPanelPayload { selection_mode },
+        )
+        .context("failed to emit clipboard history panel event")?;
+    shortcut_state.set_launcher_visible(true);
     Ok(())
 }
 

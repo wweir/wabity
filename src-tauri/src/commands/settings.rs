@@ -5,6 +5,7 @@ use tauri::{
 use tracing::error;
 
 use crate::{
+    app,
     domain::settings::{
         AppSettings, BuiltinLlmProviderTemplate, LlmProviderConfig, LlmProviderModelEntry,
     },
@@ -47,6 +48,49 @@ pub async fn set_app_settings(
                 Ok(_) => Err(format!("开机自启动同步失败：{sync_error}")),
                 Err(rollback_error) => Err(format!(
                     "开机自启动同步失败：{sync_error}；回滚配置也失败：{rollback_error}"
+                )),
+            };
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    if previous_settings.general.show_in_dock != saved_settings.general.show_in_dock {
+        if let Err(sync_error) =
+            app::sync_macos_app_visibility(&app, saved_settings.general.show_in_dock)
+        {
+            error!(
+                ?sync_error,
+                show_in_dock = saved_settings.general.show_in_dock,
+                "failed to sync Dock visibility after settings update"
+            );
+
+            if previous_settings.general.auto_start != saved_settings.general.auto_start {
+                if let Err(rollback_autostart_error) =
+                    autostart::sync_autostart(&app, previous_settings.general.auto_start)
+                {
+                    error!(
+                        ?rollback_autostart_error,
+                        enabled = previous_settings.general.auto_start,
+                        "failed to roll back autostart after Dock visibility sync failure"
+                    );
+                }
+            }
+
+            if let Err(rollback_visibility_error) =
+                app::sync_macos_app_visibility(&app, previous_settings.general.show_in_dock)
+            {
+                error!(
+                    ?rollback_visibility_error,
+                    show_in_dock = previous_settings.general.show_in_dock,
+                    "failed to roll back Dock visibility after sync failure"
+                );
+            }
+
+            let rollback_result = state.update_app_settings(previous_settings.clone()).await;
+            return match rollback_result {
+                Ok(_) => Err(format!("Dock 显示状态同步失败：{sync_error}")),
+                Err(rollback_error) => Err(format!(
+                    "Dock 显示状态同步失败：{sync_error}；回滚配置也失败：{rollback_error}"
                 )),
             };
         }

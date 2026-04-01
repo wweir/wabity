@@ -7,7 +7,7 @@ import {
 	getAppSettings,
 	getAcpAgents,
 	getAcpMcpServers,
-	getBuiltinRagMcpServerStatus,
+	getBuiltinMcpServerStatus,
 	getPublicSkillCatalog,
 	getShortcut,
 	getWorkspace,
@@ -25,8 +25,9 @@ import {
 import type {
 	AppSettings,
 	AppearanceSettings,
+	BuiltinMcpConfig,
+	BuiltinMcpServerStatus,
 	BuiltinLlmProviderTemplate,
-	BuiltinRagMcpServerStatus,
 	GeneralSettings,
 	LlmProviderConfig,
 	LlmProviderModelEntry,
@@ -83,7 +84,7 @@ import {
 } from "./settingsTypes";
 import {
 	applyLlmProviderKind,
-	applyBuiltinTemplateModelToProvider,
+	applyBuiltinTemplateModelMetadata,
 	applyBuiltinTemplateToProvider,
 	buildAcpDraftSnapshot,
 	buildAgentCommand,
@@ -116,19 +117,15 @@ import {
 	detachBuiltinTemplateFromProvider,
 	extraRagIgnoreGlobPlaceholder,
 	findBuiltinTemplate,
-	findBuiltinTemplateModel,
+	findBuiltinTemplateModelByModelName,
 	findFirstAcpIssue,
 	findFirstLlmIssue,
 	findFirstMcpIssue,
 	formatTextLines,
 	getErrorMessage,
-	getFirstSelectableBuiltinTemplateModel,
 	getLlmProviderKind,
 	getLlmProviderKindLabel,
 	getLlmProviderModelPlaceholder,
-	getLlmProviderUsageBadges,
-	getLlmProviderUsageDescription,
-	getSelectableBuiltinTemplateModels,
 	normalizeRagIgnoreGlobs,
 	normalizeRecordedShortcutKey,
 	parseTextLines,
@@ -188,6 +185,10 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 	const [llmModelErrors, setLlmModelErrors] = useState<Record<string, string>>({});
 	const [loadingLlmModelProviderId, setLoadingLlmModelProviderId] = useState<string | null>(null);
 	const [openLlmModelPickerId, setOpenLlmModelPickerId] = useState<string | null>(null);
+	const pendingLlmModelOptionFocusRef = useRef<{
+		providerId: string;
+		target: "selected" | "first" | "last";
+	} | null>(null);
 	const [ragSettings, setRagSettings] = useState<RagSettings>(createDefaultRagSettings);
 	const [savedRagSnapshot, setSavedRagSnapshot] = useState(() =>
 		buildRagDraftSnapshot(createDefaultRagSettings()),
@@ -208,13 +209,19 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 	const [selectedMcpTransport, setSelectedMcpTransport] = useState<McpTransport>("stdio");
 	const [mcpServers, setMcpServersState] = useState<AcpMcpServerDraft[]>([]);
 	const [selectedMcpServerId, setSelectedMcpServerId] = useState<string | null>(null);
-	const [savedMcpSnapshot, setSavedMcpSnapshot] = useState(() => buildMcpDraftSnapshot([]));
+	const [savedMcpSnapshot, setSavedMcpSnapshot] = useState(() =>
+		buildMcpDraftSnapshot([], { enabled: false, enabledModules: [] }),
+	);
 	const [savedMcpState, setSavedMcpState] = useState<SavedMcpDraftState>(() =>
-		buildSavedMcpDraftState([]),
+		buildSavedMcpDraftState([], { enabled: false, enabledModules: [] }),
 	);
 	const [mcpNotice, setMcpNotice] = useState<AcpInlineNotice | null>(null);
-	const [builtinRagMcpServerStatus, setBuiltinRagMcpServerStatus] =
-		useState<BuiltinRagMcpServerStatus | null>(null);
+	const [builtinMcpConfig, setBuiltinMcpConfig] = useState<BuiltinMcpConfig>({
+		enabled: false,
+		enabledModules: [],
+	});
+	const [builtinMcpServerStatus, setBuiltinMcpServerStatus] =
+		useState<BuiltinMcpServerStatus | null>(null);
 	const [skillCatalog, setSkillCatalog] = useState<PublicSkillCatalog>({
 		rootPath: "~/.agents/skills",
 		exists: false,
@@ -509,17 +516,30 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		});
 	}
 
+	function queueLlmModelOptionFocus(providerId: string, target: "selected" | "first" | "last") {
+		pendingLlmModelOptionFocusRef.current = { providerId, target };
+	}
+
 	function findLlmModelOption(providerId: string, model: string) {
 		return (llmModelOptions[providerId] ?? []).find((option) => option.id === model) ?? null;
 	}
 
 	async function handleFetchLlmProviderModels(
 		provider: LlmProviderConfig,
-		options?: { openField?: LlmModelFieldKey },
+		options?: {
+			openField?: LlmModelFieldKey;
+			focusOptionTarget?: "selected" | "first" | "last";
+		},
 	) {
-		if (providerUsesBuiltinTemplate(provider)) {
+		const builtinTemplate = providerUsesBuiltinTemplate(provider)
+			? findBuiltinTemplate(builtinLlmTemplates, provider.builtinPresetId)
+			: null;
+		if (builtinTemplate && !builtinTemplate.supportsModelListing) {
 			if (options?.openField) {
 				setOpenLlmModelPickerId(buildLlmModelPickerId(provider.id, options.openField));
+				if (options.focusOptionTarget) {
+					queueLlmModelOptionFocus(provider.id, options.focusOptionTarget);
+				}
 			}
 			return;
 		}
@@ -556,6 +576,9 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 			}
 			if (options?.openField && models.length > 0) {
 				setOpenLlmModelPickerId(buildLlmModelPickerId(provider.id, options.openField));
+				if (options.focusOptionTarget) {
+					queueLlmModelOptionFocus(provider.id, options.focusOptionTarget);
+				}
 			}
 		} catch (error: unknown) {
 			setLlmModelErrors((current) => ({
@@ -572,10 +595,35 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		}
 	}
 
-	async function handleToggleLlmModelMenu(provider: LlmProviderConfig, fieldKey: LlmModelFieldKey) {
-		if (providerUsesBuiltinTemplate(provider)) {
-			const pickerId = buildLlmModelPickerId(provider.id, fieldKey);
-			setOpenLlmModelPickerId((current) => (current === pickerId ? null : pickerId));
+	function focusLlmModelControl(providerId: string, target: "input" | "button") {
+		const elementId =
+			target === "button" ? `llm-provider-model-toggle-${providerId}` : "llm-provider-model";
+		document.getElementById(elementId)?.focus();
+	}
+
+	async function handleToggleLlmModelMenu(
+		provider: LlmProviderConfig,
+		fieldKey: LlmModelFieldKey,
+		options?: {
+			focusOptionTarget?: "selected" | "first" | "last";
+			returnFocusTarget?: "input" | "button";
+		},
+	) {
+		const pickerId = buildLlmModelPickerId(provider.id, fieldKey);
+		const shouldOpen = openLlmModelPickerId !== pickerId;
+		const builtinTemplate = providerUsesBuiltinTemplate(provider)
+			? findBuiltinTemplate(builtinLlmTemplates, provider.builtinPresetId)
+			: null;
+
+		if (builtinTemplate && !builtinTemplate.supportsModelListing) {
+			setOpenLlmModelPickerId(shouldOpen ? pickerId : null);
+			if (shouldOpen && options?.focusOptionTarget) {
+				queueLlmModelOptionFocus(provider.id, options.focusOptionTarget);
+			}
+			if (!shouldOpen && options?.returnFocusTarget) {
+				pendingLlmModelOptionFocusRef.current = null;
+				focusLlmModelControl(provider.id, options.returnFocusTarget);
+			}
 			return;
 		}
 
@@ -585,12 +633,21 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 
 		const models = llmModelOptions[provider.id] ?? [];
 		if (models.length === 0) {
-			await handleFetchLlmProviderModels(provider, { openField: fieldKey });
+			await handleFetchLlmProviderModels(provider, {
+				openField: fieldKey,
+				focusOptionTarget: options?.focusOptionTarget,
+			});
 			return;
 		}
 
-		const pickerId = buildLlmModelPickerId(provider.id, fieldKey);
-		setOpenLlmModelPickerId((current) => (current === pickerId ? null : pickerId));
+		setOpenLlmModelPickerId(shouldOpen ? pickerId : null);
+		if (shouldOpen && options?.focusOptionTarget) {
+			queueLlmModelOptionFocus(provider.id, options.focusOptionTarget);
+		}
+		if (!shouldOpen && options?.returnFocusTarget) {
+			pendingLlmModelOptionFocusRef.current = null;
+			focusLlmModelControl(provider.id, options.returnFocusTarget);
+		}
 	}
 
 	function handleLlmModelOptionClick(
@@ -601,19 +658,30 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		setLlmSettings((current) =>
 			reconcileLlmSettings({
 				...current,
-				providers: current.providers.map((provider) =>
-					provider.id === providerId
-						? {
-								...provider,
-								[fieldKey]: option.id,
-								modelIdentityHint: option.identityHint,
-							}
-						: provider,
-				),
+				providers: current.providers.map((provider) => {
+					if (provider.id !== providerId) {
+						return provider;
+					}
+
+					const nextProvider = {
+						...provider,
+						[fieldKey]: option.id,
+						modelIdentityHint: option.identityHint,
+					};
+					const template = providerUsesBuiltinTemplate(nextProvider)
+						? findBuiltinTemplate(builtinLlmTemplates, nextProvider.builtinPresetId)
+						: null;
+					return applyBuiltinTemplateModelMetadata(
+						nextProvider,
+						findBuiltinTemplateModelByModelName(template, option.id),
+					);
+				}),
 			}),
 		);
 		setOpenLlmModelPickerId(null);
 		setSettingsError(null);
+		pendingLlmModelOptionFocusRef.current = null;
+		focusLlmModelControl(providerId, "input");
 	}
 
 	function handleLlmModelInputKeyDown(
@@ -630,10 +698,10 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 				return;
 			}
 
-			void (async () => {
-				await handleToggleLlmModelMenu(provider, fieldKey);
-				focusLlmModelOption(provider.id, focusTarget);
-			})();
+			void handleToggleLlmModelMenu(provider, fieldKey, {
+				focusOptionTarget: focusTarget,
+				returnFocusTarget: "input",
+			});
 			return;
 		}
 
@@ -700,23 +768,25 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 			const draftServers = catalog.servers.map(createMcpServerDraftFromConfig);
 			applyMcpServerDrafts(draftServers, draftServers[0]?.id ?? null);
 			setMcpPanelMode(draftServers.length > 0 ? "edit" : "create");
-			setSavedMcpSnapshot(buildMcpDraftSnapshot(draftServers));
-			setSavedMcpState(buildSavedMcpDraftState(draftServers));
+			setBuiltinMcpConfig(catalog.builtin);
+			setSavedMcpSnapshot(buildMcpDraftSnapshot(draftServers, catalog.builtin));
+			setSavedMcpState(buildSavedMcpDraftState(draftServers, catalog.builtin));
 		});
-		void getBuiltinRagMcpServerStatus()
+		void getBuiltinMcpServerStatus()
 			.then((status) => {
-				setBuiltinRagMcpServerStatus(status);
+				setBuiltinMcpServerStatus(status);
 			})
 			.catch((error: unknown) => {
-				setBuiltinRagMcpServerStatus({
+				setBuiltinMcpServerStatus({
 					server: {
 						transport: "http",
-						name: "Wabity RAG Query",
-						url: "http://127.0.0.1:43189/internal/mcp/rag",
+						name: "Wabity Built-in MCP",
+						url: "http://127.0.0.1:43189/internal/mcp",
 						headers: [],
 					},
 					running: false,
-					lastError: getErrorMessage(error, "内置 RAG MCP server 状态读取失败"),
+					lastError: getErrorMessage(error, "内置 MCP server 状态读取失败"),
+					availableModules: [],
 				});
 			});
 		void getPublicSkillCatalog()
@@ -835,6 +905,20 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 			setOpenLlmModelPickerId(null);
 		}
 	}, [llmSettings.providers, openLlmModelPickerId]);
+
+	useEffect(() => {
+		const pendingFocus = pendingLlmModelOptionFocusRef.current;
+		if (!pendingFocus || openLlmModelPickerId === null) {
+			return;
+		}
+
+		if (!openLlmModelPickerId.startsWith(`${pendingFocus.providerId}:`)) {
+			return;
+		}
+
+		pendingLlmModelOptionFocusRef.current = null;
+		focusLlmModelOption(pendingFocus.providerId, pendingFocus.target);
+	}, [llmModelOptions, openLlmModelPickerId]);
 
 	useEffect(() => {
 		function handlePointerDown(event: MouseEvent) {
@@ -998,7 +1082,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 	const ragHasUnsavedChanges = ragDraftSnapshot !== savedRagSnapshot;
 	const acpDraftSnapshot = buildAcpDraftSnapshot(acpAgents);
 	const acpHasUnsavedChanges = acpDraftSnapshot !== savedAcpSnapshot;
-	const mcpDraftSnapshot = buildMcpDraftSnapshot(mcpServers);
+	const mcpDraftSnapshot = buildMcpDraftSnapshot(mcpServers, builtinMcpConfig);
 	const mcpHasUnsavedChanges = mcpDraftSnapshot !== savedMcpSnapshot;
 	const selectedLlmProvider =
 		llmSettings.providers.find((provider) => provider.id === selectedLlmProviderId) ?? null;
@@ -1008,25 +1092,18 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		builtinLlmTemplates,
 		selectedLlmProvider?.builtinPresetId,
 	);
-	const selectedBuiltinLlmTemplateModel = findBuiltinTemplateModel(
+	const selectedBuiltinLlmTemplateModel = findBuiltinTemplateModelByModelName(
 		selectedBuiltinLlmTemplate,
-		selectedLlmProvider?.builtinPresetModelId,
-	);
-	const selectedBuiltinLlmSelectableModels = getSelectableBuiltinTemplateModels(
-		selectedBuiltinLlmTemplate,
+		selectedLlmProvider?.model,
 	);
 	const selectedLlmProviderKind = selectedLlmProvider
 		? getLlmProviderKind(selectedLlmProvider)
 		: null;
 	const selectedLlmProviderModels = selectedLlmProvider
-		? selectedLlmProviderIsBuiltin
-			? []
-			: (llmModelOptions[selectedLlmProvider.id] ?? [])
+		? (llmModelOptions[selectedLlmProvider.id] ?? [])
 		: [];
 	const selectedLlmProviderModelsError = selectedLlmProvider
-		? selectedLlmProviderIsBuiltin
-			? null
-			: (llmModelErrors[selectedLlmProvider.id] ?? null)
+		? (llmModelErrors[selectedLlmProvider.id] ?? null)
 		: null;
 	const isLoadingSelectedLlmProviderModels =
 		selectedLlmProvider !== null && loadingLlmModelProviderId === selectedLlmProvider.id;
@@ -1080,8 +1157,8 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		.join("、");
 	const ragStatusTitle = ragHasUnsavedChanges ? "有未保存的更改" : "已同步";
 	const ragStatusDescription = ragHasUnsavedChanges
-		? "保存后写回 Embedding、扫描目录和忽略规则。"
-		: "当前配置已落盘；需要时手动重建索引。";
+		? "保存后写回 Embedding、目录和忽略规则。"
+		: "配置已写入本地；需要时再手动重建。";
 	const ragSummaryItems: Array<{ label: string; value: string }> = [
 		{ label: "扫描目录", value: `${ragSourceDirectoryCount} 个` },
 		{ label: "额外忽略", value: `${ragExtraIgnoreGlobCount} 条` },
@@ -1117,14 +1194,16 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		llm: llmHasUnsavedChanges ? "有草稿" : `${llmSettings.providers.length} 条`,
 		rag: ragHasUnsavedChanges ? "有草稿" : `目录 ${ragSourceDirectoryCount}`,
 		acp: acpHasUnsavedChanges ? "有草稿" : `${acpAgents.length} 个 Agent`,
-		mcp: mcpHasUnsavedChanges ? "有草稿" : `${mcpServers.length} 个服务`,
+		mcp: mcpHasUnsavedChanges
+			? "有草稿"
+			: `${mcpServers.length} 个服务 / ${builtinMcpConfig.enabledModules.length} 个内置模块`,
 		skills: skillCatalog.exists ? `${skillCatalog.skills.length} 个 skill` : "只读",
 		about: "只读",
 	};
 	const sectionDescriptionText: Record<SettingsSectionId, string> = {
 		general: "快捷键、通知、外观和 OCR。",
 		prompts: "翻译与文档问答。",
-		llm: "维护可复用的模型条目。",
+		llm: "维护可复用的模型接入条目。",
 		rag: "索引输入、目录与重建。",
 		acp: "本地 Agent 启动命令。",
 		mcp: "全局 MCP 服务清单。",
@@ -1139,35 +1218,14 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 	const selectedMcpIssueCount = selectedMcpServer
 		? (mcpValidation.serverIssues[selectedMcpServer.id]?.length ?? 0)
 		: 0;
-	const builtinRagMcpServerHttpUrl =
-		builtinRagMcpServerStatus?.server.transport === "http"
-			? builtinRagMcpServerStatus.server.url.trim()
-			: null;
-	const builtinRagMcpServer =
-		builtinRagMcpServerHttpUrl !== null
-			? (mcpServers.find(
-					(server) =>
-						server.transport === "http" && server.url.trim() === builtinRagMcpServerHttpUrl,
-				) ?? null)
-			: null;
-	const builtinRagMcpConfigured = builtinRagMcpServer !== null;
-	const regularMcpServers =
-		builtinRagMcpServerHttpUrl === null
-			? mcpServers
-			: mcpServers.filter(
-					(server) =>
-						!(server.transport === "http" && server.url.trim() === builtinRagMcpServerHttpUrl),
-				);
-	const builtinRagMcpIssueCount = builtinRagMcpServer
-		? (mcpValidation.serverIssues[builtinRagMcpServer.id]?.length ?? 0)
-		: 0;
-	const builtinRagMcpTransportMeta =
-		builtinRagMcpServerStatus !== null
-			? getMcpTransportMeta(builtinRagMcpServerStatus.server.transport)
+	const regularMcpServers = mcpServers;
+	const builtinMcpTransportMeta =
+		builtinMcpServerStatus !== null
+			? getMcpTransportMeta(builtinMcpServerStatus.server.transport)
 			: getMcpTransportMeta("http");
-	const builtinRagMcpToggleDisabled =
-		!builtinRagMcpConfigured &&
-		(!builtinRagMcpServerStatus?.running || builtinRagMcpServerStatus.server.transport !== "http");
+	const builtinMcpToggleDisabled =
+		!builtinMcpConfig.enabled &&
+		(!builtinMcpServerStatus?.running || builtinMcpServerStatus.server.transport !== "http");
 	const selectedSkill = skillCatalog.skills.find((skill) => skill.id === selectedSkillId) ?? null;
 	const selectedLlmFieldIssues = selectedLlmProvider
 		? (llmValidation.providerFieldIssues[selectedLlmProvider.id] ?? {})
@@ -1342,7 +1400,10 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		setSettingsError(null);
 		setMcpNotice(null);
 		try {
-			const nextCatalog = await setAcpMcpServers(mcpServers.map(serializeMcpServerDraft));
+			const nextCatalog = await setAcpMcpServers(
+				mcpServers.map(serializeMcpServerDraft),
+				builtinMcpConfig,
+			);
 			const nextDraftServers = nextCatalog.servers.map(createMcpServerDraftFromConfig);
 			const nextSelectedServerId = nextDraftServers.some(
 				(server) => server.id === selectedMcpServerId,
@@ -1351,8 +1412,9 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 				: (nextDraftServers[0]?.id ?? null);
 			applyMcpServerDrafts(nextDraftServers, nextSelectedServerId);
 			setMcpPanelMode(nextSelectedServerId ? "edit" : "create");
-			setSavedMcpSnapshot(buildMcpDraftSnapshot(nextDraftServers));
-			setSavedMcpState(buildSavedMcpDraftState(nextDraftServers));
+			setBuiltinMcpConfig(nextCatalog.builtin);
+			setSavedMcpSnapshot(buildMcpDraftSnapshot(nextDraftServers, nextCatalog.builtin));
+			setSavedMcpState(buildSavedMcpDraftState(nextDraftServers, nextCatalog.builtin));
 		} catch (error: unknown) {
 			setSettingsError(getErrorMessage(error, "MCP 配置保存失败"));
 		} finally {
@@ -1437,6 +1499,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 	function handleDiscardMcpDraft() {
 		const restored = cloneSavedMcpDraftState(savedMcpState);
 		setMcpNotice(null);
+		setBuiltinMcpConfig(restored.builtin);
 		const nextSelectedServerId = restored.servers.some(
 			(server) => server.id === selectedMcpServerId,
 		)
@@ -1560,7 +1623,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 				rag: persistedAppSettings.rag,
 			},
 			setSavingLlm,
-			"LLM 配置保存失败",
+			"模型接入配置保存失败",
 			{
 				adoptPromptKeys: [],
 				adoptLlmProviders: true,
@@ -1642,6 +1705,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		setSettingsError(null);
 		try {
 			const saved = await setAppSettings(nextSettings);
+			const nextSavedLlmSettings = reconcileLlmSettings(saved.llm);
 			setGeneralSettings(saved.general);
 			setNotificationSettings(saved.notification);
 			syncAppearanceState(saved.appearance);
@@ -1658,16 +1722,18 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 			) {
 				setLlmSettings((current) =>
 					reconcileLlmSettings({
-						providers: options.adoptLlmProviders ? saved.llm.providers : current.providers,
+						providers: options.adoptLlmProviders
+							? nextSavedLlmSettings.providers
+							: current.providers,
 						translationProviderId:
 							options.adoptProviderDependencies ||
 							options.adoptLlmRouteKeys.includes("translationProviderId")
-								? saved.llm.translationProviderId
+								? nextSavedLlmSettings.translationProviderId
 								: current.translationProviderId,
 						questionAnswerProviderId:
 							options.adoptProviderDependencies ||
 							options.adoptLlmRouteKeys.includes("questionAnswerProviderId")
-								? saved.llm.questionAnswerProviderId
+								? nextSavedLlmSettings.questionAnswerProviderId
 								: current.questionAnswerProviderId,
 					}),
 				);
@@ -1694,23 +1760,26 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 			}
 			if (options.adoptLlmProviders) {
 				setSelectedLlmProviderId(
-					saved.llm.providers.some((provider) => provider.id === selectedLlmProviderId)
+					nextSavedLlmSettings.providers.some((provider) => provider.id === selectedLlmProviderId)
 						? selectedLlmProviderId
-						: (saved.llm.providers[0]?.id ?? null),
+						: (nextSavedLlmSettings.providers[0]?.id ?? null),
 				);
-				setSavedLlmSnapshot(buildLlmDraftSnapshot(saved.llm));
-				setSavedLlmState(buildSavedLlmDraftState(saved.llm.providers));
+				setSavedLlmSnapshot(buildLlmDraftSnapshot(nextSavedLlmSettings));
+				setSavedLlmState(buildSavedLlmDraftState(nextSavedLlmSettings.providers));
 			}
 			if (options.adoptOcr) {
 				setOcrSettings(saved.ocr);
 			}
 			if (options.adoptRag) {
-				const nextRagSettings = reconcileRagSettings(saved.rag, saved.llm.providers);
+				const nextRagSettings = reconcileRagSettings(saved.rag, nextSavedLlmSettings.providers);
 				setRagSettings(nextRagSettings);
 				setSavedRagSnapshot(buildRagDraftSnapshot(nextRagSettings));
 				setSavedRagState(buildSavedRagDraftState(nextRagSettings));
 			}
-			setPersistedAppSettings(saved);
+			setPersistedAppSettings({
+				...saved,
+				llm: nextSavedLlmSettings,
+			});
 		} catch (error: unknown) {
 			setSettingsError(getErrorMessage(error, fallbackMessage));
 		} finally {
@@ -1789,12 +1858,19 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 						return provider;
 					}
 
-					const nextProvider = { ...provider, [key]: value };
+					let nextProvider = { ...provider, [key]: value };
 					if (key === "baseUrl" || key === "apiKey") {
 						nextProvider.modelIdentityHint = null;
 					} else if (key === "model") {
 						nextProvider.modelIdentityHint =
 							findLlmModelOption(providerId, String(value))?.identityHint ?? null;
+						const template = providerUsesBuiltinTemplate(nextProvider)
+							? findBuiltinTemplate(builtinLlmTemplates, nextProvider.builtinPresetId)
+							: null;
+						nextProvider = applyBuiltinTemplateModelMetadata(
+							nextProvider,
+							findBuiltinTemplateModelByModelName(template, String(value)),
+						);
 					}
 
 					return nextProvider;
@@ -1819,38 +1895,17 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 					}
 
 					const template = findBuiltinTemplate(builtinLlmTemplates, templateId);
-					const nextModel = getFirstSelectableBuiltinTemplateModel(template);
-					if (!template || !nextModel) {
+					if (!template) {
 						return provider;
 					}
 
-					return applyBuiltinTemplateToProvider(provider, template, nextModel);
+					return applyBuiltinTemplateModelMetadata(
+						applyBuiltinTemplateToProvider(provider, template),
+						findBuiltinTemplateModelByModelName(template, provider.model),
+					);
 				}),
 			}),
 		);
-		setSettingsError(null);
-	}
-
-	function handleBuiltinTemplateModelChange(providerId: string, modelId: string) {
-		setLlmSettings((current) =>
-			reconcileLlmSettings({
-				...current,
-				providers: current.providers.map((provider) => {
-					if (provider.id !== providerId) {
-						return provider;
-					}
-
-					const template = findBuiltinTemplate(builtinLlmTemplates, provider.builtinPresetId);
-					const nextModel = findBuiltinTemplateModel(template, modelId);
-					if (!template || !nextModel || !nextModel.selectableInCurrentApp) {
-						return provider;
-					}
-
-					return applyBuiltinTemplateModelToProvider(provider, template, nextModel);
-				}),
-			}),
-		);
-		setOpenLlmModelPickerId(null);
 		setSettingsError(null);
 	}
 
@@ -1887,7 +1942,12 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 			reconcileLlmSettings({
 				...current,
 				providers: current.providers.map((provider) =>
-					provider.id === providerId ? applyLlmProviderKind(provider, kind) : provider,
+					provider.id === providerId
+						? {
+								...applyLlmProviderKind(provider, kind),
+								builtinPresetModelId: null,
+							}
+						: provider,
 				),
 			}),
 		);
@@ -1977,78 +2037,34 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		handleAddMcpServer(selectedMcpTransport);
 	}
 
-	function handleAddBuiltinRagMcpServer() {
-		const status = builtinRagMcpServerStatus;
-		if (!status || status.server.transport !== "http") {
+	function handleToggleBuiltinMcp(enabled: boolean) {
+		setMcpNotice(null);
+		if (enabled && !builtinMcpServerStatus?.running) {
 			setMcpNotice({
 				tone: "warn",
-				text: "内置 RAG MCP server 信息不可用，暂时不能直接填充。",
-			});
-			return;
-		}
-		if (!status.running) {
-			setMcpNotice({
-				tone: "warn",
-				text: status.lastError || "内置 RAG MCP server 还没运行成功，先修复运行状态。",
+				text: builtinMcpServerStatus?.lastError || "内置 MCP server 还没运行成功，先修复运行状态。",
 			});
 			return;
 		}
 
-		const existingServer = mcpServers.find((server) => {
-			if (server.transport !== "http" || status.server.transport !== "http") {
-				return false;
-			}
-
-			return server.url.trim() === status.server.url.trim();
-		});
-		if (existingServer) {
-			setMcpNotice({
-				tone: "warn",
-				text: "Wabity RAG Query 已存在，不需要重复添加。",
-			});
-			queueMcpFieldFocus(existingServer.id, "name");
-			return;
-		}
-
-		const nextServer = createMcpServerDraftFromConfig(status.server);
-		setMcpNotice({
-			tone: "info",
-			text: "已加入内置 RAG Query，继续检查后保存即可。",
-		});
-		applyMcpServerDrafts([...mcpServers, nextServer], nextServer.id);
-		setMcpPanelMode("edit");
-		queueMcpFieldFocus(nextServer.id, "name");
+		setBuiltinMcpConfig((current) => ({
+			...current,
+			enabled,
+		}));
 	}
 
-	function handleRemoveBuiltinRagMcpServer() {
-		if (!builtinRagMcpServer) {
-			setMcpNotice({
-				tone: "warn",
-				text: "内置 RAG Query 还没加入草稿，不需要移除。",
-			});
-			return;
-		}
-
-		setMcpNotice({
-			tone: "info",
-			text: "已从 MCP 草稿移除内置 RAG Query。",
+	function handleToggleBuiltinMcpModule(moduleKey: BuiltinMcpConfig["enabledModules"][number]) {
+		setMcpNotice(null);
+		setBuiltinMcpConfig((current) => {
+			const nextEnabledModules = current.enabledModules.includes(moduleKey)
+				? current.enabledModules.filter((key) => key !== moduleKey)
+				: [...current.enabledModules, moduleKey];
+			nextEnabledModules.sort();
+			return {
+				...current,
+				enabledModules: nextEnabledModules,
+			};
 		});
-		const nextServers = mcpServers.filter((server) => server.id !== builtinRagMcpServer.id);
-		const nextSelectedServerId =
-			selectedMcpServerId === builtinRagMcpServer.id
-				? (nextServers[0]?.id ?? null)
-				: selectedMcpServerId;
-		applyMcpServerDrafts(nextServers, nextSelectedServerId);
-		setMcpPanelMode(nextSelectedServerId ? "edit" : "create");
-	}
-
-	function handleToggleBuiltinRagMcpServer(enabled: boolean) {
-		if (enabled) {
-			handleAddBuiltinRagMcpServer();
-			return;
-		}
-
-		handleRemoveBuiltinRagMcpServer();
 	}
 
 	function handleAddPresetAgent(option: (typeof acpAgentOptions)[number]) {
@@ -2265,8 +2281,6 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 									getLlmProviderKind={getLlmProviderKind}
 									getLlmProviderKindLabel={getLlmProviderKindLabel}
 									getLlmProviderModelPlaceholder={getLlmProviderModelPlaceholder}
-									getLlmProviderUsageBadges={getLlmProviderUsageBadges}
-									getLlmProviderUsageDescription={getLlmProviderUsageDescription}
 									isLoadingSelectedLlmProviderModels={isLoadingSelectedLlmProviderModels}
 									llmHasUnsavedChanges={llmHasUnsavedChanges}
 									llmModelMenuRef={llmModelMenuRef}
@@ -2274,7 +2288,6 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 									llmValidation={llmValidation}
 									onAddLlmProvider={handleAddLlmProvider}
 									onBuiltinProviderManagedBaseUrlChange={handleBuiltinProviderManagedBaseUrlChange}
-									onBuiltinTemplateModelChange={handleBuiltinTemplateModelChange}
 									onDiscardLlmDraft={handleDiscardLlmDraft}
 									onFetchLlmProviderModels={handleFetchLlmProviderModels}
 									onLlmModelInputKeyDown={handleLlmModelInputKeyDown}
@@ -2293,7 +2306,6 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 									providerHasResponsesModel={providerHasResponsesModel}
 									providerIsLlmModel={providerIsLlmModel}
 									savingLlm={savingLlm}
-									selectedBuiltinLlmSelectableModels={selectedBuiltinLlmSelectableModels}
 									selectedBuiltinLlmTemplate={selectedBuiltinLlmTemplate}
 									selectedBuiltinLlmTemplateModel={selectedBuiltinLlmTemplateModel}
 									selectedLlmFieldIssues={selectedLlmFieldIssues}
@@ -2374,17 +2386,14 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 									bindAcpFieldRef={bindAcpFieldRef}
 									bindMcpListOptionRef={bindMcpListOptionRef}
 									bindSectionBlockRef={bindSectionBlockRef}
-									builtinRagMcpConfigured={builtinRagMcpConfigured}
-									builtinRagMcpIssueCount={builtinRagMcpIssueCount}
-									builtinRagMcpServer={builtinRagMcpServer}
-									builtinRagMcpServerStatus={builtinRagMcpServerStatus}
-									builtinRagMcpToggleDisabled={builtinRagMcpToggleDisabled}
-									builtinRagMcpTransportMeta={builtinRagMcpTransportMeta}
+									builtinMcpConfig={builtinMcpConfig}
+									builtinMcpServerStatus={builtinMcpServerStatus}
+									builtinMcpToggleDisabled={builtinMcpToggleDisabled}
+									builtinMcpTransportMeta={builtinMcpTransportMeta}
 									isMcpCreateMode={isMcpCreateMode}
 									isMcpEditMode={isMcpEditMode}
 									mcpHasUnsavedChanges={mcpHasUnsavedChanges}
 									mcpNotice={mcpNotice}
-									mcpServers={mcpServers}
 									mcpValidation={mcpValidation}
 									onApplyMcpTransportSelection={handleApplyMcpTransportSelection}
 									onDiscardMcpDraft={handleDiscardMcpDraft}
@@ -2396,7 +2405,8 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 									onReturnToCurrentMcp={handleReturnToCurrentMcp}
 									onSaveMcp={handleSaveMcp}
 									onSelectMcpServer={selectMcpServer}
-									onToggleBuiltinRagMcpServer={handleToggleBuiltinRagMcpServer}
+									onToggleBuiltinMcp={handleToggleBuiltinMcp}
+									onToggleBuiltinMcpModule={handleToggleBuiltinMcpModule}
 									regularMcpServers={regularMcpServers}
 									savingMcp={savingMcp}
 									selectedMcpFieldIssues={selectedMcpFieldIssues}

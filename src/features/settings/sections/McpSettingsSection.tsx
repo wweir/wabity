@@ -1,8 +1,7 @@
 import type { Dispatch, KeyboardEvent as ReactKeyboardEvent, SetStateAction } from "react";
-import type { BuiltinRagMcpServerStatus } from "../../../lib/tauri/types";
+import type { BuiltinMcpConfig, BuiltinMcpServerStatus } from "../../../lib/tauri/types";
 import {
 	DISCARD_DRAFT_BUTTON_LABEL,
-	SettingsDraftActionCard,
 	buildFieldIssueId,
 	getMcpServerDraftTitle,
 	getMcpTransportMeta,
@@ -30,7 +29,6 @@ import type {
 export interface McpSettingsSectionProps {
 	bindSectionBlockRef: BindSectionBlockRef;
 	mcpNotice: AcpInlineNotice | null;
-	mcpServers: AcpMcpServerDraft[];
 	regularMcpServers: AcpMcpServerDraft[];
 	selectedMcpServerId: string | null;
 	selectedMcpServer: AcpMcpServerDraft | null;
@@ -43,17 +41,16 @@ export interface McpSettingsSectionProps {
 	isMcpEditMode: boolean;
 	selectedMcpTransport: McpTransport;
 	setSelectedMcpTransport: Dispatch<SetStateAction<McpTransport>>;
-	builtinRagMcpConfigured: boolean;
-	builtinRagMcpServer: AcpMcpServerDraft | null;
-	builtinRagMcpIssueCount: number;
-	builtinRagMcpTransportMeta: ReturnType<typeof getMcpTransportMeta>;
-	builtinRagMcpServerStatus: BuiltinRagMcpServerStatus | null;
-	builtinRagMcpToggleDisabled: boolean;
+	builtinMcpConfig: BuiltinMcpConfig;
+	builtinMcpTransportMeta: ReturnType<typeof getMcpTransportMeta>;
+	builtinMcpServerStatus: BuiltinMcpServerStatus | null;
+	builtinMcpToggleDisabled: boolean;
 	bindAcpFieldRef: BindAcpFieldRef;
 	bindMcpListOptionRef: (serverId: string) => (node: HTMLButtonElement | null) => void;
 	onSelectMcpServer: (serverId: string) => void;
 	onMcpCatalogKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>, serverId: string) => void;
-	onToggleBuiltinRagMcpServer: (enabled: boolean) => void;
+	onToggleBuiltinMcp: (enabled: boolean) => void;
+	onToggleBuiltinMcpModule: (moduleKey: BuiltinMcpConfig["enabledModules"][number]) => void;
 	onEnterMcpCreateMode: () => void;
 	onLocateFirstMcpIssue: () => void;
 	onDiscardMcpDraft: () => void;
@@ -71,7 +68,6 @@ export interface McpSettingsSectionProps {
 export function McpSettingsSection({
 	bindSectionBlockRef,
 	mcpNotice,
-	mcpServers,
 	regularMcpServers,
 	selectedMcpServerId,
 	selectedMcpServer,
@@ -84,17 +80,16 @@ export function McpSettingsSection({
 	isMcpEditMode,
 	selectedMcpTransport,
 	setSelectedMcpTransport,
-	builtinRagMcpConfigured,
-	builtinRagMcpServer,
-	builtinRagMcpIssueCount,
-	builtinRagMcpTransportMeta,
-	builtinRagMcpServerStatus,
-	builtinRagMcpToggleDisabled,
+	builtinMcpConfig,
+	builtinMcpTransportMeta,
+	builtinMcpServerStatus,
+	builtinMcpToggleDisabled,
 	bindAcpFieldRef,
 	bindMcpListOptionRef,
 	onSelectMcpServer,
 	onMcpCatalogKeyDown,
-	onToggleBuiltinRagMcpServer,
+	onToggleBuiltinMcp,
+	onToggleBuiltinMcpModule,
 	onEnterMcpCreateMode,
 	onLocateFirstMcpIssue,
 	onDiscardMcpDraft,
@@ -104,6 +99,14 @@ export function McpSettingsSection({
 	onReturnToCurrentMcp,
 	onApplyMcpTransportSelection,
 }: McpSettingsSectionProps) {
+	const saveStatusLabel = mcpHasUnsavedChanges ? "草稿未保存" : "已写入配置";
+	const saveStatusDetail =
+		mcpValidation.totalIssues > 0
+			? `${mcpValidation.totalIssues} 个问题待修复`
+			: mcpHasUnsavedChanges
+				? "当前 MCP 草稿尚未写回配置。"
+				: "MCP 配置已与本地 config.toml 同步。";
+
 	return (
 		<section
 			aria-labelledby={getSettingsTabId("mcp")}
@@ -131,21 +134,19 @@ export function McpSettingsSection({
 					<p className="settings-help-text settings-help-text-tight">
 						所有 Agent 共用这一份 MCP 目录。先在上面选服务，下面只处理当前任务。
 					</p>
-					{mcpServers.length === 0 ? (
+					{regularMcpServers.length === 0 ? (
 						<div className="settings-empty-panel settings-empty-panel-subtle">
-							<strong className="settings-empty-title">还没有服务</strong>
+							<strong className="settings-empty-title">还没有自定义服务</strong>
 							<span className="settings-help-text settings-help-text-tight">
-								先新建一个服务，再补全连接参数。
+								内置 MCP 在上面单独配置；如果还要接第三方 server，再新建自定义服务。
 							</span>
 						</div>
 					) : null}
 					<div className="settings-catalog-grid settings-catalog-grid-3 settings-mcp-catalog-grid">
 						<article
 							className={`settings-mcp-list-item settings-mcp-builtin-card ${
-								builtinRagMcpConfigured && selectedMcpServerId === builtinRagMcpServer?.id
-									? "settings-mcp-list-item-selected"
-									: ""
-							} ${builtinRagMcpIssueCount > 0 ? "settings-mcp-list-item-invalid" : ""}`}
+								builtinMcpConfig.enabled ? "settings-mcp-list-item-selected" : ""
+							}`}
 						>
 							<div className="settings-mcp-builtin-card-header">
 								<div className="settings-agent-title-row">
@@ -154,52 +155,60 @@ export function McpSettingsSection({
 								<label className="settings-mcp-builtin-toggle">
 									<span className="sr-only">启用内置 MCP</span>
 									<input
-										checked={builtinRagMcpConfigured}
+										checked={builtinMcpConfig.enabled}
 										className="settings-toggle"
-										disabled={builtinRagMcpToggleDisabled}
-										onChange={(event) => onToggleBuiltinRagMcpServer(event.target.checked)}
+										disabled={builtinMcpToggleDisabled}
+										onChange={(event) => onToggleBuiltinMcp(event.target.checked)}
 										type="checkbox"
 									/>
 								</label>
 							</div>
 							<div className="settings-mcp-list-item-badges">
 								<span className="settings-status-chip">内置</span>
-								<span className="settings-mcp-badge">{builtinRagMcpTransportMeta.label}</span>
+								<span className="settings-mcp-badge">{builtinMcpTransportMeta.label}</span>
 								<span
 									className={`settings-status-chip ${
-										builtinRagMcpServerStatus?.running
+										builtinMcpServerStatus?.running
 											? "settings-status-chip-success"
 											: "settings-status-chip-warn"
 									}`}
 								>
-									{builtinRagMcpServerStatus?.running ? "运行中" : "未运行"}
+									{builtinMcpServerStatus?.running ? "运行中" : "未运行"}
 								</span>
-								{builtinRagMcpIssueCount > 0 ? (
-									<span className="settings-agent-meta">{builtinRagMcpIssueCount} 个问题</span>
-								) : null}
+								<span className="settings-agent-meta">
+									{builtinMcpConfig.enabledModules.length} 个模块已启用
+								</span>
 							</div>
 							<span className="settings-agent-command-preview">
-								{builtinRagMcpServerStatus?.server.transport === "http"
-									? builtinRagMcpServerStatus.server.url
-									: "http://127.0.0.1:43189/internal/mcp/rag"}
+								{builtinMcpServerStatus?.server.transport === "http"
+									? builtinMcpServerStatus.server.url
+									: "http://127.0.0.1:43189/internal/mcp"}
 							</span>
 							<span className="settings-help-text settings-help-text-tight">
-								{builtinRagMcpConfigured
-									? "已加入当前 MCP 草稿，保存后当前 Agent 就能直接调用。"
-									: builtinRagMcpServerStatus?.running
-										? "开启后会把内置 RAG Query 写入当前草稿。"
-										: builtinRagMcpServerStatus?.lastError ||
-											"桌面端启动后会自动暴露这个本地地址。"}
+								{builtinMcpConfig.enabled
+									? "保存后会把当前启用的内置模块统一暴露给 Agent。"
+									: builtinMcpServerStatus?.running
+										? "开启后会把下面勾选的内置模块统一挂到同一个本地 MCP server。"
+										: builtinMcpServerStatus?.lastError || "桌面端启动后会自动暴露这个本地地址。"}
 							</span>
-							{builtinRagMcpConfigured && builtinRagMcpServer ? (
-								<button
-									className="settings-agent-secondary settings-button-compact"
-									onClick={() => onSelectMcpServer(builtinRagMcpServer.id)}
-									type="button"
-								>
-									编辑当前服务
-								</button>
-							) : null}
+							<div className="settings-mcp-builtin-modules">
+								{builtinMcpServerStatus?.availableModules.map((module) => (
+									<label className="settings-mcp-builtin-module" key={module.key}>
+										<input
+											checked={builtinMcpConfig.enabledModules.includes(module.key)}
+											className="settings-toggle"
+											onChange={() => onToggleBuiltinMcpModule(module.key)}
+											type="checkbox"
+										/>
+										<span className="settings-mcp-builtin-module-copy">
+											<strong>{module.title}</strong>
+											<span className="settings-help-text settings-help-text-tight">
+												{module.summary} · {module.toolCount} 个 tool
+											</span>
+										</span>
+									</label>
+								))}
+							</div>
 						</article>
 						<div aria-label="MCP 服务目录" className="settings-mcp-catalog-group" role="radiogroup">
 							{regularMcpServers.map((server) => {
@@ -270,277 +279,278 @@ export function McpSettingsSection({
 				</div>
 
 				<div className="settings-acp-detail settings-mcp-detail">
-					<SettingsDraftActionCard
-						actions={
-							<>
-								{mcpValidation.totalIssues > 0 ? (
-									<button
-										className="settings-button settings-agent-secondary"
-										onClick={onLocateFirstMcpIssue}
-										type="button"
-									>
-										定位问题
-									</button>
-								) : null}
-								<button
-									className="settings-button settings-agent-secondary"
-									disabled={savingMcp || !mcpHasUnsavedChanges}
-									onClick={onDiscardMcpDraft}
-									type="button"
-								>
-									{DISCARD_DRAFT_BUTTON_LABEL}
-								</button>
-								<button
-									className="settings-button"
-									disabled={savingMcp || !mcpHasUnsavedChanges}
-									onClick={() => void onSaveMcp()}
-									type="button"
-								>
-									{savingMcp ? "保存中..." : "保存 MCP 配置"}
-								</button>
-							</>
-						}
-						description={
-							mcpValidation.totalIssues > 0
-								? "先修复校验问题，再写回配置。"
-								: mcpHasUnsavedChanges
-									? "当前 MCP 草稿尚未写回配置。"
-									: "MCP 配置已与本地 config.toml 同步。"
-						}
-						title={
-							mcpValidation.totalIssues > 0
-								? `先修复 ${mcpValidation.totalIssues} 个问题`
-								: mcpHasUnsavedChanges
-									? "有未保存的 MCP 草稿"
-									: "MCP 配置已同步"
-						}
-					/>
 					{isMcpEditMode && selectedMcpServer ? (
 						<>
-							<div className="settings-acp-detail-header settings-mcp-detail-header">
-								<div className="settings-acp-detail-copy">
-									<span className="settings-section-kicker">当前服务</span>
-									<h3 className="settings-subsection-title">
-										{getMcpServerDraftTitle(selectedMcpServer)}
-									</h3>
-									<span className="settings-help-text settings-help-text-tight">
-										目录和表单始终对应同一条服务。
-									</span>
+							<div className="settings-rag-toolbar settings-mcp-toolbar">
+								<div className="settings-mcp-toolbar-primary">
+									<div
+										aria-live="polite"
+										className="settings-rag-toolbar-heading settings-mcp-toolbar-heading"
+									>
+										<strong className="settings-agent-name">
+											{getMcpServerDraftTitle(selectedMcpServer)}
+										</strong>
+										<span
+											className={`settings-mcp-toolbar-state-badge ${
+												mcpHasUnsavedChanges ? "settings-mcp-toolbar-state-badge-dirty" : ""
+											}`}
+										>
+											{saveStatusLabel}
+										</span>
+									</div>
+									<span className="settings-rag-toolbar-note">{saveStatusDetail}</span>
 								</div>
-								<button
-									className="settings-agent-remove settings-agent-remove-inline"
-									onClick={() => onRemoveMcpServer(selectedMcpServer.id)}
-									type="button"
-								>
-									删除服务
-								</button>
+								<div className="settings-rag-toolbar-actions settings-mcp-toolbar-actions">
+									{mcpValidation.totalIssues > 0 ? (
+										<button
+											className="settings-text-link settings-text-link-action"
+											onClick={onLocateFirstMcpIssue}
+											type="button"
+										>
+											定位问题
+										</button>
+									) : null}
+									{mcpHasUnsavedChanges ? (
+										<button
+											className="settings-text-link settings-text-link-action"
+											disabled={savingMcp}
+											onClick={onDiscardMcpDraft}
+											type="button"
+										>
+											{DISCARD_DRAFT_BUTTON_LABEL}
+										</button>
+									) : null}
+									<button
+										className="settings-text-link settings-text-link-action settings-text-link-danger"
+										onClick={() => onRemoveMcpServer(selectedMcpServer.id)}
+										type="button"
+									>
+										删除服务
+									</button>
+									{mcpHasUnsavedChanges ? (
+										<button
+											className="settings-button"
+											disabled={savingMcp}
+											onClick={() => void onSaveMcp()}
+											type="button"
+										>
+											{savingMcp ? "保存中..." : "保存 MCP 配置"}
+										</button>
+									) : null}
+								</div>
 							</div>
 
-							<div
-								className="settings-editor-card"
-								id="mcp-form"
-								ref={bindSectionBlockRef("mcp-form")}
-							>
-								<div className="settings-editor-card-header">
-									<strong className="settings-agent-mcp-title">基础信息</strong>
-									<span className="settings-agent-meta">
-										{selectedMcpIssueCount > 0
-											? `${selectedMcpIssueCount} 个问题待处理`
-											: "名称会显示在左侧目录里"}
-									</span>
-								</div>
-
-								<div className="settings-agent-fields">
-									<label className="settings-label settings-label-stacked">
-										<span>名称</span>
-										<input
-											aria-describedby={joinDescribedByIds(
-												selectedMcpFieldIssues.name
-													? buildFieldIssueId("mcp", "name", selectedMcpServer.id)
-													: undefined,
-												`settings-mcp-${selectedMcpServer.id}-name-help`,
-											)}
-											aria-invalid={selectedMcpFieldIssues.name ? true : undefined}
-											className="settings-input settings-input-wide"
-											onChange={(event) =>
-												onMcpServerFieldChange(selectedMcpServer.id, "name", event.target.value)
-											}
-											placeholder="例如 filesystem"
-											ref={bindAcpFieldRef("server", selectedMcpServer.id, "name")}
-											type="text"
-											value={selectedMcpServer.name}
-										/>
-										<span
-											className="settings-help-text settings-help-text-tight"
-											id={`settings-mcp-${selectedMcpServer.id}-name-help`}
-										>
-											用能力或数据源命名，后续切换服务时更容易辨认。
+							<div className="settings-mcp-editor-main">
+								<div
+									className="settings-rag-editor-panel settings-mcp-editor-panel"
+									id="mcp-form"
+									ref={bindSectionBlockRef("mcp-form")}
+								>
+									<div className="settings-editor-card-header">
+										<strong className="settings-agent-mcp-title">基础信息</strong>
+										<span className="settings-agent-meta">
+											{selectedMcpIssueCount > 0
+												? `${selectedMcpIssueCount} 个问题待处理`
+												: "名称会显示在左侧目录里"}
 										</span>
-										{renderFieldError(
-											buildFieldIssueId("mcp", "name", selectedMcpServer.id),
-											selectedMcpFieldIssues.name,
-										)}
-									</label>
-									<div className="settings-item settings-item-stacked settings-item-wide">
-										<span className="settings-label">连接类型</span>
-										<div className="settings-mcp-transport-summary">
-											<span className="settings-mcp-badge">
-												{getMcpTransportMeta(selectedMcpServer.transport).label}
+									</div>
+
+									<div className="settings-agent-fields settings-mcp-panel-fields">
+										<label className="settings-label settings-label-stacked settings-mcp-form-row">
+											<span>名称</span>
+											<input
+												aria-describedby={joinDescribedByIds(
+													selectedMcpFieldIssues.name
+														? buildFieldIssueId("mcp", "name", selectedMcpServer.id)
+														: undefined,
+													`settings-mcp-${selectedMcpServer.id}-name-help`,
+												)}
+												aria-invalid={selectedMcpFieldIssues.name ? true : undefined}
+												className="settings-input settings-input-wide"
+												onChange={(event) =>
+													onMcpServerFieldChange(selectedMcpServer.id, "name", event.target.value)
+												}
+												placeholder="例如 filesystem"
+												ref={bindAcpFieldRef("server", selectedMcpServer.id, "name")}
+												type="text"
+												value={selectedMcpServer.name}
+											/>
+											<span
+												className="settings-help-text settings-help-text-tight"
+												id={`settings-mcp-${selectedMcpServer.id}-name-help`}
+											>
+												用能力或数据源命名，后续切换服务时更容易辨认。
 											</span>
-											<span className="settings-help-text settings-help-text-tight">
-												连接类型在创建时决定。需要换 transport 时，直接新建一条更清楚。
-											</span>
+											{renderFieldError(
+												buildFieldIssueId("mcp", "name", selectedMcpServer.id),
+												selectedMcpFieldIssues.name,
+											)}
+										</label>
+										<div className="settings-mcp-static-row">
+											<span className="settings-label">连接类型</span>
+											<div className="settings-mcp-transport-summary">
+												<span className="settings-mcp-badge">
+													{getMcpTransportMeta(selectedMcpServer.transport).label}
+												</span>
+												<span className="settings-help-text settings-help-text-tight">
+													连接类型在创建时决定。需要换 transport 时，直接新建一条更清楚。
+												</span>
+											</div>
 										</div>
 									</div>
 								</div>
-							</div>
 
-							<div className="settings-editor-card">
-								<div className="settings-editor-card-header">
-									<strong className="settings-agent-mcp-title">连接配置</strong>
-									<span className="settings-agent-meta">
-										{getMcpTransportMeta(selectedMcpServer.transport).description}
-									</span>
-								</div>
-								<div className="settings-agent-fields">
-									{selectedMcpServer.transport === "stdio" ? (
-										<>
-											<label className="settings-label settings-label-stacked">
-												<span>命令</span>
-												<input
-													aria-describedby={joinDescribedByIds(
-														selectedMcpFieldIssues.command
-															? buildFieldIssueId("mcp", "command", selectedMcpServer.id)
-															: undefined,
+								<div className="settings-rag-editor-panel settings-mcp-editor-panel">
+									<div className="settings-editor-card-header">
+										<strong className="settings-agent-mcp-title">连接配置</strong>
+										<span className="settings-agent-meta">
+											{getMcpTransportMeta(selectedMcpServer.transport).description}
+										</span>
+									</div>
+									<div className="settings-agent-fields settings-mcp-panel-fields">
+										{selectedMcpServer.transport === "stdio" ? (
+											<>
+												<label className="settings-label settings-label-stacked settings-mcp-form-row">
+													<span>命令</span>
+													<input
+														aria-describedby={joinDescribedByIds(
+															selectedMcpFieldIssues.command
+																? buildFieldIssueId("mcp", "command", selectedMcpServer.id)
+																: undefined,
+														)}
+														aria-invalid={selectedMcpFieldIssues.command ? true : undefined}
+														className="settings-input settings-input-wide settings-input-mono"
+														onChange={(event) =>
+															onMcpServerFieldChange(
+																selectedMcpServer.id,
+																"command",
+																event.target.value,
+															)
+														}
+														placeholder="例如 npx"
+														ref={bindAcpFieldRef("server", selectedMcpServer.id, "command")}
+														type="text"
+														value={selectedMcpServer.command}
+													/>
+													{renderFieldError(
+														buildFieldIssueId("mcp", "command", selectedMcpServer.id),
+														selectedMcpFieldIssues.command,
 													)}
-													aria-invalid={selectedMcpFieldIssues.command ? true : undefined}
-													className="settings-input settings-input-wide settings-input-mono"
-													onChange={(event) =>
-														onMcpServerFieldChange(
-															selectedMcpServer.id,
-															"command",
-															event.target.value,
-														)
-													}
-													placeholder="例如 npx"
-													ref={bindAcpFieldRef("server", selectedMcpServer.id, "command")}
-													type="text"
-													value={selectedMcpServer.command}
-												/>
-												{renderFieldError(
-													buildFieldIssueId("mcp", "command", selectedMcpServer.id),
-													selectedMcpFieldIssues.command,
-												)}
-											</label>
-											<label className="settings-label settings-label-stacked">
-												<span>参数</span>
-												<textarea
-													className="settings-textarea settings-input-mono"
-													onChange={(event) =>
-														onMcpServerFieldChange(
-															selectedMcpServer.id,
-															"argsText",
-															event.target.value,
-														)
-													}
-													placeholder="每行一个参数"
-													rows={3}
-													value={selectedMcpServer.argsText}
-												/>
-											</label>
-											<label className="settings-label settings-label-stacked">
-												<span>环境变量</span>
-												<textarea
-													aria-describedby={joinDescribedByIds(
-														selectedMcpFieldIssues.envText
-															? buildFieldIssueId("mcp", "env-text", selectedMcpServer.id)
-															: undefined,
+												</label>
+												<label className="settings-label settings-label-stacked settings-mcp-field-wide">
+													<span>参数</span>
+													<textarea
+														className="settings-textarea settings-input-mono"
+														onChange={(event) =>
+															onMcpServerFieldChange(
+																selectedMcpServer.id,
+																"argsText",
+																event.target.value,
+															)
+														}
+														placeholder="每行一个参数"
+														rows={3}
+														value={selectedMcpServer.argsText}
+													/>
+												</label>
+												<label className="settings-label settings-label-stacked settings-mcp-field-wide">
+													<span>环境变量</span>
+													<textarea
+														aria-describedby={joinDescribedByIds(
+															selectedMcpFieldIssues.envText
+																? buildFieldIssueId("mcp", "env-text", selectedMcpServer.id)
+																: undefined,
+														)}
+														aria-invalid={selectedMcpFieldIssues.envText ? true : undefined}
+														className="settings-textarea settings-input-mono"
+														onChange={(event) =>
+															onMcpServerFieldChange(
+																selectedMcpServer.id,
+																"envText",
+																event.target.value,
+															)
+														}
+														placeholder="每行一个 KEY=VALUE"
+														ref={bindAcpFieldRef("server", selectedMcpServer.id, "envText")}
+														rows={3}
+														value={selectedMcpServer.envText}
+													/>
+													{renderFieldError(
+														buildFieldIssueId("mcp", "env-text", selectedMcpServer.id),
+														selectedMcpFieldIssues.envText,
 													)}
-													aria-invalid={selectedMcpFieldIssues.envText ? true : undefined}
-													className="settings-textarea settings-input-mono"
-													onChange={(event) =>
-														onMcpServerFieldChange(
-															selectedMcpServer.id,
-															"envText",
-															event.target.value,
-														)
-													}
-													placeholder="每行一个 KEY=VALUE"
-													ref={bindAcpFieldRef("server", selectedMcpServer.id, "envText")}
-													rows={3}
-													value={selectedMcpServer.envText}
-												/>
-												{renderFieldError(
-													buildFieldIssueId("mcp", "env-text", selectedMcpServer.id),
-													selectedMcpFieldIssues.envText,
-												)}
-											</label>
-										</>
-									) : (
-										<>
-											<label className="settings-label settings-label-stacked">
-												<span>URL</span>
-												<input
-													aria-describedby={joinDescribedByIds(
-														selectedMcpFieldIssues.url
-															? buildFieldIssueId("mcp", "url", selectedMcpServer.id)
-															: undefined,
-														`settings-mcp-${selectedMcpServer.id}-url-help`,
+												</label>
+											</>
+										) : (
+											<>
+												<label className="settings-label settings-label-stacked settings-mcp-form-row">
+													<span>URL</span>
+													<input
+														aria-describedby={joinDescribedByIds(
+															selectedMcpFieldIssues.url
+																? buildFieldIssueId("mcp", "url", selectedMcpServer.id)
+																: undefined,
+															`settings-mcp-${selectedMcpServer.id}-url-help`,
+														)}
+														aria-invalid={selectedMcpFieldIssues.url ? true : undefined}
+														className="settings-input settings-input-wide settings-input-mono"
+														onChange={(event) =>
+															onMcpServerFieldChange(
+																selectedMcpServer.id,
+																"url",
+																event.target.value,
+															)
+														}
+														placeholder="https://example.com/mcp"
+														ref={bindAcpFieldRef("server", selectedMcpServer.id, "url")}
+														type="text"
+														value={selectedMcpServer.url}
+													/>
+													<span
+														className="settings-help-text settings-help-text-tight"
+														id={`settings-mcp-${selectedMcpServer.id}-url-help`}
+													>
+														支持 `http://` 或 `https://`，例如{" "}
+														{getMcpTransportMeta(selectedMcpServer.transport).example}
+													</span>
+													{renderFieldError(
+														buildFieldIssueId("mcp", "url", selectedMcpServer.id),
+														selectedMcpFieldIssues.url,
 													)}
-													aria-invalid={selectedMcpFieldIssues.url ? true : undefined}
-													className="settings-input settings-input-wide settings-input-mono"
-													onChange={(event) =>
-														onMcpServerFieldChange(selectedMcpServer.id, "url", event.target.value)
-													}
-													placeholder="https://example.com/mcp"
-													ref={bindAcpFieldRef("server", selectedMcpServer.id, "url")}
-													type="text"
-													value={selectedMcpServer.url}
-												/>
-												<span
-													className="settings-help-text settings-help-text-tight"
-													id={`settings-mcp-${selectedMcpServer.id}-url-help`}
-												>
-													支持 `http://` 或 `https://`，例如{" "}
-													{getMcpTransportMeta(selectedMcpServer.transport).example}
-												</span>
-												{renderFieldError(
-													buildFieldIssueId("mcp", "url", selectedMcpServer.id),
-													selectedMcpFieldIssues.url,
-												)}
-											</label>
-											<label className="settings-label settings-label-stacked">
-												<span>请求头</span>
-												<textarea
-													aria-describedby={joinDescribedByIds(
-														selectedMcpFieldIssues.headersText
-															? buildFieldIssueId("mcp", "headers-text", selectedMcpServer.id)
-															: undefined,
+												</label>
+												<label className="settings-label settings-label-stacked settings-mcp-field-wide">
+													<span>请求头</span>
+													<textarea
+														aria-describedby={joinDescribedByIds(
+															selectedMcpFieldIssues.headersText
+																? buildFieldIssueId("mcp", "headers-text", selectedMcpServer.id)
+																: undefined,
+														)}
+														aria-invalid={selectedMcpFieldIssues.headersText ? true : undefined}
+														className="settings-textarea settings-input-mono"
+														onChange={(event) =>
+															onMcpServerFieldChange(
+																selectedMcpServer.id,
+																"headersText",
+																event.target.value,
+															)
+														}
+														placeholder="每行一个 KEY=VALUE"
+														ref={bindAcpFieldRef("server", selectedMcpServer.id, "headersText")}
+														rows={3}
+														value={selectedMcpServer.headersText}
+													/>
+													<span className="settings-help-text settings-help-text-tight">
+														需要鉴权时再填写。每行一个 `KEY=VALUE`。
+													</span>
+													{renderFieldError(
+														buildFieldIssueId("mcp", "headers-text", selectedMcpServer.id),
+														selectedMcpFieldIssues.headersText,
 													)}
-													aria-invalid={selectedMcpFieldIssues.headersText ? true : undefined}
-													className="settings-textarea settings-input-mono"
-													onChange={(event) =>
-														onMcpServerFieldChange(
-															selectedMcpServer.id,
-															"headersText",
-															event.target.value,
-														)
-													}
-													placeholder="每行一个 KEY=VALUE"
-													ref={bindAcpFieldRef("server", selectedMcpServer.id, "headersText")}
-													rows={3}
-													value={selectedMcpServer.headersText}
-												/>
-												<span className="settings-help-text settings-help-text-tight">
-													需要鉴权时再填写。每行一个 `KEY=VALUE`。
-												</span>
-												{renderFieldError(
-													buildFieldIssueId("mcp", "headers-text", selectedMcpServer.id),
-													selectedMcpFieldIssues.headersText,
-												)}
-											</label>
-										</>
-									)}
+												</label>
+											</>
+										)}
+									</div>
 								</div>
 							</div>
 						</>
@@ -551,19 +561,25 @@ export function McpSettingsSection({
 							id="mcp-create"
 							ref={bindSectionBlockRef("mcp-create")}
 						>
-							<div className="settings-editor-card-header">
-								<div className="settings-acp-detail-copy">
-									<strong className="settings-agent-mcp-title">新建服务</strong>
-									<span className="settings-agent-meta">只在需要另一种连接方式时新增</span>
+							<div className="settings-rag-toolbar settings-mcp-toolbar settings-mcp-create-toolbar">
+								<div className="settings-mcp-toolbar-primary">
+									<div className="settings-rag-toolbar-heading settings-mcp-toolbar-heading">
+										<strong className="settings-agent-name">新建服务</strong>
+									</div>
+									<span className="settings-rag-toolbar-note">
+										只在需要另一种连接方式时新增，创建后会直接切到当前服务。
+									</span>
 								</div>
 								{selectedMcpServer ? (
-									<button
-										className="settings-agent-secondary settings-button-compact"
-										onClick={onReturnToCurrentMcp}
-										type="button"
-									>
-										返回当前服务
-									</button>
+									<div className="settings-rag-toolbar-actions settings-mcp-toolbar-actions">
+										<button
+											className="settings-text-link settings-text-link-action"
+											onClick={onReturnToCurrentMcp}
+											type="button"
+										>
+											返回当前服务
+										</button>
+									</div>
 								) : null}
 							</div>
 							<div className="settings-acp-preset-panel settings-mcp-create-panel">
@@ -571,7 +587,7 @@ export function McpSettingsSection({
 									<span className="settings-acp-preset-kicker">空白</span>
 									<strong className="settings-acp-preset-label">创建一个新服务</strong>
 								</div>
-								<label className="settings-label settings-label-stacked">
+								<label className="settings-label settings-label-stacked settings-mcp-form-row settings-mcp-create-field">
 									<span className="settings-acp-preset-label">连接类型</span>
 									<select
 										className="settings-select"

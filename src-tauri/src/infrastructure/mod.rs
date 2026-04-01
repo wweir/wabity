@@ -1,4 +1,5 @@
 pub mod autostart;
+pub mod clipboard;
 pub mod config;
 pub mod hotkey;
 pub mod notification;

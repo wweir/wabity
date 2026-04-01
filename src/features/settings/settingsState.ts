@@ -4,6 +4,7 @@ import type {
 	AcpAgentConfig,
 	AcpMcpServerConfig,
 	AppSettings,
+	BuiltinMcpConfig,
 	BuiltinLlmProviderTemplate,
 	BuiltinLlmProviderTemplateModel,
 	GeneralSettings,
@@ -176,6 +177,7 @@ export function createDefaultShortcutSettings(): ShortcutConfig {
 	return {
 		toggle_launcher: "Alt+Space",
 		ocr_translate: "Alt+D",
+		open_clipboard_history: "Alt+V",
 	};
 }
 
@@ -390,6 +392,10 @@ export function cloneSavedAcpDraftState(state: SavedAcpDraftState): SavedAcpDraf
 export function cloneSavedMcpDraftState(state: SavedMcpDraftState): SavedMcpDraftState {
 	return {
 		servers: state.servers.map(cloneMcpServerDraft),
+		builtin: {
+			enabled: state.builtin.enabled,
+			enabledModules: [...state.builtin.enabledModules],
+		},
 	};
 }
 
@@ -489,61 +495,60 @@ export function findBuiltinTemplateModel(
 	return template.models.find((model) => model.id === modelId) ?? null;
 }
 
-export function getSelectableBuiltinTemplateModels(template: BuiltinLlmProviderTemplate | null) {
-	if (!template) {
-		return [];
+export function findBuiltinTemplateModelByModelName(
+	template: BuiltinLlmProviderTemplate | null,
+	modelName: string | null | undefined,
+) {
+	if (!template || !modelName) {
+		return null;
 	}
 
-	return template.models.filter((model) => model.selectableInCurrentApp);
+	const normalizedModelName = modelName.trim();
+	if (!normalizedModelName) {
+		return null;
+	}
+
+	return template.models.find((model) => model.model === normalizedModelName) ?? null;
 }
 
-export function getFirstSelectableBuiltinTemplateModel(
-	template: BuiltinLlmProviderTemplate | null,
+export function applyBuiltinTemplateModelMetadata(
+	provider: LlmProviderConfig,
+	templateModel: BuiltinLlmProviderTemplateModel | null,
 ) {
-	return getSelectableBuiltinTemplateModels(template)[0] ?? null;
+	if (!templateModel) {
+		return sanitizeLlmProviderDraft({
+			...provider,
+			builtinPresetModelId: null,
+		});
+	}
+
+	return sanitizeLlmProviderDraft({
+		...provider,
+		model: templateModel.model,
+		modelType: templateModel.modelType === "embedding" ? "embedding" : "llm",
+		protocol: templateModel.protocol === "chat_completions" ? "chat_completions" : "responses",
+		supportsMultimodal: templateModel.supportsMultimodal && templateModel.protocol === "responses",
+		supportsStateful: templateModel.supportsStateful && templateModel.protocol === "responses",
+		builtinPresetModelId: templateModel.id,
+	});
 }
 
 export function providerUsesBuiltinTemplate(provider: Pick<LlmProviderConfig, "builtinPresetId">) {
 	return Boolean(provider.builtinPresetId);
 }
 
-export function applyBuiltinTemplateModelToProvider(
-	provider: LlmProviderConfig,
-	template: BuiltinLlmProviderTemplate,
-	model: BuiltinLlmProviderTemplateModel,
-) {
-	return sanitizeLlmProviderDraft({
-		...provider,
-		baseUrl: provider.managedBaseUrl ? template.defaultBaseUrl : provider.baseUrl,
-		modelType: model.modelType === "embedding" ? "embedding" : "llm",
-		protocol: model.protocol === "responses" ? "responses" : "chat_completions",
-		model: model.model,
-		modelIdentityHint: null,
-		builtinPresetId: template.id,
-		builtinPresetModelId: model.id,
-		supportsMultimodal: model.protocol === "responses" ? model.supportsMultimodal : false,
-		supportsStateful: model.protocol === "responses" ? model.supportsStateful : false,
-	});
-}
-
 export function applyBuiltinTemplateToProvider(
 	provider: LlmProviderConfig,
 	template: BuiltinLlmProviderTemplate,
-	model: BuiltinLlmProviderTemplateModel,
 ) {
+	const nextName = provider.name.trim() ? provider.name : template.displayName;
 	return sanitizeLlmProviderDraft({
 		...provider,
-		name: `${template.displayName} · ${model.displayName}`,
+		name: nextName,
 		baseUrl: template.defaultBaseUrl,
-		modelType: model.modelType === "embedding" ? "embedding" : "llm",
-		protocol: model.protocol === "responses" ? "responses" : "chat_completions",
-		model: model.model,
-		modelIdentityHint: null,
 		builtinPresetId: template.id,
-		builtinPresetModelId: model.id,
 		managedBaseUrl: true,
-		supportsMultimodal: model.protocol === "responses" ? model.supportsMultimodal : false,
-		supportsStateful: model.protocol === "responses" ? model.supportsStateful : false,
+		builtinPresetModelId: null,
 	});
 }
 
@@ -618,6 +623,9 @@ function sanitizeLlmProviderDraft(provider: LlmProviderConfig) {
 	}
 	if (!sanitized.model.trim()) {
 		sanitized.modelIdentityHint = null;
+	}
+	if (!sanitized.builtinPresetId) {
+		sanitized.builtinPresetModelId = null;
 	}
 
 	return sanitized;
@@ -883,9 +891,13 @@ export function buildSavedAcpDraftState(
 	});
 }
 
-export function buildSavedMcpDraftState(servers: AcpMcpServerDraft[]): SavedMcpDraftState {
+export function buildSavedMcpDraftState(
+	servers: AcpMcpServerDraft[],
+	builtin: BuiltinMcpConfig,
+): SavedMcpDraftState {
 	return cloneSavedMcpDraftState({
 		servers,
+		builtin,
 	});
 }
 
@@ -913,7 +925,7 @@ export function buildAcpDraftSnapshot(agents: AcpAgentDraft[]) {
 	});
 }
 
-export function buildMcpDraftSnapshot(servers: AcpMcpServerDraft[]) {
+export function buildMcpDraftSnapshot(servers: AcpMcpServerDraft[], builtin: BuiltinMcpConfig) {
 	return JSON.stringify({
 		servers: servers.map((server) => ({
 			transport: server.transport,
@@ -924,6 +936,10 @@ export function buildMcpDraftSnapshot(servers: AcpMcpServerDraft[]) {
 			envText: server.envText,
 			headersText: server.headersText,
 		})),
+		builtin: {
+			enabled: builtin.enabled,
+			enabledModules: [...builtin.enabledModules].sort(),
+		},
 	});
 }
 
@@ -1088,14 +1104,6 @@ export function findFirstLlmIssue(
 			};
 		}
 
-		const templateModel = findBuiltinTemplateModel(template, provider.builtinPresetModelId);
-		if (provider.builtinPresetId && (!templateModel || !templateModel.selectableInCurrentApp)) {
-			return {
-				providerId: provider.id,
-				fieldKey: "model",
-			};
-		}
-
 		if (
 			template &&
 			provider.managedBaseUrl &&
@@ -1154,56 +1162,39 @@ export function validateLlmSettings(
 		const currentProviderIssues: string[] = [];
 		const currentProviderFieldIssues: FieldIssueMap<LlmFieldKey> = {};
 		if (!provider.name.trim()) {
-			currentProviderIssues.push(`第 ${providerIndex + 1} 个 LLM 条目缺少名称。`);
+			currentProviderIssues.push(`第 ${providerIndex + 1} 个模型条目缺少名称。`);
 			currentProviderFieldIssues.name = "请输入条目名称。";
 		}
 		if (!provider.baseUrl.trim()) {
-			currentProviderIssues.push(`第 ${providerIndex + 1} 个 LLM 条目缺少 Base URL。`);
+			currentProviderIssues.push(`第 ${providerIndex + 1} 个模型条目缺少 Base URL。`);
 			currentProviderFieldIssues.baseUrl = "请输入 Base URL。";
 		}
 		if (!provider.model.trim()) {
-			currentProviderIssues.push(`第 ${providerIndex + 1} 个 LLM 条目缺少模型名。`);
+			currentProviderIssues.push(`第 ${providerIndex + 1} 个模型条目缺少模型名。`);
 			currentProviderFieldIssues.model = "请输入模型名。";
 		}
 		if (provider.supportsMultimodal && !providerHasResponsesModel(provider)) {
 			currentProviderIssues.push(
-				`第 ${providerIndex + 1} 个 LLM 条目只有 responses 协议才能开启多模态。`,
+				`第 ${providerIndex + 1} 个模型条目只有 responses 协议才能开启多模态。`,
 			);
 		}
 		if (provider.supportsStateful && !providerHasResponsesModel(provider)) {
 			currentProviderIssues.push(
-				`第 ${providerIndex + 1} 个 LLM 条目只有 responses 协议才能开启 stateful 请求。`,
+				`第 ${providerIndex + 1} 个模型条目只有 responses 协议才能开启 stateful 请求。`,
 			);
 		}
 		const template = findBuiltinTemplate(builtinTemplates, provider.builtinPresetId);
 		if (provider.builtinPresetId && !template) {
-			currentProviderIssues.push(`第 ${providerIndex + 1} 个 LLM 条目引用了未知内置模板。`);
+			currentProviderIssues.push(`第 ${providerIndex + 1} 个模型条目引用了未知内置模板。`);
 			currentProviderFieldIssues.model = "当前内置模板不存在，请重新选择模型。";
 		}
 
 		if (template) {
-			const templateModel = findBuiltinTemplateModel(template, provider.builtinPresetModelId);
-			if (!templateModel) {
-				currentProviderIssues.push(`第 ${providerIndex + 1} 个 LLM 条目没有绑定有效的模板模型。`);
-				currentProviderFieldIssues.model = "请选择模板白名单中的模型。";
-			} else {
-				if (!templateModel.selectableInCurrentApp) {
-					currentProviderIssues.push(
-						`第 ${providerIndex + 1} 个 LLM 条目绑定的是当前应用不可用的模板模型。`,
-					);
-					currentProviderFieldIssues.model =
-						templateModel.disabledReason ?? "这个模型当前不能在 Wabity 中使用。";
-				}
-				if (provider.model !== templateModel.model) {
-					currentProviderIssues.push(`第 ${providerIndex + 1} 个 LLM 条目模型不在模板白名单内。`);
-					currentProviderFieldIssues.model = "内置模板条目只能选择白名单模型。";
-				}
-				if (provider.managedBaseUrl && provider.baseUrl.trim() !== template.defaultBaseUrl.trim()) {
-					currentProviderIssues.push(
-						`第 ${providerIndex + 1} 个 LLM 条目仍由模板管理 Base URL，但当前值已偏离模板默认地址。`,
-					);
-					currentProviderFieldIssues.baseUrl = "模板管理模式下 Base URL 必须与模板默认地址一致。";
-				}
+			if (provider.managedBaseUrl && provider.baseUrl.trim() !== template.defaultBaseUrl.trim()) {
+				currentProviderIssues.push(
+					`第 ${providerIndex + 1} 个模型条目仍由模板管理 Base URL，但当前值已偏离模板默认地址。`,
+				);
+				currentProviderFieldIssues.baseUrl = "模板管理模式下 Base URL 必须与模板默认地址一致。";
 			}
 		}
 

@@ -161,6 +161,21 @@ fn builtin_actions() -> Vec<ActionDescriptor> {
             priority: 120,
         },
         ActionDescriptor {
+            id: "clipboard_history".to_string(),
+            title: "历史剪贴板".to_string(),
+            summary: "打开最近文本剪贴板历史并支持回贴".to_string(),
+            aliases: vec!["/clip".to_string(), "/paste".to_string()],
+            keywords: vec![
+                "clipboard".to_string(),
+                "paste".to_string(),
+                "history".to_string(),
+                "clip".to_string(),
+            ],
+            supported_input_modes: vec![Inline, Multiline, Ocr, Clipboard, Selection],
+            category: "system".to_string(),
+            priority: 97,
+        },
+        ActionDescriptor {
             id: "uppercase_text".to_string(),
             title: "转大写".to_string(),
             summary: "把文本转换为全大写".to_string(),
@@ -473,7 +488,10 @@ mod tests {
             .match_actions(&query(InputMode::Inline, "/"))
             .unwrap();
 
-        assert_eq!(matches.len(), 15);
+        assert_eq!(matches.len(), 16);
+        assert!(matches
+            .iter()
+            .any(|item| item.descriptor.id.as_str() == "clipboard_history"));
         assert!(matches
             .iter()
             .all(|item| item.descriptor.id.as_str() != "copy_text"));

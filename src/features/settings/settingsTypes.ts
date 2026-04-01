@@ -1,4 +1,10 @@
-import type { AcpMcpServerConfig, LlmProviderConfig, PromptsSettings } from "../../lib/tauri/types";
+import type {
+	AcpMcpServerConfig,
+	BuiltinMcpConfig,
+	BuiltinMcpModuleKey,
+	LlmProviderConfig,
+	PromptsSettings,
+} from "../../lib/tauri/types";
 
 export type SettingsSectionId =
 	| "general"
@@ -25,6 +31,7 @@ export interface AcpAgentDraft {
 }
 
 export type McpTransport = AcpMcpServerConfig["transport"];
+export type BuiltinMcpFieldKey = BuiltinMcpModuleKey | "enabled";
 export type AcpFieldKey = "name" | "command";
 export type McpFieldKey = "name" | "command" | "url" | "envText" | "headersText";
 export type LlmFieldKey = "name" | "baseUrl" | "model";
@@ -62,6 +69,7 @@ export interface SavedAcpDraftState {
 
 export interface SavedMcpDraftState {
 	servers: AcpMcpServerDraft[];
+	builtin: BuiltinMcpConfig;
 }
 
 export interface LlmDraftValidation {

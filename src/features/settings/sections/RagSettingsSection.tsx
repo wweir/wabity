@@ -97,7 +97,7 @@ export function RagSettingsSection({
 							<span className="settings-section-kicker">当前配置</span>
 							<strong className="settings-agent-name">索引配置</strong>
 							<span className="settings-help-text settings-help-text-tight">
-								RAG 只关心 Embedding、扫描目录和忽略规则。
+								这里只配 Embedding、扫描目录和忽略规则。
 							</span>
 						</div>
 						<div className="settings-rag-summary-current">
@@ -109,12 +109,12 @@ export function RagSettingsSection({
 								{selectedRagEmbeddingProvider
 									? `${selectedRagEmbeddingProvider.model} · ${selectedRagEmbeddingProvider.baseUrl}`
 									: eligibleRagEmbeddingProviders.length > 0
-										? "右侧选一个 Embedding 条目后，RAG 才能建立索引。"
-										: "当前没有可用于 RAG 的 Embedding 条目，先去 LLM 页面新增一个。"}
+										? "先在右侧选一个 Embedding 条目。"
+										: "当前没有可用的 Embedding 条目，先去模型接入页新增一个。"}
 							</span>
 							<span className="settings-rag-summary-note">
-								建立索引时，文档内容会发送给当前 Embedding
-								模型。涉及隐私或敏感数据时，优先选本机部署或你明确信任的模型服务。
+								建索引时，文档内容会发送给当前 Embedding
+								模型。涉及敏感数据时，优先选本地或可信服务。
 							</span>
 						</div>
 						<dl className="settings-rag-summary-facts">
@@ -133,15 +133,15 @@ export function RagSettingsSection({
 							<div className="settings-rag-summary-rule">
 								<span className="settings-rag-summary-rule-label">索引边界</span>
 								<span className="settings-rag-summary-note">
-									只扫描显式目录内、未命中忽略规则且不超过 50 MB 的文件。纯文本类文件要求可读 UTF-8
-									且不含 NUL；DOCX 会先抽取正文，文本型 PDF 会先按页抽取。
+									只索引显式目录内、未命中忽略规则且不超过 50 MB 的文件。文本需为可读 UTF-8 且不含
+									NUL；DOCX 提取正文，文本型 PDF 按页抽取。
 								</span>
 							</div>
 							<div className="settings-rag-summary-rule">
 								<span className="settings-rag-summary-rule-label">重建规则</span>
 								<span className="settings-rag-summary-note">
-									更换 Embedding
-									条目、扫描目录或忽略规则后，保存配置会自动重建索引；其它场景保持现状，需要时手动点击“立即重建索引”。
+									改了
+									Embedding、扫描目录或忽略规则后，保存时会自动重建。其它情况保持现状，需要时再手动重建。
 								</span>
 							</div>
 							<div className="settings-rag-summary-section">
@@ -149,8 +149,8 @@ export function RagSettingsSection({
 									<span className="settings-rag-summary-rule-label">最近一次手动重建</span>
 									<span className="settings-rag-summary-note">
 										{ragScanResult
-											? "这里只展示当前窗口内最近一次手动触发的扫描结果。"
-											: "还没有手动重建结果。保存配置不会自动跑一次全量扫描。"}
+											? "这里只显示当前窗口内最近一次手动重建的结果。"
+											: "还没有手动重建结果。保存配置不会额外触发一次全量扫描。"}
 									</span>
 								</div>
 								{ragScanResult ? (
@@ -247,7 +247,7 @@ export function RagSettingsSection({
 											className="settings-item-description"
 											id="rag-embedding-provider-description"
 										>
-											RAG 只接受 Embedding 类型条目。没有可选项时，先去 LLM 页面新增一个。
+											这里只能选带 Embedding 能力的条目。没有可选项时，先去模型接入页新增。
 										</span>
 									</label>
 									<select
@@ -300,9 +300,7 @@ export function RagSettingsSection({
 									>
 										<span>扫描目录</span>
 										<span className="settings-item-description" id="rag-source-dirs-description">
-											扫描目录与忽略规则。每行一个目录，目录选择器默认从 `~/Documents`
-											打开。Markdown 和 DOCX 会按标题、列表、代码块和段落预切；TXT、RST、 ADOC
-											走通用文本切分；PDF 先按页抽取再进入索引。
+											每行一个目录。目录选择器默认从 `~/Documents` 打开，支持的文件类型见左侧。
 										</span>
 									</label>
 									<textarea
@@ -347,8 +345,8 @@ export function RagSettingsSection({
 									<label className="settings-label settings-label-stacked">
 										<span>内置忽略目录</span>
 										<span className="settings-item-description" id="rag-fixed-ignore-globs-help">
-											这些规则始终生效，不支持取消：`{defaultRagIgnoreGlobs.join("`、`")}
-											`。命中后文件不会被切分、向量化或写入 LanceDB。
+											这些规则始终生效，不能关闭：`{defaultRagIgnoreGlobs.join("`、`")}`。
+											命中后文件不会进入索引。
 										</span>
 									</label>
 								</div>
@@ -360,7 +358,7 @@ export function RagSettingsSection({
 									>
 										<span>额外忽略通配符</span>
 										<span className="settings-item-description" id="rag-ignore-globs-help">
-											每行一个附加 glob。这里只能新增，不能移除上面的内置忽略目录。
+											每行一个附加 glob。这里只能追加，不能移除上面的内置规则。
 										</span>
 									</label>
 									<textarea

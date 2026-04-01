@@ -10,7 +10,9 @@ import {
 	chooseWorkspaceDirectory,
 	closeAcpSession,
 	createAcpSession,
+	deleteClipboardHistoryEntry,
 	executeAction,
+	getClipboardHistory,
 	getAcpAgents,
 	getAcpSessionDetail,
 	getRagRuntimeStatus,
@@ -18,7 +20,9 @@ import {
 	hideLauncherWindow,
 	isDesktopRuntimeAvailable,
 	launchApp,
+	onClipboardHistoryUpdated,
 	onExecutionProgress,
+	onOpenClipboardHistoryPanel,
 	listAcpSessions,
 	matchActions,
 	onOcrError,
@@ -33,12 +37,17 @@ import {
 	sendAcpPrompt,
 	setLauncherBlurAutoHideEnabled,
 	setWorkspace,
+	toggleClipboardHistoryEntryPin,
 	takeAcpRestoreNotices,
+	pasteClipboardHistoryEntry,
 } from "../../lib/tauri/client";
 import { useAutoResizeWindow } from "../../lib/tauri/useAutoResizeWindow";
 import type {
 	AcpAgentCatalog,
 	AcpAgentConfig,
+	ClipboardHistoryEntry,
+	ClipboardHistorySnapshot,
+	ClipboardHistorySelectionMode,
 	AcpRestoreNotice,
 	AcpSessionMessage,
 	AcpSessionDetail,
@@ -112,6 +121,7 @@ import { CompletionPopup } from "./components/CompletionPopup";
 import { SessionPanel } from "./components/SessionPanel";
 import { WorkspacePickerPanel } from "./components/WorkspacePickerPanel";
 import { AgentPickerPanel } from "./components/AgentPickerPanel";
+import { ClipboardHistoryPanel } from "./components/ClipboardHistoryPanel";
 import "./launcher.css";
 import { isRagAnswerStructuredPayload } from "./types";
 
@@ -313,6 +323,14 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 	const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
 	const [agentPickerOpen, setAgentPickerOpen] = useState(false);
 	const [restoreNotices, setRestoreNotices] = useState<AcpRestoreNotice[]>([]);
+	const [clipboardHistory, setClipboardHistory] = useState<ClipboardHistorySnapshot>({
+		pinnedEntries: [],
+		recentEntries: [],
+	});
+	const [clipboardPanelOpen, setClipboardPanelOpen] = useState(false);
+	const [clipboardSelectionMode, setClipboardSelectionMode] =
+		useState<ClipboardHistorySelectionMode>("paste_externally");
+	const [selectedClipboardEntryId, setSelectedClipboardEntryId] = useState<string | null>(null);
 	const [latestSubmittedText, setLatestSubmittedText] = useState<string | null>(null);
 	const [operationStatusText, setOperationStatusText] = useState<string | null>(null);
 	const [ragRuntimeStatus, setRagRuntimeStatus] = useState<RagRuntimeStatus>({
@@ -328,10 +346,12 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 	const shellRef = useRef<HTMLElement | null>(null);
 	const sessionPanelRef = useRef<HTMLElement | null>(null);
 	const sessionPanelTriggerRef = useRef<HTMLButtonElement | null>(null);
+	const clipboardPanelRef = useRef<HTMLElement | null>(null);
 	const workspacePickerTriggerRef = useRef<HTMLButtonElement | null>(null);
 	const workspacePickerPanelRef = useRef<HTMLDivElement | null>(null);
 	const agentPickerTriggerRef = useRef<HTMLButtonElement | null>(null);
 	const agentPickerPanelRef = useRef<HTMLDivElement | null>(null);
+	const inputAnchorRef = useRef<HTMLDivElement | null>(null);
 	const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
 	const pendingFocusAnimationFrameRef = useRef<number | null>(null);
 	const pendingFocusTimeoutRef = useRef<number | null>(null);
@@ -442,6 +462,10 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		agentCatalog.agents[0] ??
 		null;
 	const workspaceBreadcrumbs = useMemo(() => buildWorkspaceBreadcrumbs(workspace), [workspace]);
+	const flattenedClipboardEntries = useMemo(
+		() => [...clipboardHistory.pinnedEntries, ...clipboardHistory.recentEntries],
+		[clipboardHistory],
+	);
 	const visibleSessionDots = sessionSummaries.slice(0, visibleSessionDotsLimit);
 	const overflowSessionCount = Math.max(0, sessionSummaries.length - visibleSessionDotsLimit);
 	const sessionRunningCount = sessionSummaries.filter(
@@ -935,6 +959,8 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		setShortcutTranslationPending(false);
 		setCreatingSession(false);
 		setSessionPanelOpen(false);
+		setClipboardPanelOpen(false);
+		setClipboardSelectionMode("paste_externally");
 		setWorkspacePickerOpen(false);
 		setAgentPickerOpen(false);
 		setActiveSessionId(null);
@@ -1171,6 +1197,24 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 	}, [suggestionMode, textBeforeCaret]);
 
 	useEffect(() => {
+		if (flattenedClipboardEntries.length === 0) {
+			if (selectedClipboardEntryId !== null) {
+				setSelectedClipboardEntryId(null);
+			}
+			return;
+		}
+
+		if (
+			selectedClipboardEntryId &&
+			flattenedClipboardEntries.some((entry) => entry.id === selectedClipboardEntryId)
+		) {
+			return;
+		}
+
+		setSelectedClipboardEntryId(flattenedClipboardEntries[0]?.id ?? null);
+	}, [flattenedClipboardEntries, selectedClipboardEntryId]);
+
+	useEffect(() => {
 		if (suggestionCount === 0) {
 			if (selectedIndex !== 0) {
 				setSelectedIndex(0);
@@ -1217,6 +1261,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 	useAutoResizeWindow(shellRef, {
 		allowShrink: !qaAutoResizeFrozen,
 		onResizeSettled: handleQaResultResizeSettled,
+		resetKey: clipboardPanelOpen ? "clipboard-panel" : "launcher",
 	});
 
 	useEffect(
@@ -1354,6 +1399,9 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			setAgentCatalog(catalog);
 			setSelectedAgentId(catalog.defaultAgentId ?? catalog.agents[0]?.id ?? null);
 		});
+		void getClipboardHistory().then((snapshot) => {
+			setClipboardHistory(snapshot);
+		});
 		void takeAcpRestoreNotices().then((notices) => {
 			setRestoreNotices(notices);
 		});
@@ -1366,6 +1414,17 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		const workspaceUnlistenPromise = onWorkspaceUpdated((nextWorkspace) => {
 			setWorkspaceState(nextWorkspace);
 			resetQaConversation();
+		});
+		const clipboardHistoryUnlistenPromise = onClipboardHistoryUpdated((snapshot) => {
+			setClipboardHistory(snapshot);
+		});
+		const openClipboardHistoryPanelUnlistenPromise = onOpenClipboardHistoryPanel((payload) => {
+			setClipboardSelectionMode(payload.selectionMode);
+			setClipboardPanelOpen(true);
+			setWorkspacePickerOpen(false);
+			setAgentPickerOpen(false);
+			setSessionPanelOpen(false);
+			setSuggestionsHidden(true);
 		});
 		const ocrErrorUnlistenPromise = onOcrError((message) => {
 			if (
@@ -1432,12 +1491,14 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 
 		return () => {
 			void workspaceUnlistenPromise.then((unlisten) => unlisten?.());
+			void clipboardHistoryUnlistenPromise.then((unlisten) => unlisten?.());
+			void openClipboardHistoryPanelUnlistenPromise.then((unlisten) => unlisten?.());
 			void ocrErrorUnlistenPromise.then((unlisten) => unlisten?.());
 			void ocrTranslationStartedUnlistenPromise.then((unlisten) => unlisten?.());
 			void ocrTranslationUnlistenPromise.then((unlisten) => unlisten?.());
 			void executionProgressUnlistenPromise.then((unlisten) => unlisten?.());
 		};
-	}, [applyInjectedSourceText, resetQaConversation, scheduleLauncherInputFocus, updateRawText]);
+	}, [applyInjectedSourceText, resetQaConversation, scheduleLauncherInputFocus]);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -1473,7 +1534,8 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 
 		let unlistenFocusChanged: (() => void) | null = null;
 		const shouldSkipReactiveLauncherInputFocus = () =>
-			desktopRuntimeAvailable && suspendReactiveLauncherInputFocusRef.current;
+			(desktopRuntimeAvailable && suspendReactiveLauncherInputFocusRef.current) ||
+			clipboardPanelOpen;
 
 		function handleDocumentVisibilityChange() {
 			if (document.visibilityState === "visible" && !shouldSkipReactiveLauncherInputFocus()) {
@@ -1509,7 +1571,12 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			window.removeEventListener("focus", handleWindowFocus);
 			unlistenFocusChanged?.();
 		};
-	}, [clearScheduledLauncherInputFocus, desktopRuntimeAvailable, scheduleLauncherInputFocus]);
+	}, [
+		clearScheduledLauncherInputFocus,
+		clipboardPanelOpen,
+		desktopRuntimeAvailable,
+		scheduleLauncherInputFocus,
+	]);
 
 	useDismissOnPointerDownOutside({
 		open: workspacePickerOpen,
@@ -1575,6 +1642,217 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		setError(null);
 		setActiveSlashAction(null);
 	}
+
+	const updateClipboardHistorySnapshot = useCallback((snapshot: ClipboardHistorySnapshot) => {
+		setClipboardHistory(snapshot);
+	}, []);
+
+	const dismissClipboardHistoryPanel = useCallback(() => {
+		setClipboardPanelOpen(false);
+		if (clipboardSelectionMode === "insert_into_launcher") {
+			scheduleLauncherInputFocus();
+			return;
+		}
+
+		void dismissLauncher();
+	}, [clipboardSelectionMode, dismissLauncher, scheduleLauncherInputFocus]);
+
+	const findClipboardEntry = useCallback(
+		(entryId: string | null): ClipboardHistoryEntry | null => {
+			if (!entryId) {
+				return null;
+			}
+
+			return flattenedClipboardEntries.find((entry) => entry.id === entryId) ?? null;
+		},
+		[flattenedClipboardEntries],
+	);
+
+	const selectAdjacentClipboardEntry = useCallback(
+		(direction: 1 | -1) => {
+			if (flattenedClipboardEntries.length === 0) {
+				return;
+			}
+
+			const currentIndex = flattenedClipboardEntries.findIndex(
+				(entry) => entry.id === selectedClipboardEntryId,
+			);
+			const nextIndex =
+				currentIndex === -1
+					? 0
+					: (currentIndex + direction + flattenedClipboardEntries.length) %
+						flattenedClipboardEntries.length;
+			setSelectedClipboardEntryId(flattenedClipboardEntries[nextIndex]?.id ?? null);
+		},
+		[flattenedClipboardEntries, selectedClipboardEntryId],
+	);
+
+	const handleClipboardEntryPaste = useCallback(
+		async (entryId: string) => {
+			const entry = findClipboardEntry(entryId);
+			if (!entry) {
+				return;
+			}
+
+			if (clipboardSelectionMode === "insert_into_launcher") {
+				const nextRawText = replaceTextRange(
+					rawText,
+					boundedCaretIndex,
+					boundedCaretIndex,
+					entry.text,
+				);
+				pendingSelectionRef.current = nextRawText.caretIndex;
+				updateRawText(nextRawText.value, nextRawText.caretIndex);
+				setClipboardPanelOpen(false);
+				scheduleLauncherInputFocus();
+				setError(null);
+				return;
+			}
+
+			try {
+				const snapshot = await pasteClipboardHistoryEntry(entryId);
+				updateClipboardHistorySnapshot(snapshot);
+				setClipboardPanelOpen(false);
+				setError(null);
+			} catch (clipboardError) {
+				setError(getErrorMessage(clipboardError, "回贴历史剪贴板失败"));
+			}
+		},
+		[
+			boundedCaretIndex,
+			clipboardSelectionMode,
+			findClipboardEntry,
+			rawText,
+			scheduleLauncherInputFocus,
+			updateClipboardHistorySnapshot,
+			updateRawText,
+		],
+	);
+
+	const handleSelectedClipboardEntryPaste = useCallback(async () => {
+		const selectedEntry = findClipboardEntry(selectedClipboardEntryId);
+		if (!selectedEntry) {
+			return;
+		}
+
+		await handleClipboardEntryPaste(selectedEntry.id);
+	}, [findClipboardEntry, handleClipboardEntryPaste, selectedClipboardEntryId]);
+
+	const handleClipboardEntryTogglePin = useCallback(
+		async (entryId: string) => {
+			try {
+				const snapshot = await toggleClipboardHistoryEntryPin(entryId);
+				updateClipboardHistorySnapshot(snapshot);
+				setSelectedClipboardEntryId(entryId);
+				setError(null);
+			} catch (clipboardError) {
+				setError(getErrorMessage(clipboardError, "切换历史剪贴板固定状态失败"));
+			}
+		},
+		[updateClipboardHistorySnapshot],
+	);
+
+	const handleSelectedClipboardEntryTogglePin = useCallback(async () => {
+		const selectedEntry = findClipboardEntry(selectedClipboardEntryId);
+		if (!selectedEntry) {
+			return;
+		}
+
+		await handleClipboardEntryTogglePin(selectedEntry.id);
+	}, [findClipboardEntry, handleClipboardEntryTogglePin, selectedClipboardEntryId]);
+
+	const handleClipboardEntryDelete = useCallback(
+		async (entryId: string) => {
+			try {
+				const snapshot = await deleteClipboardHistoryEntry(entryId);
+				updateClipboardHistorySnapshot(snapshot);
+				setError(null);
+			} catch (clipboardError) {
+				setError(getErrorMessage(clipboardError, "删除历史剪贴板失败"));
+			}
+		},
+		[updateClipboardHistorySnapshot],
+	);
+
+	const handleSelectedClipboardEntryDelete = useCallback(async () => {
+		const selectedEntry = findClipboardEntry(selectedClipboardEntryId);
+		if (!selectedEntry) {
+			return;
+		}
+
+		await handleClipboardEntryDelete(selectedEntry.id);
+	}, [findClipboardEntry, handleClipboardEntryDelete, selectedClipboardEntryId]);
+
+	useEffect(() => {
+		if (typeof window === "undefined") {
+			return;
+		}
+
+		if (!clipboardPanelOpen) {
+			return;
+		}
+
+		const handleWindowKeyDown = (event: globalThis.KeyboardEvent) => {
+			if (
+				(event.key === "Delete" || event.key === "Backspace") &&
+				!event.metaKey &&
+				!event.ctrlKey &&
+				!event.altKey
+			) {
+				event.preventDefault();
+				void handleSelectedClipboardEntryDelete();
+				return;
+			}
+
+			if (event.key.toLowerCase() === "p" && (event.metaKey || event.ctrlKey) && !event.altKey) {
+				event.preventDefault();
+				void handleSelectedClipboardEntryTogglePin();
+				return;
+			}
+
+			if (event.key === "ArrowDown") {
+				event.preventDefault();
+				selectAdjacentClipboardEntry(1);
+				return;
+			}
+
+			if (event.key === "ArrowUp") {
+				event.preventDefault();
+				selectAdjacentClipboardEntry(-1);
+				return;
+			}
+
+			if (event.key === "Escape") {
+				event.preventDefault();
+				dismissClipboardHistoryPanel();
+				return;
+			}
+
+			if (event.key === "Enter" && !event.metaKey && !event.ctrlKey && !event.altKey) {
+				event.preventDefault();
+				void handleSelectedClipboardEntryPaste();
+			}
+		};
+
+		window.addEventListener("keydown", handleWindowKeyDown, true);
+		return () => {
+			window.removeEventListener("keydown", handleWindowKeyDown, true);
+		};
+	}, [
+		clipboardPanelOpen,
+		dismissClipboardHistoryPanel,
+		handleSelectedClipboardEntryDelete,
+		handleSelectedClipboardEntryPaste,
+		handleSelectedClipboardEntryTogglePin,
+		selectAdjacentClipboardEntry,
+	]);
+
+	useDismissOnPointerDownOutside({
+		open: clipboardPanelOpen,
+		triggerRef: inputAnchorRef,
+		panelRef: clipboardPanelRef,
+		onDismiss: dismissClipboardHistoryPanel,
+	});
 
 	function appendRagConversationTurn(question: string, answer: string) {
 		const normalizedQuestion = question.trim();
@@ -1883,6 +2161,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		const explicitSlashSelection =
 			rawText.trimStart().startsWith("/") &&
 			selected.descriptor.aliases.some((alias) => alias.startsWith("/"));
+
 		const payloadState = explicitSlashSelection
 			? deriveSelectedSlashActionPayload(rawText, boundedCaretIndex, selected.descriptor.aliases)
 			: slashInputMatch
@@ -2352,144 +2631,185 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			: "输入应用名，或用 / 执行动作、@ 搜索当前 workspace 文件";
 
 	return (
-		<main className="launcher-shell" ref={shellRef}>
-			<section className="launcher-frame" ref={frameRef} style={{ width: `${frameWidth}px` }}>
-				<LauncherHeader
-					workspacePickerOpen={workspacePickerOpen}
-					workspacePickerTriggerRef={workspacePickerTriggerRef}
-					workspaceBreadcrumbs={workspaceBreadcrumbs}
-					onToggleWorkspacePicker={() => setWorkspacePickerOpen((current) => !current)}
-					onSelectWorkspaceCrumb={(path) => void handleWorkspaceCrumbClick(path)}
-					onWorkspaceDragStart={handleWorkspaceDragStart}
-					agentConfigured={agentConfigured}
-					agentPickerOpen={agentPickerOpen}
-					agentPickerTriggerRef={agentPickerTriggerRef}
-					selectedAgentName={selectedAgent?.name ?? null}
-					onToggleAgentPicker={() => setAgentPickerOpen((current) => !current)}
-					creatingSession={creatingSession}
-					onCreateSession={() => void handleCreateSession()}
-					sessionPanelOpen={sessionPanelOpen}
-					sessionPanelTriggerRef={sessionPanelTriggerRef}
-					sessionTriggerSummary={sessionTriggerSummary}
-					sessionCount={sessionSummaries.length}
-					visibleSessionDots={visibleSessionDots}
-					activeSessionId={activeSessionId}
-					overflowSessionCount={overflowSessionCount}
-					onToggleSessionPanel={() => setSessionPanelOpen((current) => !current)}
-					onSelectSessionDot={(sessionId) => void handleSessionDotClick(sessionId)}
-					onOpenSessionPanel={() => setSessionPanelOpen(true)}
-				/>
+		<main
+			className={
+				clipboardPanelOpen ? "launcher-shell launcher-shell-clipboard-only" : "launcher-shell"
+			}
+			ref={shellRef}
+		>
+			{!clipboardPanelOpen ? (
+				<section className="launcher-frame" ref={frameRef} style={{ width: `${frameWidth}px` }}>
+					<LauncherHeader
+						workspacePickerOpen={workspacePickerOpen}
+						workspacePickerTriggerRef={workspacePickerTriggerRef}
+						workspaceBreadcrumbs={workspaceBreadcrumbs}
+						onToggleWorkspacePicker={() => {
+							setWorkspacePickerOpen((current) => !current);
+							setClipboardPanelOpen(false);
+						}}
+						onSelectWorkspaceCrumb={(path) => void handleWorkspaceCrumbClick(path)}
+						onWorkspaceDragStart={handleWorkspaceDragStart}
+						agentConfigured={agentConfigured}
+						agentPickerOpen={agentPickerOpen}
+						agentPickerTriggerRef={agentPickerTriggerRef}
+						selectedAgentName={selectedAgent?.name ?? null}
+						onToggleAgentPicker={() => {
+							setAgentPickerOpen((current) => !current);
+							setClipboardPanelOpen(false);
+						}}
+						creatingSession={creatingSession}
+						onCreateSession={() => void handleCreateSession()}
+						sessionPanelOpen={sessionPanelOpen}
+						sessionPanelTriggerRef={sessionPanelTriggerRef}
+						sessionTriggerSummary={sessionTriggerSummary}
+						sessionCount={sessionSummaries.length}
+						visibleSessionDots={visibleSessionDots}
+						activeSessionId={activeSessionId}
+						overflowSessionCount={overflowSessionCount}
+						onToggleSessionPanel={() => {
+							setSessionPanelOpen((current) => !current);
+							setClipboardPanelOpen(false);
+						}}
+						onSelectSessionDot={(sessionId) => void handleSessionDotClick(sessionId)}
+						onOpenSessionPanel={() => {
+							setSessionPanelOpen(true);
+							setClipboardPanelOpen(false);
+						}}
+					/>
 
-				<RestoreNoticeList restoreNotices={restoreNotices} />
+					<RestoreNoticeList restoreNotices={restoreNotices} />
 
-				<LauncherComposer
-					inputMode={inputMode}
-					inputRef={inputRef}
-					rawText={rawText}
-					inputPlaceholder={inputPlaceholder}
-					inputLabel="输入动作、问题或文件路径"
-					inputDescriptionId="launcher-status-region"
-					statusLabel={statusBarState.label}
-					statusItems={statusBarState.items}
-					statusTone={statusBarState.tone}
-					onUpdateRawText={updateRawText}
-					onSyncCaretIndex={syncCaretIndex}
-					onKeyDown={handleKeyDown}
-					onOpenSettings={onOpenSettings}
-					hasCompletion={hasCompletion}
-					hasSuggestions={hasSuggestions}
-					completionPopupId={launcherCompletionPopupId}
-					activeCompletionOptionId={activeCompletionOptionId}
-					onAcceptCompletion={acceptCompletion}
-					agentActionPending={agentActionPending}
-					showAgentAction={showAgentActionButton}
-					agentActionLabel={agentActionLabel}
-					agentActionTitle={agentActionTitle}
-					canRunAgentAction={canRunAgentAction}
-					showAgentActionShortcut={showAgentActionShortcut}
-					showTranslateAction={showTranslateAction}
-					primaryActionShortcutLabel={primaryActionShortcutLabel}
-					primaryActionLabel={primaryActionState.label}
-					primaryActionTone={primaryActionState.tone}
-					canRunPrimaryAction={canRunPrimaryAction}
-					canRunTranslateAction={canRunTranslateAction}
-					agentActionShortcutLabel={agentActionShortcutLabel}
-					onAgentExecute={() => {
-						if (agentConfigured) {
-							void handleAgentExecute();
-							return;
-						}
+					<LauncherComposer
+						inputAnchorRef={inputAnchorRef}
+						inputMode={inputMode}
+						inputRef={inputRef}
+						rawText={rawText}
+						inputPlaceholder={inputPlaceholder}
+						inputLabel="输入动作、问题或文件路径"
+						inputDescriptionId="launcher-status-region"
+						statusLabel={statusBarState.label}
+						statusItems={statusBarState.items}
+						statusTone={statusBarState.tone}
+						onUpdateRawText={updateRawText}
+						onSyncCaretIndex={syncCaretIndex}
+						onKeyDown={handleKeyDown}
+						onOpenSettings={onOpenSettings}
+						hasCompletion={hasCompletion}
+						hasSuggestions={hasSuggestions}
+						completionPopupId={launcherCompletionPopupId}
+						activeCompletionOptionId={activeCompletionOptionId}
+						onAcceptCompletion={acceptCompletion}
+						agentActionPending={agentActionPending}
+						showAgentAction={showAgentActionButton}
+						agentActionLabel={agentActionLabel}
+						agentActionTitle={agentActionTitle}
+						canRunAgentAction={canRunAgentAction}
+						showAgentActionShortcut={showAgentActionShortcut}
+						showTranslateAction={showTranslateAction}
+						primaryActionShortcutLabel={primaryActionShortcutLabel}
+						primaryActionLabel={primaryActionState.label}
+						primaryActionTone={primaryActionState.tone}
+						canRunPrimaryAction={canRunPrimaryAction}
+						canRunTranslateAction={canRunTranslateAction}
+						agentActionShortcutLabel={agentActionShortcutLabel}
+						onAgentExecute={() => {
+							if (agentConfigured) {
+								void handleAgentExecute();
+								return;
+							}
 
-						onOpenSettings?.();
-					}}
-					onRunTranslateAction={() => void handleTranslateAction()}
-					showCancelActiveSession={showCancelActiveSession}
-					onCancelActiveSession={() => void handleCancelActiveSession()}
-					onRunPrimaryAction={() => void runPrimaryAction()}
-				/>
+							onOpenSettings?.();
+						}}
+						onRunTranslateAction={() => void handleTranslateAction()}
+						showCancelActiveSession={showCancelActiveSession}
+						onCancelActiveSession={() => void handleCancelActiveSession()}
+						onRunPrimaryAction={() => void runPrimaryAction()}
+					/>
 
-				<LauncherFeedback
-					activeSession={activeSession}
-					qaCitations={qaConversationState?.citations ?? []}
-					qaRetrieval={qaRetrieval}
-					qaMessages={qaMessages}
-					sessionLogRef={sessionLogRef}
-					result={result}
-					jsonPreview={jsonPreview}
-					markdownPreview={markdownPreview}
-					onOpenRagCitation={(citation) => void handleOpenRagCitation(citation)}
-				/>
-			</section>
+					<LauncherFeedback
+						activeSession={activeSession}
+						qaCitations={qaConversationState?.citations ?? []}
+						qaRetrieval={qaRetrieval}
+						qaMessages={qaMessages}
+						sessionLogRef={sessionLogRef}
+						result={result}
+						jsonPreview={jsonPreview}
+						markdownPreview={markdownPreview}
+						onOpenRagCitation={(citation) => void handleOpenRagCitation(citation)}
+					/>
+				</section>
+			) : null}
 
-			<CompletionPopup
-				hasSuggestions={hasSuggestions}
-				suggestionMode={suggestionMode}
-				popupId={launcherCompletionPopupId}
-				optionIdPrefix={launcherCompletionOptionIdPrefix}
-				completionOffset={completionOffset}
-				completionListRef={completionListRef}
-				selectedIndex={selectedIndex}
-				visibleFileMatches={visibleFileMatches}
-				visibleActionMatches={visibleActionMatches}
-				visibleAppMatches={visibleAppMatches}
-				onSelectIndex={setSelectedIndex}
-				onSelectFile={selectFile}
-				onRunSelectedAction={(index) => void runSelectedAction(index)}
-				onRunSelectedApp={(index) => void runSelectedApp(index)}
+			{!clipboardPanelOpen ? (
+				<>
+					<CompletionPopup
+						hasSuggestions={hasSuggestions}
+						suggestionMode={suggestionMode}
+						popupId={launcherCompletionPopupId}
+						optionIdPrefix={launcherCompletionOptionIdPrefix}
+						completionOffset={completionOffset}
+						completionListRef={completionListRef}
+						selectedIndex={selectedIndex}
+						visibleFileMatches={visibleFileMatches}
+						visibleActionMatches={visibleActionMatches}
+						visibleAppMatches={visibleAppMatches}
+						onSelectIndex={setSelectedIndex}
+						onSelectFile={selectFile}
+						onRunSelectedAction={(index) => void runSelectedAction(index)}
+						onRunSelectedApp={(index) => void runSelectedApp(index)}
+					/>
+
+					<SessionPanel
+						open={sessionPanelOpen}
+						offset={sessionPanelOffset}
+						panelRef={sessionPanelRef}
+						agentConfigured={agentConfigured}
+						sessionSummaries={sessionSummaries}
+						sessionRunningCount={sessionRunningCount}
+						sessionAttentionCount={sessionAttentionCount}
+						activeSessionId={activeSessionId}
+						workspace={workspace}
+						onSelectSession={(sessionId) => void handleSessionPanelSelect(sessionId)}
+						onCloseSession={(sessionId) => void handleCloseSession(sessionId)}
+					/>
+				</>
+			) : null}
+
+			<ClipboardHistoryPanel
+				open={clipboardPanelOpen}
+				panelRef={clipboardPanelRef}
+				selectionMode={clipboardSelectionMode}
+				pinnedEntries={clipboardHistory.pinnedEntries}
+				recentEntries={clipboardHistory.recentEntries}
+				selectedEntryId={selectedClipboardEntryId}
+				onSelectEntry={setSelectedClipboardEntryId}
+				onPasteEntry={(entryId) => void handleClipboardEntryPaste(entryId)}
+				onTogglePin={(entryId) => void handleClipboardEntryTogglePin(entryId)}
+				onDeleteEntry={(entryId) => void handleClipboardEntryDelete(entryId)}
 			/>
 
-			<SessionPanel
-				open={sessionPanelOpen}
-				offset={sessionPanelOffset}
-				panelRef={sessionPanelRef}
-				agentConfigured={agentConfigured}
-				sessionSummaries={sessionSummaries}
-				sessionRunningCount={sessionRunningCount}
-				sessionAttentionCount={sessionAttentionCount}
-				activeSessionId={activeSessionId}
-				workspace={workspace}
-				onSelectSession={(sessionId) => void handleSessionPanelSelect(sessionId)}
-				onCloseSession={(sessionId) => void handleCloseSession(sessionId)}
-			/>
+			{!clipboardPanelOpen ? (
+				<>
+					<WorkspacePickerPanel
+						open={workspacePickerOpen}
+						offset={workspacePickerOffset}
+						panelRef={workspacePickerPanelRef}
+						recentWorkspaceRoots={recentWorkspaceRoots}
+						workspace={workspace}
+						onPickWorkspace={() => void handleWorkspacePick()}
+						onSelectRecentWorkspace={(path) => void handleRecentWorkspaceClick(path)}
+					/>
 
-			<WorkspacePickerPanel
-				open={workspacePickerOpen}
-				offset={workspacePickerOffset}
-				panelRef={workspacePickerPanelRef}
-				recentWorkspaceRoots={recentWorkspaceRoots}
-				workspace={workspace}
-				onPickWorkspace={() => void handleWorkspacePick()}
-				onSelectRecentWorkspace={(path) => void handleRecentWorkspaceClick(path)}
-			/>
-
-			<AgentPickerPanel
-				open={agentPickerOpen}
-				offset={agentPickerOffset}
-				panelRef={agentPickerPanelRef}
-				agents={agentCatalog.agents}
-				selectedAgentId={selectedAgent?.id ?? null}
-				onSelectAgent={handleAgentSelect}
-			/>
+					<AgentPickerPanel
+						open={agentPickerOpen}
+						offset={agentPickerOffset}
+						panelRef={agentPickerPanelRef}
+						agents={agentCatalog.agents}
+						selectedAgentId={selectedAgent?.id ?? null}
+						onSelectAgent={handleAgentSelect}
+					/>
+				</>
+			) : null}
 		</main>
 	);
 }

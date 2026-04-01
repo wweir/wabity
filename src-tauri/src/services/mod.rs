@@ -1,5 +1,7 @@
 pub mod acp;
 pub mod application;
+pub mod builtin_mcp;
+pub mod clipboard;
 pub mod command_prefix;
 pub mod document_extract;
 pub mod executor;
@@ -12,7 +14,6 @@ pub mod public_skills;
 pub mod question_answer_backend;
 pub mod rag;
 pub mod rag_answer;
-pub mod rag_mcp;
 pub mod rag_query;
 pub mod selection;
 pub mod translate;
