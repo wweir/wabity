@@ -6,6 +6,11 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DMG_SCRIPT_PATH="$ROOT_DIR/src-tauri/target/release/bundle/dmg/bundle_dmg.sh"
 PATCH_SCRIPT_PATH="$ROOT_DIR/scripts/patch-bundle-dmg.mjs"
 TAURI_BIN="$ROOT_DIR/node_modules/.bin/tauri"
+RUN_DMG_PATCH_WATCHER=1
+
+if [[ "${CI:-}" == "true" ]]; then
+	RUN_DMG_PATCH_WATCHER=0
+fi
 
 watch_bundle_script_and_patch() {
 	while true; do
@@ -29,7 +34,9 @@ cleanup() {
 
 trap cleanup EXIT
 
-watch_bundle_script_and_patch &
-watcher_pid=$!
+if [[ "$RUN_DMG_PATCH_WATCHER" -eq 1 ]]; then
+	watch_bundle_script_and_patch &
+	watcher_pid=$!
+fi
 
 "$TAURI_BIN" build --bundles dmg

@@ -14,19 +14,18 @@ concurrency:
 
 jobs:
   release-macos-dmg:
-    runs-on: macos-latest
+    runs-on: macos-15
     env:
       CI: "true"
-      TAURI_BUNDLER_DMG_IGNORE_CI: "true"
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -36,6 +35,13 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ./src-tauri -> target
+          cache-on-failure: true
+
       - name: Setup protoc
         run: brew install protobuf
 
@@ -44,7 +50,15 @@ jobs:
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           PACKAGE_VERSION="$(node -p "require('./package.json').version")"
           TAURI_VERSION="$(node -e "const fs = require('fs'); const config = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8')); process.stdout.write(config.version);")"
-          CARGO_VERSION="$(sed -n 's/^version = \"\\([^\"]*\\)\"$/\\1/p' src-tauri/Cargo.toml | head -n 1)"
+          CARGO_VERSION="$(python3 - <<'PY'
+          import tomllib
+
+          with open('src-tauri/Cargo.toml', 'rb') as file:
+              cargo = tomllib.load(file)
+
+          print(cargo['package']['version'], end='')
+          PY
+          )"
 
           if [[ "$TAG_VERSION" != "$PACKAGE_VERSION" ]]; then
             echo "Tag version $TAG_VERSION does not match package.json version $PACKAGE_VERSION" >&2

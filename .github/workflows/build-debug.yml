@@ -11,16 +11,16 @@ concurrency:
 
 jobs:
   build-debug:
-    runs-on: macos-latest
+    runs-on: macos-15
     env:
       CI: "true"
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -29,6 +29,13 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ./src-tauri -> target
+          cache-on-failure: true
 
       - name: Setup protoc
         run: brew install protobuf
