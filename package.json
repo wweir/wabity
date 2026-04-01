@@ -14,7 +14,7 @@
 		"preview": "vite preview",
 		"tauri": "tauri",
 		"tauri:build": "tauri build",
-		"tauri:build:macos:dmg": "tauri build --bundles dmg"
+		"tauri:build:macos:dmg": "bash ./scripts/tauri-build-macos-dmg.sh"
 	},
 	"dependencies": {
 		"@tauri-apps/api": "^2",
