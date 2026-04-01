@@ -36,10 +36,11 @@
 
 - 2026-03-26：第一步已落地 `docx`
 - 2026-03-28：第二步已落地文本型 `pdf`
+- 2026-03-30：PDF 抽取实现从 `pdf-extract` 切到 `lopdf`，原因是前者对畸形 content stream 存在进程内 panic 风险
 - 当前实现新增独立 `document_extract` 模块
 - `docx` 会先解 ZIP，读取 `word/document.xml`，并在可用时读取 `word/styles.xml`
 - 抽取结果会被规范化成 Markdown 风格文本，再复用现有标题路径和语义切块逻辑
-- 文本型 `pdf` 会先按页抽取文本、做轻量页眉页脚去噪，并切成页级 block；当前 chunk 主锚点为 `page_start/page_end`
+- 文本型 `pdf` 会先使用 `lopdf` 按页抽取文本、做轻量页眉页脚去噪，并切成页级 block；单页解析失败只降级为 warning；当前 chunk 主锚点为 `page_start/page_end`
 - `wabity.read_document_excerpt` 已支持按 `path + chunk_index` 回读抽取型文档摘录，`wabity.read_file_lines` 继续只服务文本行语义稳定的文档
 - 旧二进制 `.doc` 仍未实现
 
@@ -317,7 +318,7 @@ LanceDB chunk 行和查询返回结构建议补充：
 
 推荐实现：
 
-- 使用 `pdf-extract` 作为 v1 抽取器
+- 使用 `lopdf` 直接按页提取文本，避免引入会在坏 PDF 上 panic 的抽取层
 
 抽取策略：
 
@@ -367,9 +368,9 @@ LanceDB chunk 行和查询返回结构建议补充：
 
 ### 后续可能引入
 
-- `pdf-extract`
-  - 作为文本型 PDF 的 v1 抽取器
-  - 先换来可用闭环，再决定是否需要更强实现
+- 更强的 PDF 专用抽取器
+  - 仅当 `lopdf` 的文本顺序或字体兼容性无法满足实际文档质量时再评估
+  - 前提是库必须先证明自己不会把坏输入升级成线程 panic
 
 ### 暂不建议引入
 
@@ -409,7 +410,7 @@ LanceDB chunk 行和查询返回结构建议补充：
 
 ### 阶段 3：PDF 接入
 
-- 用 `pdf-extract` 接入文本型 PDF
+- 用 `lopdf` 接入文本型 PDF
 - 抽取结果按页组织
 - citation 支持页码
 

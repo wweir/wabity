@@ -13,9 +13,10 @@
 - `question_answer_backend`：对外暴露稳定问答后端函数接口，负责把 `AppState` 或集成测试传入的运行时上下文收口到统一入口；具体实现继续委托 `rag_answer`，但调用方不再依赖其内部模块布局
 - `rag_backend`：通过库导出 `RagIndexService` 和检索入口，供集成测试直接覆盖“建库 + 混合检索”链路；它不是新的业务层，只是现有 `rag` / `rag_query` 的稳定测试边界
 - `rag`：维护本地 LanceDB 向量索引和 SQLite 元数据/FTS 词法索引，负责目录扫描、文件监听、文档抽取、文本切分、行号/页码/标题元数据提取、embedding 调用、chunk 复用、版本切换和增量重建；实现按 `service`、`indexing`、`storage`、`embedding`、`chunking`、`config`、`status`、`model` 拆成目录模块，避免继续把运行时编排、切块、向量请求和持久化混在一个文件里
-- `rag_answer`：按 AI 功能页里显式选择的问答 LLM 协议在 OpenAI 兼容 `responses` 或 `chat/completions` 上执行工具循环问答。根模块现在只保留入口编排、共享类型和回合循环；`conversation_state`、`result`、`parsing`、`tool_catalog`、`tool_execute`、`protocol_responses`、`protocol_chat` 分别承接续链状态、结果投影、解析辅助、工具目录、内置工具执行和协议适配，避免再把协议细节、宿主机探测与路径白名单重新堆回单文件。两条链路都会注入内置 `wabity.read_file_lines` / `wabity.read_document_excerpt` / `wabity.rag.query` / `wabity.system.open`；其中 `responses` 默认额外注入全局 HTTP/SSE MCP server，并在条目显式开启 `supports_stateful` 后复用上一轮 `response_id`，但所有协议都会把累计 citation / action / tool 摘要一起回传。`wabity.system.open` 是有副作用工具：只有当前问题明确要求打开链接、文件或目录时才允许执行，本地路径仍只允许落在当前 workspace 和显式配置的 RAG source roots 内；其 tool description 会在请求构建时动态附带当前宿主机 OS、版本和 PATH 上检测到的包管理器列表。若 `chat/completions` 同时返回正文和 reasoning，后端会把两者拆开：正文继续走 `primary_text`，reasoning 作为结构化 payload 的次级字段回传，避免把思考内容直接冒充主答案；兼容层若把 thinking 混在 `message.content` 的 typed item 或 `<think>...</think>` 片段里，后端也会在归一化阶段先拆出 `reasoning`。后端只会在 `continuation_scope` 与“当前 provider + 当前 workspace”一致时继续沿用这份状态，避免跨上下文误续链；若 `responses stateful` 在继续追问的首轮因为 provider 预算或上下文过大被拒绝，会自动丢弃旧 `response_id`，回退到显式最近历史重试一次；若某个 OpenAI-compatible 兼容层对工具支持不完整，在带 `type=mcp` 或普通 `function` tools 时直接返回 5xx，或请求在 provider 侧长时间挂起后超时/取消，问答链路会逐级收缩：先去掉远程 MCP tools，再必要时退到无工具请求；并把这次探测结果缓存在当前进程里，后续同一 `base_url + model` 直接从已知可用级别起步，避免每轮都先踩一遍失败路径
+- `rag_answer`：按 AI 功能页里显式选择的问答 LLM 协议在 OpenAI 兼容 `responses` 或 `chat/completions` 上执行工具循环问答。根模块现在只保留入口编排、共享类型和回合循环；`conversation_state`、`result`、`parsing`、`tool_catalog`、`tool_execute`、`protocol_responses`、`protocol_chat` 分别承接续链状态、结果投影、解析辅助、工具目录、内置工具执行和协议适配，避免再把协议细节、宿主机探测与路径白名单重新堆回单文件。两条链路都会注入内置 `wabity.read_file_lines` / `wabity.read_document_excerpt` / `wabity.rag.query` / `wabity.system.open`；其中 `responses` 默认额外注入全局 HTTP/SSE MCP server，但会显式排除 Wabity 自己的内置 loopback MCP，避免和本地 function tools 重复暴露同一批能力，并在条目显式开启 `supports_stateful` 后复用上一轮 `response_id`，但所有协议都会把累计 citation / action / tool 摘要一起回传。内置工具执行统一受运行时超时约束，避免文件读取、RAG 查询或 opener 把整轮问答无限拖住。`wabity.system.open` 是有副作用工具：只有当前问题明确要求打开链接、文件或目录时才允许执行，本地路径仍只允许落在当前 workspace 和显式配置的 RAG source roots 内；其 tool description 会在请求构建时动态附带当前宿主机 OS、版本和 PATH 上检测到的包管理器列表。若 `chat/completions` 同时返回正文和 reasoning，后端会把两者拆开：正文继续走 `primary_text`，reasoning 作为结构化 payload 的次级字段回传，避免把思考内容直接冒充主答案；兼容层若把 thinking 混在 `message.content` 的 typed item 或 `<think>...</think>` 片段里，后端也会在归一化阶段先拆出 `reasoning`。后端只会在 `continuation_scope` 与“当前 provider + 当前 workspace”一致时继续沿用这份状态，避免跨上下文误续链；若 `responses stateful` 在继续追问的首轮因为 provider 预算或上下文过大被拒绝，会自动丢弃旧 `response_id`，回退到显式最近历史重试一次；若某个 OpenAI-compatible 兼容层对工具支持不完整，在带 `type=mcp` 或普通 `function` tools 时直接返回 5xx，或请求在 provider 侧长时间挂起后超时/取消，问答链路会逐级收缩：先去掉远程 MCP tools，再必要时退到无工具请求；并把这次探测结果按 `base_url + model + 工具目录指纹` 缓存在当前进程里，并带 TTL；降级缓存还会在较短窗口后主动重探，避免把一次瞬时故障错误放大成长期降级
 - `rag_query`：并行执行 LanceDB 向量候选和 SQLite `FTS5 + bm25()` 词法候选，按 chunk 去重合并后再做轻量 rerank，并按自适应关联度阈值、强锚点词过滤、相对距离截断和单文件配额裁剪，只返回相对高关联的结构化命中
-- `rag_mcp`：复用统一内置 loopback HTTP 端口，并把 RAG MCP 挂到路径路由上，暴露 `wabity.rag.search` tool 给外部 ACP agent 调用
+- `builtin_mcp`：复用统一内置 loopback HTTP 端口，在同一个 MCP server 内按模块注册只读工具；当前拆成 `rag` 模块和 `document` 模块，分别暴露 `wabity.rag.search`、`wabity.read_file_lines`、`wabity.read_document_excerpt`。server 直接读取运行态 `workspace + RagSettings + LlmSettings + 内置模块配置` 快照，设置保存后即时同步，不在热路径重复走 `ConfigStore.load()`
+- `clipboard`：后台轮询系统剪贴板，只记录少量文本历史，维护 pinned/recent 分组、连续重复去重、自写回 suppression，以及“写系统剪贴板后再向外部应用发送粘贴快捷键”所需的受控链路
 - `selection`：读取当前活跃应用复制动作产生的选中文本，并避免把旧剪贴板内容误判成新选区；macOS 下这条链路必须留在快捷键处理线程执行，不能丢进 Tokio worker
 - `translate`：读取 AI 功能配置里的翻译提示词和翻译 LLM，严格按条目协议调用 OpenAI 兼容 `responses` 或 `chat/completions` 完成翻译；所有翻译请求都会显式注入 `thinking: { type: "disabled" }` 并请求流式返回，避免把翻译这种低复杂度任务误送进思考模式或被兼容层整包缓冲
 - `public_skills`：扫描 `~/.agents/skills`，解析 `SKILL.md` frontmatter，并构建目录树
@@ -24,6 +25,7 @@
 边界：
 
 - `matcher` 与 `executor` 优先保持纯逻辑，便于单元测试
+- `clipboard` 和 `selection` 不是同一种能力：`selection` 只负责临时模拟复制当前选区并恢复原剪贴板；历史剪贴板则维护长期少量文本记录，两者不能混成一个模块
 - `open_target` 属于有副作用的运行时能力，不继续塞进 `executor`；`/open` 的 URL、绝对路径、`~` 路径和 workspace-relative 路径都在这里解析并统一交给系统 opener
 - `application` 当前刻意只覆盖 macOS `.app` bundle：扫描 `/Applications`、`/System/Applications` 和 `~/Applications`
 - `application` 对每个 bundle 优先读取 macOS metadata 里的本地化显示名，并把 bundle 目录名保留为别名参与匹配，解决 `WeChat.app` / `DingTalk.app` 这类中文名称搜索问题
@@ -43,9 +45,11 @@
 - `file_search` 按操作系统选择搜索后端；当前 macOS 优先 workspace 范围内的 Spotlight，失败或无结果时回退到 `ignore` + `skim` matcher 的本地索引
 - `acp` 当前只支持本地 `stdio` ACP transport，不声明文件或终端 capability；但 session 创建/恢复时会把全局 MCP server 配置透传给 ACP agent
 - `acp` 当前不会把自己实现成 MCP client/bridge；如果 agent 支持 ACP `mcp_servers`，就由 agent 自己连接这些 MCP server
-- `rag_mcp` 不是新的索引链路；它只包装已有 LanceDB 查询能力，不重复维护第二份向量库
-- `rag_mcp` 当前复用统一内置 loopback HTTP 端口 `127.0.0.1:43189`，路径固定为 `/internal/mcp/rag`，并只返回 JSON response mode；`GET` 明确返回 `405`，不伪装成已启用 SSE
-- `rag_mcp` 在索引仍有 pending 文件时不会再把部分命中伪装成稳定成功结果；它会返回显式 error payload，并把 partial result 放进结构化字段里提醒调用方当前结果不完整
+- `builtin_mcp` 不是新的索引链路；`rag` 模块只包装已有 LanceDB 查询能力，`document` 模块只包装已有文档读取 / chunk 摘录能力，不重复维护第二份索引或抽取缓存
+- `builtin_mcp` 当前复用统一内置 loopback HTTP 端口 `127.0.0.1:43189`，主路径固定为 `/internal/mcp`，兼容保留旧的 `/internal/mcp/rag`；只返回 JSON response mode，`GET` 明确返回 `405`，不伪装成已启用 SSE
+- `builtin_mcp` 的 tool 可见性受内置模块配置控制：同一个 server 根据设置页启用的模块决定 `tools/list` / `tools/call`；如果 server 已启用但没有任何模块，endpoint 仍运行，但工具目录为空
+- `builtin_mcp` 的 `document` 模块只允许访问当前 workspace 根目录和显式配置的 RAG source roots，不把内置 MCP 扩成任意本地文件读取口子
+- `builtin_mcp` 的 `rag` 模块在索引仍有 pending 文件时不会把部分命中伪装成稳定成功结果；它会返回显式 error payload，并把 partial result 放进结构化字段里提醒调用方当前结果不完整
 - `acp` 会持久化 live session 快照，并在启动时尝试使用 agent 的 `session/load` 恢复；不支持或失败时只记录恢复提示
 - `public_skills` 是只读服务：只返回 skill meta、目录/文件统计和层级树，不读取普通文件内容
 - 真正的系统能力接入通过基础设施层或前端 effect 完成
@@ -54,7 +58,7 @@
 - `translate`、`ocr`、`rag_answer`、`rag` embedding 和设置页 `/models` 拉取都必须复用统一 OpenAI-compatible 薄 client 与适配逻辑；新增链路如果继续手写重复传输或解析，后续 provider 兼容性会再次分叉
 - OCR provider 选择和 OpenAI 风格 `base_url/api_key/model_type/model/supports_multimodal` 声明来自配置层；当前 OCR 只消费“普通 LLM 类型且显式开启多模态”这条组合。保存设置时会做基本校验，启动阶段遇到坏配置则降级为明确不可用状态
 - 交互式截图本身仍然只在 macOS 下实现；远程 provider 目前只是替换“识别器”，没有顺带把截图能力跨平台化
-- `rag` 只消费配置层里显式配置成 Embedding 类型的条目；它当前会扫描后缀为 `.md`、`.mdx`、`.txt`、`.markdown`、`.rst`、`.adoc`、`.docx`、`.pdf` 的文档源，大小不超过 50 MB。纯文本类文件仍要求内容是可读 UTF-8 且不含 NUL 字节；`docx` 会先通过独立抽取层把 `word/document.xml` 规范化成 Markdown 风格文本；文本型 `pdf` 会先按页抽取文本并切成页级 block，再进入现有 chunk 打包链路。Markdown 类文件和 `docx` 会先按标题、列表项、代码块和普通段落做语义预切，再在同一 `heading_path` 下按字符预算打包；只有单个语义块本身超过硬上限时，才回退到 `MarkdownSplitter` 在块内继续拆分。其余文本文件继续使用 `TextSplitter`。PDF chunk 主锚点是 `page_start/page_end`，文本文件继续保留 `line_start/line_end/paragraph_line_start`；Markdown fenced code block（含 info string）里的标题样式文本不会污染层级元数据
+- `rag` 只消费配置层里显式配置成 Embedding 类型的条目；它当前会扫描后缀为 `.md`、`.mdx`、`.txt`、`.markdown`、`.rst`、`.adoc`、`.docx`、`.pdf` 的文档源，大小不超过 50 MB。纯文本类文件仍要求内容是可读 UTF-8 且不含 NUL 字节；`docx` 会先通过独立抽取层把 `word/document.xml` 规范化成 Markdown 风格文本；文本型 `pdf` 会先使用 `lopdf` 按页提取文本，单页解析失败只记录 warning，并把可用页面切成页级 block，再进入现有 chunk 打包链路。Markdown 类文件和 `docx` 会先按标题、列表项、代码块和普通段落做语义预切，再在同一 `heading_path` 下按字符预算打包；只有单个语义块本身超过硬上限时，才回退到 `MarkdownSplitter` 在块内继续拆分。其余文本文件继续使用 `TextSplitter`。PDF chunk 主锚点是 `page_start/page_end`，文本文件继续保留 `line_start/line_end/paragraph_line_start`；Markdown fenced code block（含 info string）里的标题样式文本不会污染层级元数据
 - `rag` 的扫描边界只受“显式选择的目录 + 生效中的 ignore glob”控制；不会额外把 `.gitignore`、`.ignore` 或全局 git ignore 当成隐式过滤条件，避免用户选中的文档被静默漏索引。这里的 ignore glob 分成两层：内置固定规则和用户追加规则；内置规则至少覆盖 `.git`、`node_modules`、`target`、`dist`、`build`、`out`、`.next`、`.nuxt`、`.svelte-kit`、`.turbo`、`.cache`、`coverage`、`.venv`、`venv`、`vendor`、`Pods`，前端不提供取消入口，后端归一化也会强制补回
 - LanceDB 中每个 chunk 都会写入 `absolute_path`、对外展示用 `path`（绝对路径或 `~/...`）、`relative_path`、`version_id`、`chunk_state`、`chunk_index`、`document_kind`、`line_start`、`line_end`、`paragraph_line_start`、`page_start`、`page_end`、`heading_path`、`anchor_label`、`chunk_reuse_key` 和原始文本；检索侧只查询 `active` chunk，避免 staged 数据污染结果
 - `rag` 额外维护一个独立 SQLite 元数据库，记录文件级 `source_root`、相对路径、embedding fingerprint、extractor fingerprint，以及当前 `active` 版本和待切换 `pending` 版本的 `md5` / mtime / 大小 / chunk 数 / 时间戳；这里的 fingerprint 采用 provider-aware 规则计算：优先使用模型自身可稳定识别的身份（例如显式 digest，官方 OpenAI `api.openai.com/v1` 下的托管 model ID，或 `/models` 返回项里的 digest/fingerprint hint），只有无法稳定确认 embedding 空间时才回退到 `endpoint + model` 绑定。重建时会在文件实际开始 indexing 时写入 pending 元数据和 staged chunk，成功后切到 active，再清理旧 active；全量扫描会在发现待重建文件后立即进入这条链路，而不是先把整轮扫描跑完
