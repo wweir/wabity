@@ -6,16 +6,18 @@
 - 协调 workspace 地址栏、session 点、输入内容、候选动作和执行结果
 - 处理键盘导航与前端副作用（复制文本，以及浏览器 fallback 下的链接打开）
 - `LauncherPage.tsx` 只保留状态编排、命令调用和事件处理；纯函数和展示块拆到同目录模块与 `components/`
+- suggestions、session 浮层、clipboard 面板和 QA / result 展示都必须继续下沉为独立 section / layer，避免高频输入把整个页面 JSX 和匿名回调链一起拖着重跑
 
 当前代码组织：
 
 - `LauncherPage.tsx`：页面级状态、effect、键盘流和 Tauri 命令编排；顶部栏、输入区、反馈区都只负责装配组件，不再内联大段 JSX
+- `LauncherPage.tsx` 里的建议请求只保留最小前端观测：按 `file / action / app` 输出请求耗时和命中数，便于和 Rust 侧 `tracing` 对齐；不要在页面层再铺一层自定义埋点系统
 - `launcher.css`：只保留 launcher 特有布局、状态和消息流样式；按钮、输入框、浮层和冷静中性色 design tokens 等共享外观基线统一回收到 `src/app/global.css`
 - ACP 会话时间线里的 `user / assistant / system` 消息卡片底色必须基于全局 token 组合，禁止在 `launcher.css` 里直接写死只适合浅色主题的消息背景
 - `MarkdownRenderer` 衍生出来的 Mermaid 状态文本、错误文案和 highlight.js 语法色同样必须走全局 code token；浅色和深色都不能继续保留私有 code palette 或只适合浅底块的 hex 色
 - session panel、restore notice、Markdown 辅助元素和轻量问答元信息区都必须复用全局 surface / text / status token；不要再靠 feature 私有的乳白半透明面和浅描边硬编码制造层级
 - session panel 列表项的激活态只保留单一高亮语义，禁止在触发器、面板头和条目内部重复堆叠“当前” pill；状态标签必须和 session dot 复用同一套运行中 / 更新 / 错误 / 断开语义颜色，关闭动作要保持明确按钮命中区和具体可访问名称
-- ACP 输出区的阅读优先级固定为“答案正文 > 操作轨迹 > 思考过程 > 角色元信息”；assistant message 内的 block 顺序必须先渲染正文，再渲染操作轨迹，最后才是 thought disclosure；tool detail 只作为消息内部次级展开区，不能继续做成比答案更抢眼的大黑面板；`chat/completions` 返回的 reasoning 也必须沿用同一原则，不能再直接冒充正文；兼容层若把 thinking 混进 `message.content`，也必须先在后端归一化拆出次级 thought，再交给前端
+- ACP 输出区的阅读层级仍然固定为“正文最重要，操作轨迹与思考更次级，角色元信息最低”，但实现方式不能再靠重排消息顺序伪造 `answer-first`；assistant message 必须按后端提供的 block 原始顺序渲染，保留 `content / actions / thought` 的真实交错时序，正文之所以更重要，只能靠字号、前景和留白建立，而不是把工具和 thought 强行塞到正文后面；tool detail 继续作为消息内部次级展开区，不能再做成比正文更抢眼的 inspection panel；`chat/completions` 返回的 reasoning 也必须沿用同一原则，不能再直接冒充正文；兼容层若把 thinking 混进 `message.content`，也必须先在后端归一化拆出次级 thought，再交给前端
 - `Agent` 行只保留身份标识；thought 入口降到正文后的消息元信息区，保持紧凑次级，不得继续占据 assistant 卡片的首个视觉落点；assistant 正文的字号和前景权重必须显著高于 thought / action 元信息
 - `actionCatalog.ts`：集中维护 launcher/browser fallback 共用的动作描述符和 slash alias，避免页面层与 fallback 重复声明动作元数据
 - 历史剪贴板只通过全局快捷键打开独立面板态；它只显示后端已经分好的 `Pinned / Recent` 文本条目，不伪装成补全列表，也不把 pin/unpin 规则放回前端
@@ -27,15 +29,17 @@
 - `workspace.ts`：workspace 路径格式化和面包屑构建
 - `sessions.ts`：session 摘要合并、状态文案和 dot class 计算
 - `useFloatingPanel.ts`：浮层附着定位和外部点击关闭的共享 hook，避免 `LauncherPage` 重复堆叠近似 effect
-- `components/SessionTimeline.tsx`：ACP 消息流与 answer-first 的 action trail
+- `components/SessionTimeline.tsx`：ACP 消息流与按真实顺序展开的 action trail
 - `components/LauncherHeader.tsx`：顶部 workspace bar、agent 选择器、session 摘要按钮和 session dot 带；不再承担历史剪贴板入口
 - `components/LauncherComposer.tsx`：主输入区和底部操作条
-- `components/RestoreNoticeList.tsx` / `components/LauncherFeedback.tsx`：恢复提示、内联结果卡片、JSON / Markdown 预览和 session 状态反馈
+- `components/RestoreNoticeList.tsx` / `components/LauncherFeedback.tsx`：恢复提示、内联结果卡片、JSON / Markdown 预览，以及按 `session / result / QA` 拆开的反馈区
+- `components/LauncherSuggestionsSection.tsx` / `components/LauncherSessionSection.tsx` / `components/LauncherClipboardSection.tsx`：suggestions、session、clipboard 三块独立 layer，作为输入热路径的稳定渲染边界
 - `components/MarkdownRenderer.tsx`：共享 markdown 渲染管线，统一处理 GFM、Mermaid、MDX 安全兼容和 Obsidian 风格扩展
 - `MarkdownRenderer.tsx` 里的 `remark-mdx` / `rehype-highlight` 改为异步加载，避免把整套 MDX 和语法高亮依赖静态塞进同一个懒加载 chunk
 - `components/CompletionPopup.tsx` / `SessionPanel.tsx` / `WorkspacePickerPanel.tsx` / `AgentPickerPanel.tsx`：launcher 外层浮层组件
-- `components/ClipboardHistoryPanel.tsx`：渲染历史剪贴板面板；当 launcher 已在前台时，`Enter` 把条目插入当前输入框；当 launcher 不在前台时，`Enter` 回贴外部应用；同时支持 `Cmd/Ctrl+P` 切换 pin 和删除条目
-- `components/SessionTimeline.tsx`：仅在激活 ACP session 后才懒加载；会话 markdown 仍复用共享渲染器，但 mermaid 等较重依赖继续按需动态导入；action trail 只作为正文后的弱辅助区，不再保留独立标题栏或 hover 即抢焦点的详情面板
+- `components/ClipboardHistoryPanel.tsx`：渲染历史剪贴板面板；当 launcher 已在前台时，`Enter` 把条目插入当前输入框；当 launcher 不在前台时，`Enter` 回贴外部应用；同时支持 `Cmd/Ctrl+P` 切换 pin、`Delete/Backspace` 删除，以及仅在面板打开时生效的 `Alt+A...` 常用项直贴和 `Alt+1...0` 最近项直贴。条目维护动作使用 icon-only 次级工具按钮，默认弱显著，只在 hover / active / focus-within 时抬升
+- `components/SessionTimeline.tsx`：仅在激活 ACP session 后才懒加载；会话 markdown 仍复用共享渲染器，但 mermaid 等较重依赖继续按需动态导入；action trail 改为按真实时序渲染的弱时间线，不再压成折行 pill 云，也不再保留独立标题栏或 hover 即抢焦点的详情面板
+- `components/LauncherFeedback.tsx` / `components/SessionTimeline.tsx`：ACP 流式输出时，前端只在用户仍停留在当前 assistant turn 尾部时自动跟随新增文本；一旦用户手动滚离当前 turn，就停止抢滚动位置
 
 当前 UI 决策：
 
@@ -53,9 +57,13 @@
 - QA 结果展示期不能简单粗暴地把原生 auto-resize 全关掉；当前策略是继续保留尺寸观察，但进入 QA 后切到“只增不减”的窗口同步。这样首屏回答、懒加载的 Markdown / 语法高亮 / citation 仍能把窗口继续撑开，而短时测量抖动不会把窗口又缩回去截断下半截内容；离开 QA 展示态后才恢复正常的可增可减 resize
 - launcher 通过快捷键、OCR 回填、快捷翻译结果回填或其他显示路径重新出现时，主输入框会主动恢复焦点，不能只依赖首次挂载时的 `autoFocus`
 - `Alt+Space` 现在只负责显示或隐藏 launcher；这条热路径不再同步读取外部应用选中文本，否则显隐会被模拟复制和剪贴板轮询拖慢
+- `Alt+Space` 重新显示 launcher 时必须回到 launcher 主页面，不能复活上一次 `Alt+V` 留下的历史剪贴板面板态；剪贴板历史只应由 `Alt+V` 或显式前端切换进入
 - `Alt+V` 会直接打开历史剪贴板面板；如果 launcher 已在前台，则进入“插入输入框”模式；否则进入“外部回贴”模式并只展示剪贴板面板
+- 历史剪贴板面板保持紧凑浮层布局：常用项显示 `Alt+A...`，最近项显示 `Alt+1...0`；这些条目热键只在面板已打开且处于活跃显示时注册，面板关闭后立即失效，不能污染 launcher 其余输入态或系统全局快捷键
 - 纯 OCR 回填会通过独立事件把识别文本写回主输入框，并把输入模式显式标成 `ocr`；外部选中文本仍保留 `selection` 模式，不能再统一退化成 `multiline`
-- `Alt+D` 快捷翻译在拿到原文后会先立即弹出 launcher，并把原文注入输入框；前端进入独立 pending 状态、临时抑制应用/动作建议，等后台 LLM 返回后再把译文渲染到结果卡
+- `Alt+D` 快捷翻译在拿到原文后会先立即弹出 launcher，并把原文注入输入框；前端进入独立 pending 状态、临时抑制应用/动作建议；若后台翻译链路收到 SSE 增量文本，结果卡会边流式更新边保持 pending，直到最终完成事件落地
+- 轻量问答不能只把“运行状态”当成流式体验；只要 `responses` 或 `chat/completions` provider 返回正文 delta，前端就必须把累计答案实时渲染出来。若同一轮随后转入工具调用，则要显式清掉这段临时正文，避免把工具前的半截草稿伪装成最终回答
+- RAG 运行态不再由前端固定 `setInterval` 轮询；页面只在挂载时拉一次当前状态，后续全靠 `rag-runtime-status` 事件更新，避免空闲时持续 IPC 抖动
 - launcher 主输入框显式关闭浏览器原生 `autocomplete`、`autocorrect`、`autocapitalize` 和 `spellcheck`，避免系统历史候选或拼写建议和自定义补全浮层叠出双层列表
 - 通过快捷翻译链路注入的外部选中文本，主输入框会把光标显式定位到文本开头，并自动切到 textarea 形态，避免默认落在末尾或继续停留在单行输入
 - 主输入框聚焦态只保留柔和的底边提亮和浅背景过渡，不再叠全尺寸粗 outline，避免输入时视觉重心突然跳变
@@ -92,6 +100,8 @@
 - 使用透明窗口 + CSS 圆角伪异形，尽量模拟原生圆角窗口
 - 原生窗口尺寸直接由内部页面内容尺寸实时驱动；`setSize` 设置的是窗口内容区，不需要再额外补偿 macOS 圆角或外沿
 - 尺寸同步改为以整页可见内容盒为准，不只看圆角面板本身；绝对定位的补全面板、设置页等页面切换也会参与测量，避免窗口和页面边界错位
+- 历史剪贴板不再复用 `main` WebView 做页面内切换；现在是独立的 `clipboard` 原生窗口，快捷键直接显示该窗口，避免首次呼出时先看到 launcher 外形再切成历史剪贴板
+- 窗口层按 `main` / `clipboard` 两个原生窗口分别缓存最近一次稳定尺寸；从隐藏态显示时，Rust 先按目标窗口的缓存尺寸和默认定位预应用，再 `show/focus/orderFront`
 - 页面根节点需要为圆角和 frame 外阴影一起预留透明安全边，尤其是底部和左右两侧；否则透明窗口会把 CSS 阴影裁成直角
 - 原生窗口 resize 不再由前端直接调用 `WebviewWindow.setSize`；统一走 Rust 命令，macOS 下显式写入 `NSPanel.setContentSize`
 - 禁用原生窗口阴影，避免 macOS 透明窗口在视觉上比内部页面多出一圈外沿
@@ -108,13 +118,14 @@
 - session 点只承担轻量切换和通知，不承担完整标签页语义
 - session 光点语义固定为：绿色慢闪=`running`，快闪=有新通知，灰色=会话断开，黄色=可恢复错误，红色=不可恢复错误
 - `prompt` 发出后，前端立即插入用户消息和 pending assistant 占位，避免会话看起来“没反应”
-- ACP 会话流展示改为最新 turn 在上、历史 turn 在下；时间线按 message 边界渲染，同一条 assistant turn 内的 `thought`、`actions`、正文只作为该消息内部块显示，不再先拆成多条独立 item
+- ACP 会话流展示改为最新 turn 在上、历史 turn 在下；时间线按 message 边界渲染，同一条 assistant turn 内的 `thought`、`actions`、正文仍作为该消息内部块显示，但块顺序必须忠实保留 agent 的真实输出时序，不再压成固定 `正文 -> 操作 -> thought` 摘要
 - 时间线上相邻的 `thought` 块会在前端合并显示，避免 agent 连续推送 reasoning chunk 时被拆成多个折叠块制造视觉噪音
-- 时间线中的“思考”折叠必须使用真实按钮并暴露展开态，不能再用 click-only `div`
+- 时间线中的“思考”折叠必须使用真实按钮并暴露展开态，不能再用 click-only `div`；但它出现在时间线里的位置必须由真实输出顺序决定，而不是统一挪到正文后
 - thought 展开内容使用面向阅读的普通排版，并更接近辅助注释而不是引用块/日志摘录；折叠入口必须给出简短预览，避免只剩一个无信息量的小标签
-- thought 开关放在正文与 action 之后的消息元信息区；只有展开后的 thought 内容才进入该元信息区下方堆叠，避免把辅助信息抬到答案前面
-- assistant action bar 会把带相同 `correlationId` 的 `tool-call` / `tool-update` 融合成一个 tool pill；详情默认只在显式点击后于 action bar 内作为次级展开区展示，并在展示层尽量解码常见转义文本；hover 只保留轻量提示，不再直接展开详情
+- thought 继续保持折叠和弱化，但它所在的 block 位置必须忠实反映真实时间线；不能再把 thought 开关统一搬到正文与 action 之后的消息元信息区
+- assistant action trail 不再把带相同 `correlationId` 的 `tool-call` / `tool-update` 压成单个 tool pill，而是按原始顺序渲染为线性事件条目；详情默认只在显式点击后以内联次级展开区展示，并在展示层尽量解码常见转义文本；hover 只保留轻量反馈，不再直接展开详情
 - thought block 默认折叠，但用户手动展开后，在同一条消息继续流式追加时必须尽量保留展开状态；不要每次增量更新就把用户已打开的内容重新折回去
+- ACP 流式输出的自动滚动目标是“当前 turn 的最新文本尾部”，不是简单地把消息列表永远锁在顶部；否则数据虽在增量更新，用户仍看不到最新 token
 - session 更新合并以 `lastUpdatedAtMs` 和消息权重单调收敛，避免旧快照覆盖异步事件流
 - session 恢复完全依赖 agent 自身能力；agent 不支持 `session/load` 时，只提示，不伪装恢复成功
 - 全局快捷键默认使用 `Alt+Space` 唤起 launcher；`Alt+D` 会优先翻译当前应用选中文本，未选中时再回退到截图 OCR 并翻译；`Alt+V` 会直接打开历史剪贴板浮层

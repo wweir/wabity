@@ -125,6 +125,7 @@
 - 内置 MCP 不再伪装成一条普通 server 草稿；目录区固定展示一张内置 MCP 卡片，卡内直接显示运行状态、server 开关和模块级开关。保存时同时写回“自定义 server 清单 + 内置 MCP 模块配置”，避免再把同一个本地 endpoint 拆成多条假 server 记录
 - MCP 页的视觉和交互节奏直接对齐 LLM：目录区维持双栏高密度卡片，编辑区收敛成一条紧凑状态条和若干扁平分段卡；短字段统一“左字段名 / 右输入区”，`textarea`、transport 说明和内置模块列表整行展开，不再额外挂独立草稿卡或把“当前服务”做成第二层头部卡
 - ACP Agent 页面里的预设只用于填充名称和启动命令这类表单默认值，不负责决定默认 agent；真正创建 session 用哪个 agent，由 launcher 顶部 Agent 菜单决定
+- ACP Agent 基础表单除了名称和启动命令，还必须显式选择启动模式：`direct` 直接执行 `program + args`，`login shell` 读取用户 login profile，`interactive shell` 额外尝试加载 `.zshrc` / `.bashrc` 一类 interactive 配置，并明确提示 stdout 噪音会破坏 ACP `stdio` 协议
 - ACP Agent 页面里的预设区改成单列：先选模板，再看安装提示，不再把选择控件和安装说明做成长篇并排区域
 - ACP Agent 在“还没有草稿 / 还没有 Agent”时，不再先显示一张不可操作的保存状态卡或额外空面板；主编辑区直接从“模板选择 + 创建空白 Agent”开始，把空状态入口收敛成一条主任务流
 - ACP Agent 进入“已选中草稿”编辑态后，基础字段和草稿操作卡都必须优先保证可编辑宽度：字段列表退回单列，草稿动作区改成整行自适应按钮网格，不能继续复用会把输入框压窄的共享双列规则

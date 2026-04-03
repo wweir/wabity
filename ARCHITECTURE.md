@@ -79,9 +79,11 @@
 
 前端当前只有两个真正的产品视图：`launcher` 和 `settings`。`src/app/App.tsx` 只负责这两个视图的装配与切换。
 
-`launcher` 内部虽然同时承载本地执行结果、轻量 RAG 问答和 ACP session 时间线，但这些输出面都遵守同一个前端展示原则：主答案或主结果永远优先于调试性辅助信息。像 action trail、tool detail、thought 这类过程信息只能作为消息内部的次级 disclosure，不能和主答案并列成独立主面板，也不应占据答案的首个视觉落点。浅色/深色主题都必须复用同一套稳定 token 语义，feature CSS 不应继续保留只适用于单一主题的私有颜料。对于 `chat/completions` 返回的 reasoning，后端必须先把最终答案和 reasoning 分离；如果兼容层把 thinking 混进 `message.content`，后端也必须在归一化阶段拆出 `reasoning`。前端只能把 reasoning 当次级 thought 展示，不能再把它无差别塞进主答案文本。
+`launcher` 内部虽然同时承载本地执行结果、轻量 RAG 问答和 ACP session 时间线，但这些输出面都遵守同一个前端展示原则：主答案或主结果永远优先于调试性辅助信息。这个“优先”主要靠排版、字号、前景和留白建立，而不是靠篡改时间线顺序。像 action trail、tool detail、thought 这类过程信息只能作为消息内部的次级 disclosure，不能和主答案并列成独立主面板；但对于 ACP session 这类显式暴露执行过程的 transcript，同一条 assistant message 内的 `content / actions / thought` block 仍必须忠实保留真实输出顺序，不能再为了摘要化强行重排成固定的 `answer-first` 结构。浅色/深色主题都必须复用同一套稳定 token 语义，feature CSS 不应继续保留只适用于单一主题的私有颜料。对于 `chat/completions` 返回的 reasoning，后端必须先把最终答案和 reasoning 分离；如果兼容层把 thinking 混进 `message.content`，后端也必须在归一化阶段拆出 `reasoning`。前端只能把 reasoning 当次级 thought 展示，不能再把它无差别塞进主答案文本。
 
-历史剪贴板不再挂在 launcher 的 slash 动作里，而是通过独立全局快捷键进入单独的面板态。它只维护少量文本历史和少量 pinned 常用项，不做全文搜索、分类索引或富媒体预览；后端返回的结构化快照已经按 `pinnedEntries / recentEntries` 分组，前端只负责渲染、选中态和安全键盘流。`Alt+V` 命中时如果 launcher 已经在前台，选中条目只会把文本插入 launcher 输入框；如果 launcher 不在前台，才走“写系统剪贴板 -> 记住呼出前前台应用 -> 隐藏 launcher -> 重新激活原应用 -> 等待目标应用重新成为前台 -> 发送粘贴快捷键”的跨应用回贴链路。跨应用回贴仍由 Rust 侧调度，前端不能直接接管。
+`launcher` 的页面层继续只保留输入状态编排、命令调用和窗口级 effect；suggestions、session 浮层、clipboard 面板和 QA / result 展示必须作为独立 section 或 layer 组件装配，避免把所有高频 UI 区块继续挂在一个超大 `LauncherPage` 里跟随每次输入一起重渲染。
+
+历史剪贴板不再挂在 launcher 的 slash 动作里，而是通过独立全局快捷键进入单独的面板态。它只维护少量文本历史和少量 pinned 常用项，不做全文搜索、分类索引或富媒体预览；后端返回的结构化快照已经按 `pinnedEntries / recentEntries` 分组，前端只负责渲染、选中态和安全键盘流。面板视觉上保持紧凑浮层：`pinnedEntries` 显示 `Alt+A...`，`recentEntries` 显示 `Alt+1...0`，条目维护动作收敛为 icon-only 次级工具按钮，默认弱显著，只在 hover / active / focus-within 时抬升；这些条目热键只能在面板已打开时通过前端局部监听生效，面板关闭后必须立即卸载，不能变成 launcher 常驻键盘协议或系统级全局快捷键。`Alt+V` 命中时如果 launcher 已经在前台，选中条目只会把文本插入 launcher 输入框；如果 launcher 不在前台，才走“写系统剪贴板 -> 记住呼出前前台应用 -> 隐藏 launcher -> 重新激活原应用 -> 等待目标应用重新成为前台 -> 发送粘贴快捷键”的跨应用回贴链路。跨应用回贴仍由 Rust 侧调度，前端不能直接接管。
 
 launcher 进入轻量 RAG 问答结果展示态后，前端会把原生窗口 resize 切到“只增不减”的受限模式，并只在结果落地与后续 resize 稳定期内临时关闭 blur auto-hide 与被动输入框 refocus 链；稳定期结束后会自动恢复正常 blur 行为，而显式退出 QA 展示态则会立即恢复 shrink 与 refocus。这条链路属于窗口稳定性约束，不是普通 UI 动画细节。
 
@@ -118,6 +120,8 @@ macOS 下 launcher 不是普通文档窗口，而是服务于全屏覆盖场景�
 `模型接入` 分组允许先创建普通 OpenAI-compatible 条目，再在同一张编辑卡里按需套用只读内置供应商模板；模板职责是提供官方入口和默认接入点，不负责预置模型。当前内置模板覆盖 OpenAI、OpenRouter、DeepSeek、Ollama、智谱和 SiliconFlow 一类常见 OpenAI-compatible 入口。
 
 `模型接入` 条目的主编辑区遵守“模式先显式、字段后展开”的顺序：模板、调用方式和模型来源要先说明它们各自会改写什么边界，再进入名称、接入点、密钥和模型字段。条目资格说明必须直接回答“它会出现在哪些下游功能里”，而不是再用“可用范围”这类抽象标题配一排术语徽章让用户猜；翻译、文档问答、OCR、RAG Embedding 这些位置应逐项给出“可选 / 待补全 / 不可用”及原因。版式上要与 `AI 功能`、`RAG` 这些输入密集分组保持同一节奏：状态条之后拆成多段主编辑卡，卡片之间仍是单列主流程；标准短字段统一使用“左侧字段名 / 右侧控件与帮助”，并且字段名列只保留最小必要宽度，输入区默认吃满剩余空间，不能再让固定标签列把表单压窄。只有模型来源、模型选择器和长说明这类长块继续占满整行。顶部条目目录固定用双栏卡片做高密度扫读，容器再窄时才退回单列。已知模板模型一旦命中目录元数据，`modelType / protocol / supportsMultimodal / supportsStateful` 必须由模型本身驱动，而不是继续由供应商模板或手工调用方式反向决定。
+
+`模型接入` 的持久化条目只保存用户输入和模板绑定信息，不直接充当运行时能力判定结果。像“是否可供翻译 / 问答 / OCR / Embedding 复用”“当前走 `responses` 还是 `chat/completions`”“是否允许 stateful / multimodal”这类协议与用途资格，必须先经过后端统一解析层投影，再供保存校验、运行时服务和前端说明复用；不能继续让前端草稿态、配置迁移和各条业务链各自补一套判断。
 
 当前 `模型接入` 页的视觉风格也应保持克制的桌面工具感，而不是“后台配置工作台”模板：目录卡片做低高度、弱装饰、高密度扫读；右侧编辑区依次是紧凑状态条和扁平分段编辑卡，字段区域默认尽量吃满可用宽度，但主区和每段卡片仍保留稳定横向留白，避免出现“只占半宽”或“完全贴边”这两种失衡状态。
 
@@ -189,6 +193,8 @@ macOS 下 launcher 不是普通文档窗口，而是服务于全屏覆盖场景�
 - macOS 启动阶段要按 `general.showInDock` 应用激活策略与 Dock 可见性；设置保存后也必须立即同步。任务栏/Dock 是否展示是应用级策略，不是窗口级 `show/hide` 的副作用
 - 开机自启动属于基础设施能力：保存设置时必须即时同步到系统登录项，启动时还要再做一次 best-effort 对账，避免配置与系统状态漂移
 - 透明 launcher 的圆角和外阴影都由前端 CSS 控制；内容根节点必须显式预留透明安全边，否则窗口内容区会把底角阴影裁成直角
+- launcher 不再把历史剪贴板作为 `main` 窗口内部视图切换；原生层固定维护两个独立窗口：`main` 负责主 launcher / QA / 设置入口，`clipboard` 负责历史剪贴板。这样全局快捷键打开历史剪贴板时，不会再经历“先显示 launcher 壳，再切成 clipboard-only”这条单窗口切视图链路
+- 窗口层必须按 `main` 和 `clipboard` 两个原生窗口分别缓存最近一次稳定内容尺寸；从隐藏态重新显示时，Rust 侧先按对应窗口的缓存尺寸和默认定位预应用，再执行 `show/focus/orderFront`，前端只负责显示后的增量修正，不能继续依赖“先按旧尺寸显示、再等首轮 auto-resize 拉回目标尺寸”
 - `main.rs` 保持薄，业务逻辑下沉到模块
 
 ### 5.2 AppState
@@ -207,6 +213,10 @@ macOS 下 launcher 不是普通文档窗口，而是服务于全屏覆盖场景�
 - 维护前端展示细节
 - 混合低层文件格式处理与高层业务规则
 - 直接承载庞杂的分支逻辑而不继续下沉到 `services`
+
+`file_search` 运行时不再只保留单个 workspace 的一次性全量索引。服务需要维护少量最近使用 workspace 的 LRU 快照，并在 workspace 首次命中后安装目录 watcher，以增量删改原子替换快照；输入链路优先读取当前快照，不把“切换 workspace 后再整仓重扫一次”当成常态路径。
+
+观测也属于运行时边界的一部分。`search_files`、`search_apps`、RAG 检索、embedding 批次、索引落盘、翻译与远程 OCR 请求现在统一通过 `tracing` 打点耗时；前端建议请求则只做轻量 `performance.now()` 观测，不在浏览器侧再复制一套复杂 tracing 基建。
 
 ### 5.3 IPC 边界
 
@@ -286,7 +296,7 @@ macOS 下 launcher 不是普通文档窗口，而是服务于全屏覆盖场景�
 - OCR provider 和翻译 provider 都依赖运行时配置
 - 失败时需要统一把错误投影回 launcher
 - 当 OCR provider 选中远程多模态模型时，截图文件会在 Rust 侧编码成 data URL，并通过内置 OCR prompt 作为 `responses` 的 `input_text + input_image` 组合发给模型；这条提示词不下放到前端临时拼装
-- 翻译链路严格按所选 LLM 条目声明的协议请求对应 endpoint，不再跨协议兜底；运行时会把翻译请求统一视为低复杂度任务，对所有翻译模型都显式注入 `thinking: { type: "disabled" }`，并优先以流式响应消费 SSE，避免兼容层把短文本翻译拖进高延迟路径或整包缓冲
+- 翻译链路严格按所选 LLM 条目声明的协议请求对应 endpoint，不再跨协议兜底；运行时会把翻译请求统一视为低复杂度任务，对所有翻译模型都显式注入 `thinking: { type: "disabled" }`，并优先以流式响应消费 SSE，避免兼容层把短文本翻译拖进高延迟路径或整包缓冲；翻译 HTTP client 与远程 OCR HTTP client 都复用常驻 async `reqwest::Client`，避免每次请求重建连接池；拿到增量译文后，Rust 侧会把部分文本持续投影回 launcher，前端不再等整包结束才显示第一屏结果
 
 约束：
 
@@ -325,6 +335,7 @@ RAG 分成两块：
 - 手动全量重建和后台 watcher 增量维护共享同一套存储互斥，避免并发改写同一份 LanceDB / SQLite
 - schema、embedding fingerprint 或 extractor fingerprint 变化会触发重建语义
 - 运行态单独暴露 `phase/scanned/completed/total/pending` 这组结构化计数，launcher 状态栏直接消费，不靠字符串猜重建进度
+- 这份运行态状态由 Rust 侧事件直接推送到前端，launcher 只在挂载时拉一次当前快照，后续不再固定间隔轮询 IPC
 
 问答侧：
 
@@ -340,7 +351,7 @@ RAG 分成两块：
 - citation 必须稳定携带 `document_kind`，并在页码锚点可用时优先展示页码；前端不能继续把所有命中都渲染成“文件行号”
 - RAG 索引构建与检索同样通过库导出的稳定函数接口暴露最小测试入口，允许集成测试直接验证“建库 -> 向量/词法混合召回 -> 命中裁剪”的端到端行为，而不需要先启动 `AppState`
 - RAG 检索不会再把召回完全绑死在单一路径向量 top-k 上；运行时会并行执行 LanceDB 向量候选和 SQLite `FTS5 + bm25()` 词法候选，按 `absolute_path + chunk_index` 去重合并后，再做轻量 rerank，并结合显式 `min_score`、默认高置信门槛、相对首命中的尾部截断、强实体 query 的锚点词硬过滤，以及标题-only / base64 类低质量 chunk 剔除，只保留高关联候选
-- OpenAI-compatible 的 URL 归一化、鉴权注入、请求发送、错误体提取、`responses`/`chat` 文本提取、SSE 流式消费与归并、`/models` 提取统一收口到基础设施层薄 client，避免问答、翻译、OCR、embedding、模型列表各自复制一份脆弱传输逻辑
+- OpenAI-compatible 的 URL 归一化、鉴权注入、请求发送、错误体提取、`responses`/`chat` 文本提取、SSE 流式消费与归并、`/models` 提取统一收口到基础设施层薄 client，避免问答、翻译、OCR、embedding、模型列表各自复制一份脆弱传输逻辑；具体实现已下沉到 workspace 内部 crate `wabity-openai-compatible`，宿主 crate 只保留面向现有调用点的兼容 shim，以及与本地领域类型有关的最小转换
 
 关键设计：
 
@@ -363,12 +374,16 @@ ACP 是独立于 launcher 轻量问答的第二条交互链。
 3. session 生命周期由 `AcpService` 管理
 4. 后端通过 Tauri Channel/API 将有序更新推送到前端
 5. 前端按 `AcpSessionSummary` / `AcpSessionDetail` 渲染摘要与消息流
+6. 当前 turn 持续流式输出时，前端只在用户仍跟随该 turn 尾部时自动追随新增文本；用户手动滚离后停止抢滚动
+
+launcher 轻量问答虽然不是 ACP session，但“流式”标准不能更低：协议侧如果已经收到 `responses` 或 `chat/completions` 的 SSE 文本 delta，前端必须同步把累计答案渲染出来；只有在模型明确转入工具回合时，才允许清掉临时正文并等待下一轮最终回答。
 
 边界：
 
 - 当前只支持本地 `stdio`
 - session 创建时绑定 workspace
 - 全局 MCP server 清单在建会话时透传给 agent
+- ACP Agent 启动模式显式分成 `direct`、`login_shell`、`interactive_shell` 三类：`direct` 走确定性的 `program + args`，`login_shell` 只读取 login profile，`interactive_shell` 允许读取 `.zshrc` / `.bashrc` 一类 interactive 配置，但任何 stdout 噪音都可能破坏 ACP `stdio` 协议，因此只能作为显式风险模式
 - ACP session 的恢复依赖 agent 自己的 `session/load` 能力，不伪装恢复成功
 
 为什么 ACP 不和 launcher 问答复用一套模型：

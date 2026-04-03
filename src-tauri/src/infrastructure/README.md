@@ -8,7 +8,7 @@
 - `clipboard`：封装系统剪贴板读写、粘贴快捷键模拟和历史文件持久化
 - `hotkey`：解析、注册、注销全局快捷键
 - `config`：集中处理本地配置、workspace 历史读写与缓存
-- `openai_compatible`：集中封装 OpenAI-compatible 的薄 client 和公共传输细节，包括 base URL 归一化、鉴权注入、请求发送、错误体提取、`responses`/`chat` 文本提取、SSE 流式消费与归并、`/models` 列表提取
+- `openai_compatible`：集中封装 OpenAI-compatible 的薄 client 和公共传输细节，包括 base URL 归一化、鉴权注入、请求发送、错误体提取、`responses`/`chat` 文本提取、SSE 流式消费与归并、`/models` 列表提取；具体实现位于 workspace 内部 crate `wabity-openai-compatible`，当前模块只保留宿主侧兼容导出和本地域类型转换
 
 关键约束：
 
@@ -23,6 +23,7 @@
 - `config` 里的快捷键字段当前只保留 `toggle_launcher` / `ocr_translate` 两个稳定键名；运行时访问统一经 `ShortcutKey + ShortcutConfig::{get,set}`，不要在其他模块重复手写字符串分发
 - `config` 负责 TOML 序列化、原子 `safe_write`、磁盘读写和内存缓存；启动时由 `AppState::new` 先读取，再把配置投影到运行时状态
 - `openai_compatible` 只负责公共协议兼容、薄传输 client 和响应解析，不承载业务级 prompt、工具编排或 provider 选择；问答、翻译、OCR、RAG embedding 仍各自保留自己的请求体和重试策略，但只要 provider 返回 SSE，就必须由这里按流读取并归并成统一 payload，而不是让上层先把整段 body 读完再猜协议
+- 独立 crate 不得依赖宿主的领域模型；像 `/models` 响应转 `LlmProviderModelEntry` 这类宿主特定投影必须留在当前 shim，而不是反向把 `domain` 拉进基础设施包
 - 配置模型新增字段时必须保持向后兼容；旧版 `config.toml` 缺字段时应通过 `serde(default)` 回填，而不是在启动阶段直接解析失败
 - macOS 下 launcher 启动时会把主窗口转换成 borderless `NSPanel`；为了覆盖全屏 Space，它必须继续叠加 `nonactivating_panel + can_join_all_spaces + full_screen_auxiliary + stationary`，并提升到 `Status` 层级。这里不能只靠普通可激活 panel 去压全屏应用，因为原生 fullscreen 行为本身就要求 auxiliary nonactivating panel
 - macOS launcher panel 需要显式开启 `worksWhenModal`；显示时优先走 panel 自己的 `show_and_make_key` / `orderFrontRegardless` 组合，不再额外激活整个 app，否则会把“覆盖当前全屏 Space”退化成“切回 launcher 所在空间”
