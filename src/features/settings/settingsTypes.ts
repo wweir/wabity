@@ -1,5 +1,6 @@
 import type {
 	AcpMcpServerConfig,
+	AcpAgentLaunchMode,
 	BuiltinMcpConfig,
 	BuiltinMcpModuleKey,
 	LlmProviderConfig,
@@ -28,11 +29,12 @@ export interface AcpAgentDraft {
 	id: string;
 	name: string;
 	command: string;
+	launchMode: AcpAgentLaunchMode;
 }
 
 export type McpTransport = AcpMcpServerConfig["transport"];
 export type BuiltinMcpFieldKey = BuiltinMcpModuleKey | "enabled";
-export type AcpFieldKey = "name" | "command";
+export type AcpFieldKey = "name" | "command" | "launchMode";
 export type McpFieldKey = "name" | "command" | "url" | "envText" | "headersText";
 export type LlmFieldKey = "name" | "baseUrl" | "model";
 export type LlmModelFieldKey = "model";

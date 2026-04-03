@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tauri::{
     ipc::{Invoke, InvokeError},
@@ -24,6 +24,23 @@ use crate::{
 const EXECUTION_PROGRESS_EVENT: &str = "execution-progress";
 const MAX_LAUNCHER_BLUR_AUTO_HIDE_SUPPRESSION_MS: u64 = 5_000;
 
+fn log_launcher_search_completion<T>(
+    operation: &'static str,
+    query: &str,
+    limit: usize,
+    started_at: Instant,
+    result: &Result<Vec<T>, String>,
+) {
+    tracing::info!(
+        operation,
+        query_len = query.trim().chars().count(),
+        limit,
+        elapsed_ms = started_at.elapsed().as_millis(),
+        result_count = result.as_ref().map(|items| items.len()).unwrap_or_default(),
+        "launcher search completed"
+    );
+}
+
 pub fn match_actions(
     state: State<'_, AppState>,
     query: QueryPayload,
@@ -39,14 +56,17 @@ pub async fn search_files(
     query: String,
     limit: usize,
 ) -> Result<Vec<FileSearchMatch>, String> {
+    let started_at = Instant::now();
     let workspace = state.workspace().await.map_err(|error| error.to_string())?;
     let workspace_root =
         normalize_workspace_root(&workspace.root_path).map_err(|error| error.to_string())?;
 
-    state
+    let result = state
         .file_search()
         .search(&workspace_root, &query, limit)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string());
+    log_launcher_search_completion("search_files", &query, limit, started_at, &result);
+    result
 }
 
 pub fn search_apps(
@@ -54,10 +74,13 @@ pub fn search_apps(
     query: String,
     limit: usize,
 ) -> Result<Vec<InstalledAppMatch>, String> {
-    state
+    let started_at = Instant::now();
+    let result = state
         .application()
         .search(&query, limit)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string());
+    log_launcher_search_completion("search_apps", &query, limit, started_at, &result);
+    result
 }
 
 pub async fn execute_action(
@@ -118,12 +141,30 @@ pub async fn open_document_reference(
         .map_err(|error| error.to_string())
 }
 
-pub fn hide_launcher_window(app: AppHandle) -> Result<(), String> {
-    window::hide_main_window(&app).map_err(|error| error.to_string())
+pub fn hide_launcher_window(app: AppHandle, window_label: Option<String>) -> Result<(), String> {
+    window::hide_launcher_window(&app, window_label.as_deref()).map_err(|error| error.to_string())
 }
 
-pub fn resize_launcher_window(app: AppHandle, width: f64, height: f64) -> Result<(), String> {
-    window::resize_main_window(&app, width, height).map_err(|error| error.to_string())
+pub fn dismiss_clipboard_history_panel(app: AppHandle) -> Result<(), String> {
+    window::dismiss_clipboard_history_panel(&app).map_err(|error| error.to_string())
+}
+
+pub fn resize_launcher_window(
+    app: AppHandle,
+    width: f64,
+    height: f64,
+    window_label: Option<String>,
+) -> Result<(), String> {
+    window::resize_launcher_window(&app, width, height, window_label.as_deref())
+        .map_err(|error| error.to_string())
+}
+
+pub fn insert_clipboard_history_text_into_launcher(
+    app: AppHandle,
+    text: String,
+) -> Result<(), String> {
+    window::insert_clipboard_history_text_into_launcher(&app, text)
+        .map_err(|error| error.to_string())
 }
 
 pub fn begin_transient_window_interaction(
@@ -227,22 +268,20 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
                 return true;
             };
 
-            resolver.respond(match_actions(state, query).map_err(InvokeError::from));
-            true
+            super::respond_sync(
+                resolver,
+                match_actions(state, query).map_err(InvokeError::from),
+            )
         }
-        "search_files" => {
-            let resolver = invoke.resolver.clone();
-            resolver.respond_async(async move {
-                let state = super::parse_arg(&invoke, "search_files", "state")?;
-                let query = super::parse_arg(&invoke, "search_files", "query")?;
-                let limit = super::parse_arg(&invoke, "search_files", "limit")?;
+        "search_files" => super::respond_async(invoke.resolver.clone(), async move {
+            let state = super::parse_arg(&invoke, "search_files", "state")?;
+            let query = super::parse_arg(&invoke, "search_files", "query")?;
+            let limit = super::parse_arg(&invoke, "search_files", "limit")?;
 
-                search_files(state, query, limit)
-                    .await
-                    .map_err(InvokeError::from)
-            });
-            true
-        }
+            search_files(state, query, limit)
+                .await
+                .map_err(InvokeError::from)
+        }),
         "search_apps" => {
             let resolver = invoke.resolver.clone();
             let Some(state) = super::parse_or_invoke_error(&invoke, "search_apps", "state") else {
@@ -255,22 +294,20 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
                 return true;
             };
 
-            resolver.respond(search_apps(state, query, limit).map_err(InvokeError::from));
-            true
+            super::respond_sync(
+                resolver,
+                search_apps(state, query, limit).map_err(InvokeError::from),
+            )
         }
-        "execute_action" => {
-            let resolver = invoke.resolver.clone();
-            resolver.respond_async(async move {
-                let app = super::parse_arg(&invoke, "execute_action", "app")?;
-                let state = super::parse_arg(&invoke, "execute_action", "state")?;
-                let request = super::parse_arg(&invoke, "execute_action", "request")?;
+        "execute_action" => super::respond_async(invoke.resolver.clone(), async move {
+            let app = super::parse_arg(&invoke, "execute_action", "app")?;
+            let state = super::parse_arg(&invoke, "execute_action", "state")?;
+            let request = super::parse_arg(&invoke, "execute_action", "request")?;
 
-                execute_action(app, state, request)
-                    .await
-                    .map_err(InvokeError::from)
-            });
-            true
-        }
+            execute_action(app, state, request)
+                .await
+                .map_err(InvokeError::from)
+        }),
         "launch_app" => {
             let resolver = invoke.resolver.clone();
             let Some(state) = super::parse_or_invoke_error(&invoke, "launch_app", "state") else {
@@ -280,33 +317,48 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
                 return true;
             };
 
-            resolver.respond(launch_app(state, path).map_err(InvokeError::from));
-            true
+            super::respond_sync(resolver, launch_app(state, path).map_err(InvokeError::from))
         }
-        "open_document_reference" => {
-            let resolver = invoke.resolver.clone();
-            resolver.respond_async(async move {
-                let state = super::parse_arg(&invoke, "open_document_reference", "state")?;
-                let path = super::parse_arg(&invoke, "open_document_reference", "path")?;
+        "open_document_reference" => super::respond_async(invoke.resolver.clone(), async move {
+            let state = super::parse_arg(&invoke, "open_document_reference", "state")?;
+            let path = super::parse_arg(&invoke, "open_document_reference", "path")?;
 
-                open_document_reference(state, path)
-                    .await
-                    .map_err(InvokeError::from)
-            });
-            true
-        }
+            open_document_reference(state, path)
+                .await
+                .map_err(InvokeError::from)
+        }),
         "hide_launcher_window" => {
+            let resolver = invoke.resolver.clone();
             let Some(app) = super::parse_or_invoke_error(&invoke, "hide_launcher_window", "app")
             else {
                 return true;
             };
+            let Some(window_label) =
+                super::parse_or_invoke_error(&invoke, "hide_launcher_window", "windowLabel")
+            else {
+                return true;
+            };
 
-            invoke
-                .resolver
-                .respond(hide_launcher_window(app).map_err(InvokeError::from));
-            true
+            super::respond_sync(
+                resolver,
+                hide_launcher_window(app, window_label).map_err(InvokeError::from),
+            )
+        }
+        "dismiss_clipboard_history_panel" => {
+            let resolver = invoke.resolver.clone();
+            let Some(app) =
+                super::parse_or_invoke_error(&invoke, "dismiss_clipboard_history_panel", "app")
+            else {
+                return true;
+            };
+
+            super::respond_sync(
+                resolver,
+                dismiss_clipboard_history_panel(app).map_err(InvokeError::from),
+            )
         }
         "resize_launcher_window" => {
+            let resolver = invoke.resolver.clone();
             let Some(app) = super::parse_or_invoke_error(&invoke, "resize_launcher_window", "app")
             else {
                 return true;
@@ -321,11 +373,38 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
             else {
                 return true;
             };
+            let Some(window_label) =
+                super::parse_or_invoke_error(&invoke, "resize_launcher_window", "windowLabel")
+            else {
+                return true;
+            };
 
-            invoke
-                .resolver
-                .respond(resize_launcher_window(app, width, height).map_err(InvokeError::from));
-            true
+            super::respond_sync(
+                resolver,
+                resize_launcher_window(app, width, height, window_label).map_err(InvokeError::from),
+            )
+        }
+        "insert_clipboard_history_text_into_launcher" => {
+            let resolver = invoke.resolver.clone();
+            let Some(app) = super::parse_or_invoke_error(
+                &invoke,
+                "insert_clipboard_history_text_into_launcher",
+                "app",
+            ) else {
+                return true;
+            };
+            let Some(text) = super::parse_or_invoke_error(
+                &invoke,
+                "insert_clipboard_history_text_into_launcher",
+                "text",
+            ) else {
+                return true;
+            };
+
+            super::respond_sync(
+                resolver,
+                insert_clipboard_history_text_into_launcher(app, text).map_err(InvokeError::from),
+            )
         }
         "begin_transient_window_interaction" => {
             let resolver = invoke.resolver.clone();
@@ -337,10 +416,10 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
                 return true;
             };
 
-            resolver.respond(
+            super::respond_sync(
+                resolver,
                 begin_transient_window_interaction(shortcut_state).map_err(InvokeError::from),
-            );
-            true
+            )
         }
         "end_transient_window_interaction" => {
             let resolver = invoke.resolver.clone();
@@ -352,10 +431,10 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
                 return true;
             };
 
-            resolver.respond(
+            super::respond_sync(
+                resolver,
                 end_transient_window_interaction(shortcut_state).map_err(InvokeError::from),
-            );
-            true
+            )
         }
         "arm_launcher_blur_auto_hide_suppression" => {
             let resolver = invoke.resolver.clone();
@@ -374,11 +453,11 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
                 return true;
             };
 
-            resolver.respond(
+            super::respond_sync(
+                resolver,
                 arm_launcher_blur_auto_hide_suppression(shortcut_state, duration_ms)
                     .map_err(InvokeError::from),
-            );
-            true
+            )
         }
         "set_launcher_blur_auto_hide_enabled" => {
             let resolver = invoke.resolver.clone();
@@ -397,35 +476,27 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
                 return true;
             };
 
-            resolver.respond(
+            super::respond_sync(
+                resolver,
                 set_launcher_blur_auto_hide_enabled(shortcut_state, enabled)
                     .map_err(InvokeError::from),
-            );
-            true
+            )
         }
-        "get_shortcut" => {
-            let resolver = invoke.resolver.clone();
-            resolver.respond_async(async move {
-                let state = super::parse_arg(&invoke, "get_shortcut", "state")?;
-                get_shortcut(state).await.map_err(InvokeError::from)
-            });
-            true
-        }
-        "set_shortcut" => {
-            let resolver = invoke.resolver.clone();
-            resolver.respond_async(async move {
-                let app = super::parse_arg(&invoke, "set_shortcut", "app")?;
-                let state = super::parse_arg(&invoke, "set_shortcut", "state")?;
-                let shortcut_state = super::parse_arg(&invoke, "set_shortcut", "shortcutState")?;
-                let key = super::parse_arg(&invoke, "set_shortcut", "key")?;
-                let shortcut = super::parse_arg(&invoke, "set_shortcut", "shortcut")?;
+        "get_shortcut" => super::respond_async(invoke.resolver.clone(), async move {
+            let state = super::parse_arg(&invoke, "get_shortcut", "state")?;
+            get_shortcut(state).await.map_err(InvokeError::from)
+        }),
+        "set_shortcut" => super::respond_async(invoke.resolver.clone(), async move {
+            let app = super::parse_arg(&invoke, "set_shortcut", "app")?;
+            let state = super::parse_arg(&invoke, "set_shortcut", "state")?;
+            let shortcut_state = super::parse_arg(&invoke, "set_shortcut", "shortcutState")?;
+            let key = super::parse_arg(&invoke, "set_shortcut", "key")?;
+            let shortcut = super::parse_arg(&invoke, "set_shortcut", "shortcut")?;
 
-                set_shortcut(app, state, shortcut_state, key, shortcut)
-                    .await
-                    .map_err(InvokeError::from)
-            });
-            true
-        }
+            set_shortcut(app, state, shortcut_state, key, shortcut)
+                .await
+                .map_err(InvokeError::from)
+        }),
         _ => false,
     }
 }

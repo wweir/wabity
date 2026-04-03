@@ -114,6 +114,8 @@ pub struct ExecutionResult {
 pub struct ExecutionProgressEvent {
     pub action_id: String,
     pub status_text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial_text: Option<String>,
 }
 
 impl ExecutionResult {

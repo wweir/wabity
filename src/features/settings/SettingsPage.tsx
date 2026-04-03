@@ -252,7 +252,9 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 	const [savingMcp, setSavingMcp] = useState(false);
 	const [mcpPanelMode, setMcpPanelMode] = useState<McpPanelMode>("create");
 	const [settingsError, setSettingsError] = useState<string | null>(null);
-	const acpFieldRefs = useRef<Record<string, HTMLInputElement | HTMLTextAreaElement | null>>({});
+	const acpFieldRefs = useRef<
+		Record<string, HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | null>
+	>({});
 	const mcpListOptionRefs = useRef<Record<string, HTMLButtonElement | null>>({});
 	const pendingMcpFocusRef = useRef<PendingMcpFocusTarget | null>(null);
 	const llmFieldRefs = useRef<Record<string, HTMLInputElement | null>>({});
@@ -757,6 +759,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 				id: agent.id,
 				name: agent.name,
 				command: buildAgentCommand(agent),
+				launchMode: agent.launchMode,
 			}));
 			const nextDefaultAgentId = catalog.defaultAgentId ?? catalog.agents[0]?.id ?? null;
 			applyAgentDrafts(draftAgents, draftAgents[0]?.id ?? null);
@@ -1205,7 +1208,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		prompts: "翻译与文档问答。",
 		llm: "维护可复用的模型接入条目。",
 		rag: "索引输入、目录与重建。",
-		acp: "本地 Agent 启动命令。",
+		acp: "本地 Agent 启动命令与模式。",
 		mcp: "全局 MCP 服务清单。",
 		skills: "浏览公共 skill 目录。",
 		about: "版本与产品定位。",
@@ -1254,7 +1257,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		field: McpFieldKey | AcpFieldKey,
 	) {
 		const refKey = buildAcpFieldRefKey(scope, id, field);
-		return (node: HTMLInputElement | HTMLTextAreaElement | null) => {
+		return (node: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | null) => {
 			acpFieldRefs.current[refKey] = node;
 		};
 	}
@@ -1366,12 +1369,14 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 				program: deriveProgramFromCommand(agent.command),
 				args: [],
 				shellCommand: agent.command.trim() || null,
+				launchMode: agent.launchMode,
 			}));
 			const nextCatalog = await setAcpAgents(normalizedAgents, preservedDefaultAgentId);
 			const nextDraftAgents = nextCatalog.agents.map((agent) => ({
 				id: agent.id,
 				name: agent.name,
 				command: buildAgentCommand(agent),
+				launchMode: agent.launchMode,
 			}));
 			const nextDefaultAgentId = nextCatalog.defaultAgentId ?? nextCatalog.agents[0]?.id ?? null;
 			setDefaultAgentId(nextDefaultAgentId);
@@ -1801,7 +1806,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 			});
 	}
 
-	function handleAgentFieldChange(agentId: string, key: "name" | "command", value: string) {
+	function handleAgentFieldChange(agentId: string, key: AcpFieldKey, value: string) {
 		setAcpNotice(null);
 		setAcpAgentsState((current) =>
 			current.map((agent) => (agent.id === agentId ? { ...agent, [key]: value } : agent)),
@@ -2068,17 +2073,19 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 	}
 
 	function handleAddPresetAgent(option: (typeof acpAgentOptions)[number]) {
-		const existingAgent = acpAgents.find((agent) => agent.command.trim() === option.command);
+		const existingAgent = acpAgents.find(
+			(agent) => agent.command.trim() === option.command && agent.launchMode === option.launchMode,
+		);
 		if (existingAgent) {
 			setAcpNotice({
 				tone: "warn",
-				text: `${option.label} 已存在。相同启动命令不需要重复添加。`,
+				text: `${option.label} 已存在。相同启动命令和启动模式不需要重复添加。`,
 			});
 			setSelectedAgentId(existingAgent.id);
 			return;
 		}
 
-		const nextAgent = createAgentDraft(option.label, option.command);
+		const nextAgent = createAgentDraft(option.label, option.command, option.launchMode);
 		const nextAgents = [...acpAgents, nextAgent];
 		setAcpNotice({
 			tone: "info",

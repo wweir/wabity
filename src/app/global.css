@@ -432,7 +432,7 @@ body {
 	.settings-install-guide-command,
 	.settings-mcp-badge,
 	.session-message-content,
-	.action-bar-detail pre
+	.action-entry-detail pre
 ) {
 	font-family: var(--font-mono);
 }

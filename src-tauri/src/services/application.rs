@@ -184,6 +184,7 @@ impl ApplicationService {
 }
 
 fn build_application_index() -> Result<Vec<ApplicationRecord>> {
+    let started_at = std::time::Instant::now();
     #[cfg(target_os = "macos")]
     {
         let roots = application_roots();
@@ -277,12 +278,20 @@ fn build_application_index() -> Result<Vec<ApplicationRecord>> {
                 .then_with(|| left.path.cmp(&right.path))
         });
 
-        tracing::info!(count = entries.len(), "application index ready");
+        tracing::info!(
+            count = entries.len(),
+            elapsed_ms = started_at.elapsed().as_millis(),
+            "application index ready"
+        );
         Ok(entries)
     }
 
     #[cfg(not(target_os = "macos"))]
     {
+        tracing::info!(
+            elapsed_ms = started_at.elapsed().as_millis(),
+            "application index build completed on unsupported platform"
+        );
         Ok(Vec::new())
     }
 }

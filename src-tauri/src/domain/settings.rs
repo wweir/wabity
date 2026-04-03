@@ -352,6 +352,132 @@ impl LlmProviderConfig {
                 LegacyLlmProviderProtocolKind::Embedding => None,
             })
     }
+
+    pub fn resolved_profile(&self) -> ResolvedLlmProviderProfile<'_> {
+        let model_name = self.model_name();
+        let has_model = !model_name.is_empty();
+        let kind = match self.model_type {
+            LlmModelType::Embedding => ResolvedLlmProviderKind::Embedding {
+                configured: has_model,
+            },
+            LlmModelType::Llm => match self.protocol {
+                LlmProviderProtocol::Responses => ResolvedLlmProviderKind::Responses {
+                    configured: has_model,
+                    supports_multimodal: has_model && self.supports_multimodal,
+                    supports_stateful: has_model && self.supports_stateful,
+                },
+                LlmProviderProtocol::ChatCompletions => ResolvedLlmProviderKind::ChatCompletions {
+                    configured: has_model,
+                },
+            },
+        };
+
+        ResolvedLlmProviderProfile {
+            provider: self,
+            kind,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedLlmProviderKind {
+    Responses {
+        configured: bool,
+        supports_multimodal: bool,
+        supports_stateful: bool,
+    },
+    ChatCompletions {
+        configured: bool,
+    },
+    Embedding {
+        configured: bool,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ResolvedLlmProviderProfile<'a> {
+    provider: &'a LlmProviderConfig,
+    kind: ResolvedLlmProviderKind,
+}
+
+impl<'a> ResolvedLlmProviderProfile<'a> {
+    pub fn provider(self) -> &'a LlmProviderConfig {
+        self.provider
+    }
+
+    pub fn kind(self) -> ResolvedLlmProviderKind {
+        self.kind
+    }
+
+    pub fn model_name(self) -> Option<&'a str> {
+        let model_name = self.provider.model_name();
+        (!model_name.is_empty()).then_some(model_name)
+    }
+
+    pub fn can_handle_ai_task(self) -> bool {
+        matches!(
+            self.kind,
+            ResolvedLlmProviderKind::Responses {
+                configured: true,
+                ..
+            } | ResolvedLlmProviderKind::ChatCompletions { configured: true }
+        )
+    }
+
+    pub fn can_handle_ocr(self) -> bool {
+        matches!(
+            self.kind,
+            ResolvedLlmProviderKind::Responses {
+                configured: true,
+                supports_multimodal: true,
+                ..
+            }
+        )
+    }
+
+    pub fn can_handle_embedding(self) -> bool {
+        matches!(
+            self.kind,
+            ResolvedLlmProviderKind::Embedding { configured: true }
+        )
+    }
+
+    pub fn supports_multimodal(self) -> bool {
+        matches!(
+            self.kind,
+            ResolvedLlmProviderKind::Responses {
+                supports_multimodal: true,
+                ..
+            }
+        )
+    }
+
+    pub fn supports_stateful(self) -> bool {
+        matches!(
+            self.kind,
+            ResolvedLlmProviderKind::Responses {
+                supports_stateful: true,
+                ..
+            }
+        )
+    }
+
+    pub fn uses_responses_api(self) -> bool {
+        matches!(
+            self.kind,
+            ResolvedLlmProviderKind::Responses {
+                configured: true,
+                ..
+            }
+        )
+    }
+
+    pub fn uses_chat_completions_api(self) -> bool {
+        matches!(
+            self.kind,
+            ResolvedLlmProviderKind::ChatCompletions { configured: true }
+        )
+    }
 }
 
 impl<'de> Deserialize<'de> for LlmProviderConfig {
@@ -1154,4 +1280,100 @@ pub struct AppSettings {
     pub ocr: OcrSettings,
     #[serde(default)]
     pub rag: RagSettings,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider_with(
+        model_type: LlmModelType,
+        protocol: LlmProviderProtocol,
+        model: &str,
+        supports_multimodal: bool,
+        supports_stateful: bool,
+    ) -> LlmProviderConfig {
+        LlmProviderConfig {
+            id: "provider".to_string(),
+            name: "Provider".to_string(),
+            base_url: "https://api.example.com/v1".to_string(),
+            api_key: String::new(),
+            model_type,
+            protocol,
+            model: model.to_string(),
+            model_identity_hint: None,
+            builtin_preset_id: None,
+            builtin_preset_model_id: None,
+            managed_base_url: false,
+            supports_multimodal,
+            supports_stateful,
+            legacy_protocol: None,
+            legacy_supports_embedding: false,
+            legacy_responses_model: String::new(),
+            legacy_embedding_model: String::new(),
+        }
+    }
+
+    #[test]
+    fn resolved_profile_maps_responses_provider_capabilities() {
+        let provider = provider_with(
+            LlmModelType::Llm,
+            LlmProviderProtocol::Responses,
+            "gpt-5.4-mini",
+            true,
+            true,
+        );
+
+        let profile = provider.resolved_profile();
+
+        assert!(profile.can_handle_ai_task());
+        assert!(profile.can_handle_ocr());
+        assert!(!profile.can_handle_embedding());
+        assert!(profile.supports_multimodal());
+        assert!(profile.supports_stateful());
+        assert!(profile.uses_responses_api());
+        assert!(!profile.uses_chat_completions_api());
+        assert_eq!(profile.model_name(), Some("gpt-5.4-mini"));
+    }
+
+    #[test]
+    fn resolved_profile_rejects_chat_provider_for_ocr() {
+        let provider = provider_with(
+            LlmModelType::Llm,
+            LlmProviderProtocol::ChatCompletions,
+            "qwen3-vl:8b",
+            true,
+            false,
+        );
+
+        let profile = provider.resolved_profile();
+
+        assert!(profile.can_handle_ai_task());
+        assert!(!profile.can_handle_ocr());
+        assert!(!profile.supports_multimodal());
+        assert!(!profile.supports_stateful());
+        assert!(!profile.uses_responses_api());
+        assert!(profile.uses_chat_completions_api());
+    }
+
+    #[test]
+    fn resolved_profile_maps_embedding_provider_capabilities() {
+        let provider = provider_with(
+            LlmModelType::Embedding,
+            LlmProviderProtocol::Responses,
+            "text-embedding-3-small",
+            false,
+            false,
+        );
+
+        let profile = provider.resolved_profile();
+
+        assert!(!profile.can_handle_ai_task());
+        assert!(!profile.can_handle_ocr());
+        assert!(profile.can_handle_embedding());
+        assert_eq!(
+            profile.kind(),
+            ResolvedLlmProviderKind::Embedding { configured: true }
+        );
+    }
 }

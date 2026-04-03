@@ -14,15 +14,24 @@ use objc2_app_kit::{
 };
 
 use crate::{
-    domain::execution::ExecutionResult,
+    domain::{execution::ExecutionResult, rag::RagRuntimeStatus},
     services::application::APPLICATION_CACHE_STALE_AFTER,
-    state::{AppState, ShortcutRuntimeState},
+    state::{AppState, LauncherWindowSize, LauncherWindowViewMode, ShortcutRuntimeState},
 };
 
 const OCR_ERROR_EVENT: &str = "ocr-error";
 const OCR_TRANSLATION_STARTED_EVENT: &str = "ocr-translation-started";
+const OCR_TRANSLATION_STREAM_EVENT: &str = "ocr-translation-stream";
 const OCR_TRANSLATION_RESULT_EVENT: &str = "ocr-translation-result";
+const RAG_RUNTIME_STATUS_EVENT: &str = "rag-runtime-status";
 const OPEN_CLIPBOARD_HISTORY_PANEL_EVENT: &str = "open-clipboard-history-panel";
+const REVEAL_LAUNCHER_MAIN_PANEL_EVENT: &str = "reveal-launcher-main-panel";
+const INSERT_CLIPBOARD_HISTORY_TEXT_INTO_LAUNCHER_EVENT: &str =
+    "insert-clipboard-history-text-into-launcher";
+const MAIN_WINDOW_LABEL: &str = "main";
+const CLIPBOARD_WINDOW_LABEL: &str = "clipboard";
+const CLIPBOARD_WINDOW_CURSOR_OFFSET_X: f64 = 12.0;
+const CLIPBOARD_WINDOW_CURSOR_OFFSET_Y: f64 = 16.0;
 const LAUNCHER_VERTICAL_CENTER_RATIO: f64 = 0.382;
 const LAUNCHER_SHOW_RESIZE_REPOSITION_GRACE_PERIOD: Duration = Duration::from_millis(250);
 const LAUNCHER_SHOW_BLUR_AUTO_HIDE_SUPPRESSION_PERIOD: Duration = Duration::from_millis(400);
@@ -34,6 +43,10 @@ const MACOS_LAUNCHER_PANEL_LEVEL: PanelLevel = PanelLevel::Status;
 const LAUNCHER_VISIBLE_RESIZE_BLUR_AUTO_HIDE_SUPPRESSION_PERIOD: Duration =
     Duration::from_millis(500);
 const MIN_WINDOW_DIMENSION: f64 = 1.0;
+const DEFAULT_MAIN_WINDOW_WIDTH: f64 = 768.0;
+const DEFAULT_MAIN_WINDOW_HEIGHT: f64 = 280.0;
+const DEFAULT_CLIPBOARD_WINDOW_WIDTH: f64 = 452.0;
+const DEFAULT_CLIPBOARD_WINDOW_HEIGHT: f64 = 408.0;
 
 #[cfg(target_os = "macos")]
 use tauri_nspanel::{
@@ -127,6 +140,14 @@ struct OcrTranslationResultPayload {
     result: ExecutionResult,
 }
 
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OcrTranslationStreamPayload {
+    source_mode: ShortcutTranslationSourceMode,
+    source_text: String,
+    partial_text: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClipboardHistorySelectionMode {
@@ -138,6 +159,16 @@ pub enum ClipboardHistorySelectionMode {
 #[serde(rename_all = "camelCase")]
 struct OpenClipboardHistoryPanelPayload {
     selection_mode: ClipboardHistorySelectionMode,
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RevealLauncherMainPanelPayload;
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InsertClipboardHistoryTextIntoLauncherPayload {
+    text: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -311,7 +342,7 @@ pub fn configure_main_window(window: &WebviewWindow) -> Result<()> {
             }
             WindowEvent::Focused(false) => {
                 #[cfg(target_os = "macos")]
-                let tauri_reported_focus = main_window(&launcher_app_handle)
+                let tauri_reported_focus = launcher_window(&launcher_app_handle, &window_label)
                     .ok()
                     .and_then(|window| window.is_focused().ok());
                 let blur_auto_hide_delay_ms = launcher_state
@@ -469,7 +500,7 @@ pub fn configure_main_window(window: &WebviewWindow) -> Result<()> {
                         return;
                     }
 
-                    let window = match main_window(&app_handle) {
+                    let window = match launcher_window(&app_handle, &window_label) {
                         Ok(window) => window,
                         Err(error) => {
                             tracing::warn!(
@@ -521,9 +552,54 @@ pub fn configure_main_window(window: &WebviewWindow) -> Result<()> {
     Ok(())
 }
 
+pub fn configure_clipboard_window(window: &WebviewWindow) -> Result<()> {
+    apply_platform_window_behavior(window)?;
+    set_default_window_position(window)?;
+
+    let shortcut_state = window
+        .app_handle()
+        .state::<ShortcutRuntimeState>()
+        .inner()
+        .clone();
+    let app_handle = window.app_handle().clone();
+    let window_label = window.label().to_string();
+    window.on_window_event(move |event| match event {
+        WindowEvent::Focused(false) => {
+            if !shortcut_state.is_clipboard_history_visible() {
+                return;
+            }
+
+            if let Err(error) = hide_clipboard_window_by_label(&app_handle, "focus_lost", false) {
+                tracing::warn!(
+                    ?error,
+                    window_label,
+                    "failed to auto-hide clipboard history window on blur"
+                );
+            }
+        }
+        WindowEvent::Destroyed => {
+            shortcut_state.set_clipboard_history_visible(false);
+            shortcut_state.set_clipboard_window_preserves_launcher_focus(false);
+        }
+        _ => {}
+    });
+
+    Ok(())
+}
+
 pub fn toggle_main_window(app: &AppHandle) -> Result<()> {
+    let shortcut_state = app.state::<ShortcutRuntimeState>();
+    let should_stop_after_hiding_clipboard =
+        should_stop_toggle_after_hiding_clipboard(shortcut_state.inner());
+    if shortcut_state.is_clipboard_history_visible() {
+        hide_clipboard_window_by_label(app, "launcher_toggle", true)?;
+        if should_stop_after_hiding_clipboard {
+            return Ok(());
+        }
+    }
+
     let window = main_window(app)?;
-    let launcher_state = app.state::<ShortcutRuntimeState>();
+    let launcher_state = shortcut_state;
     #[cfg(target_os = "macos")]
     let launcher_focused = window
         .is_focused()
@@ -603,7 +679,71 @@ pub fn toggle_main_window(app: &AppHandle) -> Result<()> {
     reveal_main_window(app)
 }
 
+fn default_window_size_for_view_mode(mode: LauncherWindowViewMode) -> LogicalSize<f64> {
+    match mode {
+        LauncherWindowViewMode::Main => {
+            LogicalSize::new(DEFAULT_MAIN_WINDOW_WIDTH, DEFAULT_MAIN_WINDOW_HEIGHT)
+        }
+        LauncherWindowViewMode::ClipboardHistory => LogicalSize::new(
+            DEFAULT_CLIPBOARD_WINDOW_WIDTH,
+            DEFAULT_CLIPBOARD_WINDOW_HEIGHT,
+        ),
+    }
+}
+
+fn apply_window_size_for_view_mode(
+    window: &WebviewWindow,
+    shortcut_state: &ShortcutRuntimeState,
+    mode: LauncherWindowViewMode,
+    should_reposition_default: bool,
+) -> Result<()> {
+    let work_area = resolve_presentation_work_area(window, should_reposition_default)?;
+    let cached_size = shortcut_state
+        .cached_launcher_window_size(mode)
+        .map(|size| LogicalSize::new(size.width, size.height))
+        .unwrap_or_else(|| default_window_size_for_view_mode(mode));
+    let next_size = work_area
+        .map(|bounds| clamp_window_size_to_work_area(cached_size, bounds.size))
+        .unwrap_or(cached_size);
+
+    tracing::info!(
+        window_label = window.label(),
+        launcher_view_mode = ?mode,
+        cached_width = cached_size.width,
+        cached_height = cached_size.height,
+        applied_width = next_size.width,
+        applied_height = next_size.height,
+        should_reposition_default,
+        "applying cached launcher window size before show"
+    );
+
+    set_window_content_size(window, next_size)?;
+    shortcut_state.set_launcher_view_mode(mode);
+    shortcut_state.remember_launcher_window_size(
+        mode,
+        LauncherWindowSize {
+            width: next_size.width,
+            height: next_size.height,
+        },
+    );
+
+    if should_reposition_default {
+        set_default_window_position(window)?;
+    } else {
+        clamp_window_position_within_work_area(window, work_area, next_size)?;
+    }
+
+    Ok(())
+}
+
 pub fn reveal_main_window(app: &AppHandle) -> Result<()> {
+    if app
+        .state::<ShortcutRuntimeState>()
+        .is_clipboard_history_visible()
+    {
+        hide_clipboard_window_by_label(app, "reveal_main_window", false)?;
+    }
+
     let window = main_window(app)?;
     let launcher_state = app.state::<ShortcutRuntimeState>();
     let was_launcher_visible = launcher_state.is_launcher_visible();
@@ -620,8 +760,20 @@ pub fn reveal_main_window(app: &AppHandle) -> Result<()> {
     if !was_launcher_visible {
         launcher_state.set_launcher_blur_auto_hide_enabled(true);
         launcher_state.arm_launcher_resize_reposition(LAUNCHER_SHOW_RESIZE_REPOSITION_GRACE_PERIOD);
-        set_default_window_position(&window)?;
     }
+
+    apply_window_size_for_view_mode(
+        &window,
+        launcher_state.inner(),
+        LauncherWindowViewMode::Main,
+        !was_launcher_visible,
+    )?;
+    window
+        .emit(
+            REVEAL_LAUNCHER_MAIN_PANEL_EVENT,
+            RevealLauncherMainPanelPayload,
+        )
+        .context("failed to emit launcher main panel reveal event")?;
 
     launcher_state
         .arm_launcher_blur_auto_hide_suppression(LAUNCHER_SHOW_BLUR_AUTO_HIDE_SUPPRESSION_PERIOD);
@@ -657,22 +809,37 @@ pub fn launcher_is_effectively_foreground(
 }
 
 pub fn show_main_window_with_error(app: &AppHandle, error_message: &str) -> Result<()> {
+    if app
+        .state::<ShortcutRuntimeState>()
+        .is_clipboard_history_visible()
+    {
+        hide_clipboard_window_by_label(app, "show_error", false)?;
+    }
+
     let window = main_window(app)?;
     let shortcut_state = app.state::<ShortcutRuntimeState>();
-    window
-        .emit(OCR_ERROR_EVENT, error_message)
-        .context("failed to emit OCR error event")?;
+    emit_ocr_error_event(&window, error_message)?;
     prepare_main_window_for_show(&window)?;
     shortcut_state.cancel_launcher_blur_auto_hide_confirmation();
     shortcut_state.set_launcher_blur_auto_hide_enabled(true);
     shortcut_state.arm_launcher_resize_reposition(LAUNCHER_SHOW_RESIZE_REPOSITION_GRACE_PERIOD);
     shortcut_state
         .arm_launcher_blur_auto_hide_suppression(LAUNCHER_SHOW_BLUR_AUTO_HIDE_SUPPRESSION_PERIOD);
-    set_default_window_position(&window)?;
+    apply_window_size_for_view_mode(
+        &window,
+        shortcut_state.inner(),
+        LauncherWindowViewMode::Main,
+        true,
+    )?;
     show_window(&window)?;
     order_main_window_front(&window)?;
     shortcut_state.set_launcher_visible(true);
     Ok(())
+}
+
+pub fn emit_clipboard_history_panel_error(app: &AppHandle, error_message: &str) -> Result<()> {
+    let window = clipboard_window(app)?;
+    emit_ocr_error_event(&window, error_message)
 }
 
 pub fn show_main_window_with_shortcut_translation_started(
@@ -680,6 +847,13 @@ pub fn show_main_window_with_shortcut_translation_started(
     source_mode: ShortcutTranslationSourceMode,
     source_text: String,
 ) -> Result<()> {
+    if app
+        .state::<ShortcutRuntimeState>()
+        .is_clipboard_history_visible()
+    {
+        hide_clipboard_window_by_label(app, "show_shortcut_translation", false)?;
+    }
+
     let window = main_window(app)?;
     let shortcut_state = app.state::<ShortcutRuntimeState>();
     window
@@ -697,7 +871,12 @@ pub fn show_main_window_with_shortcut_translation_started(
     shortcut_state.arm_launcher_resize_reposition(LAUNCHER_SHOW_RESIZE_REPOSITION_GRACE_PERIOD);
     shortcut_state
         .arm_launcher_blur_auto_hide_suppression(LAUNCHER_SHOW_BLUR_AUTO_HIDE_SUPPRESSION_PERIOD);
-    set_default_window_position(&window)?;
+    apply_window_size_for_view_mode(
+        &window,
+        shortcut_state.inner(),
+        LauncherWindowViewMode::Main,
+        true,
+    )?;
     show_window(&window)?;
     order_main_window_front(&window)?;
     shortcut_state.set_launcher_visible(true);
@@ -724,56 +903,118 @@ pub fn emit_shortcut_translation_result(
     Ok(())
 }
 
-pub fn show_main_window_with_clipboard_history_panel(app: &AppHandle) -> Result<()> {
+pub fn emit_shortcut_translation_stream(
+    app: &AppHandle,
+    source_mode: ShortcutTranslationSourceMode,
+    source_text: String,
+    partial_text: String,
+) -> Result<()> {
     let window = main_window(app)?;
+    window
+        .emit(
+            OCR_TRANSLATION_STREAM_EVENT,
+            OcrTranslationStreamPayload {
+                source_mode,
+                source_text,
+                partial_text,
+            },
+        )
+        .context("failed to emit OCR translation stream event")?;
+    Ok(())
+}
+
+pub fn emit_rag_runtime_status(app: &AppHandle, status: &RagRuntimeStatus) -> Result<()> {
+    let window = main_window(app)?;
+    window
+        .emit(RAG_RUNTIME_STATUS_EVENT, status)
+        .context("failed to emit RAG runtime status event")?;
+    Ok(())
+}
+
+pub fn show_main_window_with_clipboard_history_panel(app: &AppHandle) -> Result<()> {
     let shortcut_state = app.state::<ShortcutRuntimeState>();
-    let selection_mode = match launcher_is_effectively_foreground(app, shortcut_state.inner()) {
-        Ok(true) => ClipboardHistorySelectionMode::InsertIntoLauncher,
-        Ok(false) => ClipboardHistorySelectionMode::PasteExternally,
-        Err(error) => {
-            tracing::warn!(
-                ?error,
-                window_label = window.label(),
-                "failed to inspect launcher foreground state before opening clipboard history"
-            );
-            ClipboardHistorySelectionMode::PasteExternally
+    let selection_mode = if shortcut_state.is_clipboard_history_visible() {
+        current_clipboard_history_selection_mode(shortcut_state.inner())
+    } else {
+        match launcher_is_effectively_foreground(app, shortcut_state.inner()) {
+            Ok(true) => ClipboardHistorySelectionMode::InsertIntoLauncher,
+            Ok(false) => ClipboardHistorySelectionMode::PasteExternally,
+            Err(error) => {
+                let clipboard_window = clipboard_window(app)?;
+                tracing::warn!(
+                    ?error,
+                    window_label = clipboard_window.label(),
+                    "failed to inspect launcher foreground state before opening clipboard history"
+                );
+                ClipboardHistorySelectionMode::PasteExternally
+            }
         }
     };
+
+    show_clipboard_history_panel(app, selection_mode)
+}
+
+pub fn show_clipboard_history_panel(
+    app: &AppHandle,
+    selection_mode: ClipboardHistorySelectionMode,
+) -> Result<()> {
+    let clipboard_window = clipboard_window(app)?;
+    let shortcut_state = app.state::<ShortcutRuntimeState>();
 
     if selection_mode == ClipboardHistorySelectionMode::InsertIntoLauncher {
         #[cfg(target_os = "macos")]
         shortcut_state.remember_clipboard_external_paste_target_pid(None);
-        shortcut_state.cancel_launcher_blur_auto_hide_confirmation();
-        shortcut_state.arm_launcher_blur_auto_hide_suppression(
-            LAUNCHER_SHOW_BLUR_AUTO_HIDE_SUPPRESSION_PERIOD,
-        );
-        window
-            .emit(
-                OPEN_CLIPBOARD_HISTORY_PANEL_EVENT,
-                OpenClipboardHistoryPanelPayload { selection_mode },
-            )
-            .context("failed to emit clipboard history panel event")?;
-        return Ok(());
+        if shortcut_state.is_launcher_visible() {
+            hide_main_window(app)?;
+        }
+        shortcut_state.set_clipboard_window_preserves_launcher_focus(true);
+    } else {
+        if should_refresh_clipboard_external_paste_target(shortcut_state.inner(), selection_mode) {
+            remember_clipboard_external_paste_target(app);
+        }
+        shortcut_state.set_clipboard_window_preserves_launcher_focus(false);
     }
 
-    remember_clipboard_external_paste_target(app);
-    prepare_main_window_for_show(&window)?;
-    shortcut_state.cancel_launcher_blur_auto_hide_confirmation();
-    shortcut_state.set_launcher_blur_auto_hide_enabled(true);
-    shortcut_state.arm_launcher_resize_reposition(LAUNCHER_SHOW_RESIZE_REPOSITION_GRACE_PERIOD);
-    shortcut_state
-        .arm_launcher_blur_auto_hide_suppression(LAUNCHER_SHOW_BLUR_AUTO_HIDE_SUPPRESSION_PERIOD);
-    set_default_window_position(&window)?;
-    show_window(&window)?;
-    order_main_window_front(&window)?;
-    window
+    prepare_main_window_for_show(&clipboard_window)?;
+    apply_window_size_for_view_mode(
+        &clipboard_window,
+        shortcut_state.inner(),
+        LauncherWindowViewMode::ClipboardHistory,
+        true,
+    )?;
+    clipboard_window
         .emit(
             OPEN_CLIPBOARD_HISTORY_PANEL_EVENT,
             OpenClipboardHistoryPanelPayload { selection_mode },
         )
         .context("failed to emit clipboard history panel event")?;
-    shortcut_state.set_launcher_visible(true);
+    show_window(&clipboard_window)?;
+    order_main_window_front(&clipboard_window)?;
+    shortcut_state.set_clipboard_history_visible(true);
     Ok(())
+}
+
+fn current_clipboard_history_selection_mode(
+    shortcut_state: &ShortcutRuntimeState,
+) -> ClipboardHistorySelectionMode {
+    if shortcut_state.clipboard_window_preserves_launcher_focus() {
+        ClipboardHistorySelectionMode::InsertIntoLauncher
+    } else {
+        ClipboardHistorySelectionMode::PasteExternally
+    }
+}
+
+fn should_refresh_clipboard_external_paste_target(
+    shortcut_state: &ShortcutRuntimeState,
+    selection_mode: ClipboardHistorySelectionMode,
+) -> bool {
+    selection_mode == ClipboardHistorySelectionMode::PasteExternally
+        && !shortcut_state.is_clipboard_history_visible()
+}
+
+fn should_stop_toggle_after_hiding_clipboard(shortcut_state: &ShortcutRuntimeState) -> bool {
+    shortcut_state.is_clipboard_history_visible()
+        && shortcut_state.clipboard_window_preserves_launcher_focus()
 }
 
 pub fn hide_main_window(app: &AppHandle) -> Result<()> {
@@ -782,12 +1023,38 @@ pub fn hide_main_window(app: &AppHandle) -> Result<()> {
     hide_launcher_window_statefully(&window, shortcut_state.inner(), "explicit_hide")
 }
 
-pub fn resize_main_window(app: &AppHandle, width: f64, height: f64) -> Result<()> {
-    let window = main_window(app)?;
+pub fn hide_launcher_window(app: &AppHandle, window_label: Option<&str>) -> Result<()> {
+    match window_label.unwrap_or(MAIN_WINDOW_LABEL) {
+        CLIPBOARD_WINDOW_LABEL => hide_clipboard_window_by_label(app, "explicit_hide", false),
+        _ => hide_main_window(app),
+    }
+}
+
+pub fn dismiss_clipboard_history_panel(app: &AppHandle) -> Result<()> {
+    let restore_main_focus = {
+        let shortcut_state = app.state::<ShortcutRuntimeState>();
+        shortcut_state.clipboard_window_preserves_launcher_focus()
+    };
+
+    hide_clipboard_window_by_label(app, "explicit_dismiss", restore_main_focus)
+}
+
+pub fn resize_launcher_window(
+    app: &AppHandle,
+    width: f64,
+    height: f64,
+    window_label: Option<&str>,
+) -> Result<()> {
+    let resolved_label = window_label.unwrap_or(MAIN_WINDOW_LABEL);
+    let window = launcher_window(app, resolved_label)?;
     let shortcut_state = app.state::<ShortcutRuntimeState>();
-    let launcher_visible = shortcut_state.is_launcher_visible();
-    let should_reposition_default = shortcut_state.should_reposition_launcher_on_resize();
-    let work_area = resolve_window_work_area(&window)?;
+    let launcher_visible = match resolved_label {
+        CLIPBOARD_WINDOW_LABEL => shortcut_state.is_clipboard_history_visible(),
+        _ => shortcut_state.is_launcher_visible(),
+    };
+    let should_reposition_default =
+        !launcher_visible || shortcut_state.should_reposition_launcher_on_resize();
+    let work_area = resolve_presentation_work_area(&window, should_reposition_default)?;
     let requested_size = LogicalSize::new(
         width.max(MIN_WINDOW_DIMENSION),
         height.max(MIN_WINDOW_DIMENSION),
@@ -795,9 +1062,11 @@ pub fn resize_main_window(app: &AppHandle, width: f64, height: f64) -> Result<()
     let next_size = work_area
         .map(|bounds| clamp_window_size_to_work_area(requested_size, bounds.size))
         .unwrap_or(requested_size);
+    let current_mode = view_mode_for_window_label(resolved_label);
 
     tracing::info!(
         window_label = window.label(),
+        launcher_view_mode = ?current_mode,
         requested_width = width,
         requested_height = height,
         applied_width = next_size.width,
@@ -819,24 +1088,15 @@ pub fn resize_main_window(app: &AppHandle, width: f64, height: f64) -> Result<()
         );
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        if has_macos_panel(&window) {
-            run_macos_panel_on_main_thread(&window, move |panel| {
-                panel.set_content_size(next_size.width, next_size.height);
-            })?;
-            if should_reposition_default {
-                set_default_window_position(&window)?;
-            } else {
-                clamp_window_position_within_work_area(&window, work_area, next_size)?;
-            }
-            return Ok(());
-        }
-    }
+    shortcut_state.remember_launcher_window_size(
+        current_mode,
+        LauncherWindowSize {
+            width: next_size.width,
+            height: next_size.height,
+        },
+    );
 
-    window
-        .set_size(next_size)
-        .context("failed to resize launcher window")?;
+    set_window_content_size(&window, next_size)?;
     if should_reposition_default {
         set_default_window_position(&window)?;
     } else {
@@ -846,9 +1106,40 @@ pub fn resize_main_window(app: &AppHandle, width: f64, height: f64) -> Result<()
     Ok(())
 }
 
+fn set_window_content_size(window: &WebviewWindow, next_size: LogicalSize<f64>) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        if has_macos_panel(window) {
+            run_macos_panel_on_main_thread(window, move |panel| {
+                panel.set_content_size(next_size.width, next_size.height);
+            })?;
+            return Ok(());
+        }
+    }
+
+    window
+        .set_size(next_size)
+        .context("failed to resize launcher window")
+}
+
+fn launcher_window(app: &AppHandle, label: &str) -> Result<WebviewWindow> {
+    app.get_webview_window(label)
+        .with_context(|| format!("launcher window must exist: {label}"))
+}
+
 fn main_window(app: &AppHandle) -> Result<WebviewWindow> {
-    app.get_webview_window("main")
-        .context("main launcher window must exist")
+    launcher_window(app, MAIN_WINDOW_LABEL)
+}
+
+fn clipboard_window(app: &AppHandle) -> Result<WebviewWindow> {
+    launcher_window(app, CLIPBOARD_WINDOW_LABEL)
+}
+
+fn view_mode_for_window_label(label: &str) -> LauncherWindowViewMode {
+    match label {
+        CLIPBOARD_WINDOW_LABEL => LauncherWindowViewMode::ClipboardHistory,
+        _ => LauncherWindowViewMode::Main,
+    }
 }
 
 fn apply_platform_window_behavior(window: &WebviewWindow) -> Result<()> {
@@ -861,22 +1152,20 @@ fn apply_platform_window_behavior(window: &WebviewWindow) -> Result<()> {
 }
 
 fn set_default_window_position(window: &WebviewWindow) -> Result<()> {
-    let monitor = resolve_target_monitor(window)?;
-
-    let Some(monitor) = monitor else {
+    let Some(work_area) = resolve_target_window_work_area(window)? else {
         return Ok(());
     };
 
-    let scale_factor = monitor.scale_factor();
-    let work_area = monitor.work_area();
-    let work_area_position = work_area.position.to_logical::<f64>(scale_factor);
-    let work_area_size = work_area.size.to_logical::<f64>(scale_factor);
     let window_size = window
         .inner_size()
         .context("failed to get launcher window size for default position")?
-        .to_logical::<f64>(scale_factor);
+        .to_logical::<f64>(work_area.scale_factor);
 
-    let position = compute_default_window_position(work_area_position, work_area_size, window_size);
+    let position = if window.label() == CLIPBOARD_WINDOW_LABEL {
+        compute_clipboard_window_position(window, work_area, window_size)?
+    } else {
+        compute_default_window_position(work_area.position, work_area.size, window_size)
+    };
 
     window
         .set_position(position)
@@ -896,6 +1185,47 @@ fn resolve_window_work_area(window: &WebviewWindow) -> Result<Option<WindowWorkA
         position: work_area.position.to_logical::<f64>(scale_factor),
         size: work_area.size.to_logical::<f64>(scale_factor),
     }))
+}
+
+fn resolve_target_window_work_area(window: &WebviewWindow) -> Result<Option<WindowWorkArea>> {
+    let Some(monitor) = resolve_target_monitor(window)? else {
+        return Ok(None);
+    };
+
+    let scale_factor = monitor.scale_factor();
+    let work_area = monitor.work_area();
+
+    Ok(Some(WindowWorkArea {
+        scale_factor,
+        position: work_area.position.to_logical::<f64>(scale_factor),
+        size: work_area.size.to_logical::<f64>(scale_factor),
+    }))
+}
+
+fn resolve_presentation_work_area(
+    window: &WebviewWindow,
+    should_reposition_default: bool,
+) -> Result<Option<WindowWorkArea>> {
+    let current_work_area = resolve_window_work_area(window)?;
+    let target_work_area = resolve_target_window_work_area(window)?;
+
+    Ok(select_presentation_work_area(
+        current_work_area,
+        target_work_area,
+        should_reposition_default,
+    ))
+}
+
+fn select_presentation_work_area(
+    current_work_area: Option<WindowWorkArea>,
+    target_work_area: Option<WindowWorkArea>,
+    should_reposition_default: bool,
+) -> Option<WindowWorkArea> {
+    if should_reposition_default {
+        target_work_area.or(current_work_area)
+    } else {
+        current_work_area.or(target_work_area)
+    }
 }
 
 fn resolve_target_monitor(window: &WebviewWindow) -> Result<Option<tauri::Monitor>> {
@@ -970,6 +1300,64 @@ fn compute_default_window_position(
         .clamp(min_y, max_y);
 
     LogicalPosition::new(x, y)
+}
+
+fn compute_clipboard_window_position(
+    window: &WebviewWindow,
+    work_area: WindowWorkArea,
+    window_size: LogicalSize<f64>,
+) -> Result<LogicalPosition<f64>> {
+    let cursor_position = match window.cursor_position() {
+        Ok(position) => Some(position.to_logical::<f64>(work_area.scale_factor)),
+        Err(error) => {
+            tracing::debug!(
+                ?error,
+                window_label = window.label(),
+                "failed to read cursor position for clipboard window placement"
+            );
+            None
+        }
+    };
+
+    Ok(compute_clipboard_window_position_from_cursor(
+        work_area.position,
+        work_area.size,
+        window_size,
+        cursor_position,
+    ))
+}
+
+fn compute_clipboard_window_position_from_cursor(
+    work_area_position: LogicalPosition<f64>,
+    work_area_size: LogicalSize<f64>,
+    window_size: LogicalSize<f64>,
+    cursor_position: Option<LogicalPosition<f64>>,
+) -> LogicalPosition<f64> {
+    let Some(cursor_position) = cursor_position else {
+        return compute_default_window_position(work_area_position, work_area_size, window_size);
+    };
+
+    let place_right = cursor_position.x + CLIPBOARD_WINDOW_CURSOR_OFFSET_X + window_size.width
+        <= work_area_position.x + work_area_size.width;
+    let place_below = cursor_position.y + CLIPBOARD_WINDOW_CURSOR_OFFSET_Y + window_size.height
+        <= work_area_position.y + work_area_size.height;
+    let target_x = if place_right {
+        cursor_position.x + CLIPBOARD_WINDOW_CURSOR_OFFSET_X
+    } else {
+        cursor_position.x - window_size.width - CLIPBOARD_WINDOW_CURSOR_OFFSET_X
+    };
+    let target_y = if place_below {
+        cursor_position.y + CLIPBOARD_WINDOW_CURSOR_OFFSET_Y
+    } else {
+        cursor_position.y - window_size.height - CLIPBOARD_WINDOW_CURSOR_OFFSET_Y
+    };
+
+    compute_visible_window_position(
+        work_area_position,
+        work_area_size,
+        window_size,
+        LogicalPosition::new(target_x, target_y),
+    )
 }
 
 fn clamp_window_position_within_work_area(
@@ -1066,7 +1454,11 @@ fn show_macos_panel_without_focus(window: &WebviewWindow) -> Result<()> {
 
 #[cfg(target_os = "macos")]
 fn initialize_macos_panel(window: &WebviewWindow) -> Result<()> {
-    if window.app_handle().get_webview_panel("main").is_ok() {
+    if window
+        .app_handle()
+        .get_webview_panel(window.label())
+        .is_ok()
+    {
         return Ok(());
     }
 
@@ -1157,6 +1549,70 @@ fn hide_launcher_window_statefully(
     Ok(())
 }
 
+fn hide_clipboard_window_statefully(
+    window: &WebviewWindow,
+    shortcut_state: &ShortcutRuntimeState,
+    reason: &'static str,
+    restore_main_focus: bool,
+) -> Result<()> {
+    tracing::info!(
+        window_label = window.label(),
+        reason,
+        restore_main_focus,
+        clipboard_visible_before_hide = shortcut_state.is_clipboard_history_visible(),
+        "hiding clipboard history window"
+    );
+    hide_window(window)?;
+    shortcut_state.set_clipboard_history_visible(false);
+
+    let preserved_launcher_focus = shortcut_state.clipboard_window_preserves_launcher_focus();
+    if preserved_launcher_focus {
+        shortcut_state.set_clipboard_window_preserves_launcher_focus(false);
+    }
+
+    if restore_main_focus && preserved_launcher_focus {
+        reveal_main_window(window.app_handle())?;
+    }
+
+    Ok(())
+}
+
+fn hide_clipboard_window_by_label(
+    app: &AppHandle,
+    reason: &'static str,
+    restore_main_focus: bool,
+) -> Result<()> {
+    if !app
+        .state::<ShortcutRuntimeState>()
+        .is_clipboard_history_visible()
+    {
+        return Ok(());
+    }
+
+    let window = clipboard_window(app)?;
+    let shortcut_state = app.state::<ShortcutRuntimeState>();
+    hide_clipboard_window_statefully(&window, shortcut_state.inner(), reason, restore_main_focus)
+}
+
+fn emit_ocr_error_event(window: &WebviewWindow, error_message: &str) -> Result<()> {
+    window
+        .emit(OCR_ERROR_EVENT, error_message)
+        .context("failed to emit OCR error event")
+}
+
+pub fn insert_clipboard_history_text_into_launcher(app: &AppHandle, text: String) -> Result<()> {
+    let main_window = main_window(app)?;
+    main_window
+        .emit(
+            INSERT_CLIPBOARD_HISTORY_TEXT_INTO_LAUNCHER_EVENT,
+            InsertClipboardHistoryTextIntoLauncherPayload { text },
+        )
+        .context("failed to emit clipboard history insert event to launcher")?;
+
+    hide_clipboard_window_by_label(app, "insert_into_launcher", true)?;
+    Ok(())
+}
+
 #[cfg(target_os = "macos")]
 fn has_macos_panel(window: &WebviewWindow) -> bool {
     window
@@ -1227,7 +1683,7 @@ fn schedule_macos_panel_visibility_reinforcement(
             return;
         }
 
-        let window = match main_window(&app_handle) {
+        let window = match launcher_window(&app_handle, &window_label) {
             Ok(window) => window,
             Err(error) => {
                 tracing::warn!(
@@ -1326,12 +1782,17 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_window_size_to_work_area, compute_default_window_position,
-        compute_visible_window_position, LogicalPosition, LogicalSize, OcrTranslationResultPayload,
-        OcrTranslationStartedPayload, ShortcutTranslationSourceMode,
+        clamp_window_size_to_work_area, compute_clipboard_window_position_from_cursor,
+        compute_default_window_position, compute_visible_window_position,
+        current_clipboard_history_selection_mode, select_presentation_work_area,
+        should_refresh_clipboard_external_paste_target, should_stop_toggle_after_hiding_clipboard,
+        ClipboardHistorySelectionMode, LogicalPosition, LogicalSize, OcrTranslationResultPayload,
+        OcrTranslationStartedPayload, ShortcutTranslationSourceMode, WindowWorkArea,
+        CLIPBOARD_WINDOW_CURSOR_OFFSET_X, CLIPBOARD_WINDOW_CURSOR_OFFSET_Y,
         LAUNCHER_VERTICAL_CENTER_RATIO,
     };
     use crate::domain::execution::ExecutionResult;
+    use crate::state::ShortcutRuntimeState;
     use serde_json::json;
 
     #[test]
@@ -1408,6 +1869,169 @@ mod tests {
 
         assert_eq!(position.x, 80.0);
         assert_eq!(position.y, 40.0);
+    }
+
+    #[test]
+    fn clipboard_position_follows_cursor_with_offset() {
+        let position = compute_clipboard_window_position_from_cursor(
+            LogicalPosition::new(0.0, 24.0),
+            LogicalSize::new(1440.0, 900.0),
+            LogicalSize::new(428.0, 520.0),
+            Some(LogicalPosition::new(320.0, 180.0)),
+        );
+
+        assert_eq!(position.x, 320.0 + CLIPBOARD_WINDOW_CURSOR_OFFSET_X);
+        assert_eq!(position.y, 180.0 + CLIPBOARD_WINDOW_CURSOR_OFFSET_Y);
+    }
+
+    #[test]
+    fn clipboard_position_flips_left_when_right_space_is_insufficient() {
+        let position = compute_clipboard_window_position_from_cursor(
+            LogicalPosition::new(0.0, 24.0),
+            LogicalSize::new(1440.0, 900.0),
+            LogicalSize::new(428.0, 520.0),
+            Some(LogicalPosition::new(1320.0, 180.0)),
+        );
+
+        assert_eq!(position.x, 880.0);
+        assert_eq!(position.y, 180.0 + CLIPBOARD_WINDOW_CURSOR_OFFSET_Y);
+    }
+
+    #[test]
+    fn clipboard_position_flips_up_when_bottom_space_is_insufficient() {
+        let position = compute_clipboard_window_position_from_cursor(
+            LogicalPosition::new(0.0, 24.0),
+            LogicalSize::new(1440.0, 900.0),
+            LogicalSize::new(428.0, 520.0),
+            Some(LogicalPosition::new(320.0, 860.0)),
+        );
+
+        assert_eq!(position.x, 320.0 + CLIPBOARD_WINDOW_CURSOR_OFFSET_X);
+        assert_eq!(position.y, 324.0);
+    }
+
+    #[test]
+    fn clipboard_position_stays_within_work_area() {
+        let position = compute_clipboard_window_position_from_cursor(
+            LogicalPosition::new(120.0, 40.0),
+            LogicalSize::new(800.0, 600.0),
+            LogicalSize::new(428.0, 520.0),
+            Some(LogicalPosition::new(860.0, 620.0)),
+        );
+
+        assert_eq!(position.x, 420.0);
+        assert_eq!(position.y, 84.0);
+    }
+
+    #[test]
+    fn clipboard_position_falls_back_to_launcher_default_without_cursor() {
+        let position = compute_clipboard_window_position_from_cursor(
+            LogicalPosition::new(0.0, 24.0),
+            LogicalSize::new(1440.0, 900.0),
+            LogicalSize::new(428.0, 520.0),
+            None,
+        );
+
+        assert_eq!(
+            position,
+            compute_default_window_position(
+                LogicalPosition::new(0.0, 24.0),
+                LogicalSize::new(1440.0, 900.0),
+                LogicalSize::new(428.0, 520.0),
+            )
+        );
+    }
+
+    #[test]
+    fn clipboard_reopen_keeps_insert_mode_while_window_preserves_launcher_focus() {
+        let state = ShortcutRuntimeState::default();
+        state.set_clipboard_history_visible(true);
+        state.set_clipboard_window_preserves_launcher_focus(true);
+
+        assert_eq!(
+            current_clipboard_history_selection_mode(&state),
+            ClipboardHistorySelectionMode::InsertIntoLauncher
+        );
+    }
+
+    #[test]
+    fn clipboard_first_external_open_refreshes_paste_target() {
+        let state = ShortcutRuntimeState::default();
+
+        assert!(should_refresh_clipboard_external_paste_target(
+            &state,
+            ClipboardHistorySelectionMode::PasteExternally
+        ));
+    }
+
+    #[test]
+    fn clipboard_reopen_does_not_refresh_external_paste_target() {
+        let state = ShortcutRuntimeState::default();
+        state.set_clipboard_history_visible(true);
+        state.set_clipboard_window_preserves_launcher_focus(false);
+
+        assert!(!should_refresh_clipboard_external_paste_target(
+            &state,
+            ClipboardHistorySelectionMode::PasteExternally
+        ));
+    }
+
+    #[test]
+    fn launcher_toggle_stops_after_hiding_clipboard_that_preserved_launcher_focus() {
+        let state = ShortcutRuntimeState::default();
+        state.set_clipboard_history_visible(true);
+        state.set_clipboard_window_preserves_launcher_focus(true);
+
+        assert!(should_stop_toggle_after_hiding_clipboard(&state));
+    }
+
+    #[test]
+    fn launcher_toggle_continues_after_hiding_external_clipboard_window() {
+        let state = ShortcutRuntimeState::default();
+        state.set_clipboard_history_visible(true);
+        state.set_clipboard_window_preserves_launcher_focus(false);
+
+        assert!(!should_stop_toggle_after_hiding_clipboard(&state));
+    }
+
+    #[test]
+    fn presentation_work_area_prefers_target_monitor_when_repositioning_default() {
+        let current_work_area = WindowWorkArea {
+            scale_factor: 2.0,
+            position: LogicalPosition::new(0.0, 24.0),
+            size: LogicalSize::new(1512.0, 982.0),
+        };
+        let target_work_area = WindowWorkArea {
+            scale_factor: 1.0,
+            position: LogicalPosition::new(1512.0, 0.0),
+            size: LogicalSize::new(1920.0, 1080.0),
+        };
+
+        assert_eq!(
+            select_presentation_work_area(Some(current_work_area), Some(target_work_area), true)
+                .map(|work_area| work_area.size),
+            Some(LogicalSize::new(1920.0, 1080.0))
+        );
+    }
+
+    #[test]
+    fn presentation_work_area_prefers_current_monitor_without_default_reposition() {
+        let current_work_area = WindowWorkArea {
+            scale_factor: 2.0,
+            position: LogicalPosition::new(0.0, 24.0),
+            size: LogicalSize::new(1512.0, 982.0),
+        };
+        let target_work_area = WindowWorkArea {
+            scale_factor: 1.0,
+            position: LogicalPosition::new(1512.0, 0.0),
+            size: LogicalSize::new(1920.0, 1080.0),
+        };
+
+        assert_eq!(
+            select_presentation_work_area(Some(current_work_area), Some(target_work_area), false)
+                .map(|work_area| work_area.size),
+            Some(LogicalSize::new(1512.0, 982.0))
+        );
     }
 
     #[test]

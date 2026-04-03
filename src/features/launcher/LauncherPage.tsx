@@ -11,6 +11,7 @@ import {
 	closeAcpSession,
 	createAcpSession,
 	deleteClipboardHistoryEntry,
+	dismissClipboardHistoryPanel as dismissClipboardHistoryWindow,
 	executeAction,
 	getClipboardHistory,
 	getAcpAgents,
@@ -18,14 +19,19 @@ import {
 	getRagRuntimeStatus,
 	getWorkspace,
 	hideLauncherWindow,
+	insertClipboardHistoryTextIntoLauncher,
 	isDesktopRuntimeAvailable,
 	launchApp,
 	onClipboardHistoryUpdated,
 	onExecutionProgress,
+	onInsertClipboardHistoryTextIntoLauncher,
 	onOpenClipboardHistoryPanel,
+	onRagRuntimeStatus,
+	onRevealLauncherMainPanel,
 	listAcpSessions,
 	matchActions,
 	onOcrError,
+	onOcrTranslationStream,
 	onOcrTranslationStarted,
 	onOcrTranslationResult,
 	subscribeAcpSessionRemovals,
@@ -117,11 +123,11 @@ import { LauncherHeader } from "./components/LauncherHeader";
 import { LauncherComposer } from "./components/LauncherComposer";
 import { LauncherFeedback } from "./components/LauncherFeedback";
 import { RestoreNoticeList } from "./components/RestoreNoticeList";
-import { CompletionPopup } from "./components/CompletionPopup";
-import { SessionPanel } from "./components/SessionPanel";
 import { WorkspacePickerPanel } from "./components/WorkspacePickerPanel";
 import { AgentPickerPanel } from "./components/AgentPickerPanel";
-import { ClipboardHistoryPanel } from "./components/ClipboardHistoryPanel";
+import { LauncherSuggestionsSection } from "./components/LauncherSuggestionsSection";
+import { LauncherSessionSection } from "./components/LauncherSessionSection";
+import { LauncherClipboardSection } from "./components/LauncherClipboardSection";
 import "./launcher.css";
 import { isRagAnswerStructuredPayload } from "./types";
 
@@ -130,6 +136,24 @@ const launcherCompletionPopupId = "launcher-completion-popup";
 const launcherCompletionOptionIdPrefix = "launcher-completion-option";
 const QA_RESULT_BLUR_AUTO_HIDE_SUPPRESSION_MS = 1_500;
 const QA_RESULT_BLUR_AUTO_HIDE_RESTORE_AFTER_SETTLE_MS = 900;
+const CLIPBOARD_HISTORY_PINNED_HOTKEY_START_CODE = "A".charCodeAt(0);
+
+function getPinnedClipboardHotkeyIndex(code: string) {
+	if (!/^Key[A-Z]$/.test(code)) {
+		return null;
+	}
+
+	return code.charCodeAt(code.length - 1) - CLIPBOARD_HISTORY_PINNED_HOTKEY_START_CODE;
+}
+
+function getRecentClipboardHotkeyIndex(code: string) {
+	if (!/^Digit\d$/.test(code)) {
+		return null;
+	}
+
+	const digit = code.charAt(code.length - 1);
+	return digit === "0" ? 9 : Number(digit) - 1;
+}
 
 type PrimaryActionTone = "qa" | "execute" | "send" | "path" | "translate";
 
@@ -272,10 +296,14 @@ function buildRagRuntimeStatusText(status: RagRuntimeStatus): {
 }
 
 interface LauncherPageProps {
+	active?: boolean;
 	onOpenSettings?: () => void;
+	windowKind: "main" | "clipboard_history";
 }
 
-export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
+export function LauncherPage({ active = true, onOpenSettings, windowKind }: LauncherPageProps) {
+	const isClipboardWindow = windowKind === "clipboard_history";
+	const launcherViewActive = isClipboardWindow || active;
 	const [inputMode, setInputMode] = useState<InputMode>(defaultInputMode);
 	const [workspace, setWorkspaceState] = useState<WorkspaceState>({
 		rootPath: "",
@@ -327,7 +355,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		pinnedEntries: [],
 		recentEntries: [],
 	});
-	const [clipboardPanelOpen, setClipboardPanelOpen] = useState(false);
+	const [clipboardPanelOpen, setClipboardPanelOpen] = useState(windowKind === "clipboard_history");
 	const [clipboardSelectionMode, setClipboardSelectionMode] =
 		useState<ClipboardHistorySelectionMode>("paste_externally");
 	const [selectedClipboardEntryId, setSelectedClipboardEntryId] = useState<string | null>(null);
@@ -386,6 +414,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		[activeSessionId, rawText],
 	);
 	const desktopRuntimeAvailable = isDesktopRuntimeAvailable();
+	const clipboardPanelVisible = isClipboardWindow || clipboardPanelOpen;
 	const fileMode = activeFileToken !== null;
 	const launcherMode = activeSessionId === null;
 	const textStartsWithSlash = textBeforeCaret.trimStart().startsWith("/");
@@ -910,21 +939,22 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		});
 	}, [clearScheduledLauncherInputFocus, focusLauncherInput]);
 
-	function beginTrackedLauncherRequest() {
+	const beginTrackedLauncherRequest = useCallback(() => {
 		const requestEpoch = launcherResetEpochRef.current;
 		activeTrackedRequestEpochRef.current = requestEpoch;
 		return requestEpoch;
-	}
+	}, []);
 
-	function isTrackedLauncherRequestCurrent(requestEpoch: number) {
-		return launcherResetEpochRef.current === requestEpoch;
-	}
+	const isTrackedLauncherRequestCurrent = useCallback(
+		(requestEpoch: number) => launcherResetEpochRef.current === requestEpoch,
+		[],
+	);
 
-	function endTrackedLauncherRequest(requestEpoch: number) {
+	const endTrackedLauncherRequest = useCallback((requestEpoch: number) => {
 		if (activeTrackedRequestEpochRef.current === requestEpoch) {
 			activeTrackedRequestEpochRef.current = null;
 		}
-	}
+	}, []);
 
 	const resetQaConversation = useCallback(() => {
 		setQaAutoResizeFrozen(false);
@@ -936,6 +966,15 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		setRagConversation([]);
 		setQaRetrieval(null);
 	}, [restoreLauncherBlurAutoHide]);
+
+	const resetSuggestions = useCallback((resetSelectedIndex: boolean = false) => {
+		setActionMatches([]);
+		setFileMatches([]);
+		setAppMatches([]);
+		if (resetSelectedIndex) {
+			setSelectedIndex(0);
+		}
+	}, []);
 
 	const resetLauncherStateForExplicitDismiss = useCallback(() => {
 		const resetEpoch = launcherResetEpochRef.current + 1;
@@ -986,13 +1025,21 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 					console.warn("failed to clear active ACP session while dismissing launcher", error);
 				}
 			});
-	}, [activeSessionId, clearScheduledLauncherInputFocus, resetQaConversation]);
+	}, [
+		activeSessionId,
+		clearScheduledLauncherInputFocus,
+		isTrackedLauncherRequestCurrent,
+		resetSuggestions,
+		resetQaConversation,
+	]);
 
 	const dismissLauncher = useCallback(
 		async (options?: { resetQaConversation?: boolean }) => {
 			if (options?.resetQaConversation) {
 				resetQaConversation();
 			}
+			setClipboardPanelOpen(false);
+			setClipboardSelectionMode("paste_externally");
 			await hideLauncherWindow();
 		},
 		[resetQaConversation],
@@ -1016,6 +1063,42 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		},
 		[resetQaConversation, scheduleLauncherInputFocus, updateRawText],
 	);
+
+	const rawTextRef = useRef(rawText);
+	const boundedCaretIndexRef = useRef(boundedCaretIndex);
+	const clipboardPanelVisibleRef = useRef(clipboardPanelVisible);
+	const resetQaConversationRef = useRef(resetQaConversation);
+	const scheduleLauncherInputFocusRef = useRef(scheduleLauncherInputFocus);
+	const updateRawTextRef = useRef(updateRawText);
+	const applyInjectedSourceTextRef = useRef(applyInjectedSourceText);
+
+	useLayoutEffect(() => {
+		rawTextRef.current = rawText;
+	}, [rawText]);
+
+	useLayoutEffect(() => {
+		boundedCaretIndexRef.current = boundedCaretIndex;
+	}, [boundedCaretIndex]);
+
+	useLayoutEffect(() => {
+		clipboardPanelVisibleRef.current = clipboardPanelVisible;
+	}, [clipboardPanelVisible]);
+
+	useLayoutEffect(() => {
+		resetQaConversationRef.current = resetQaConversation;
+	}, [resetQaConversation]);
+
+	useLayoutEffect(() => {
+		scheduleLauncherInputFocusRef.current = scheduleLauncherInputFocus;
+	}, [scheduleLauncherInputFocus]);
+
+	useLayoutEffect(() => {
+		updateRawTextRef.current = updateRawText;
+	}, [updateRawText]);
+
+	useLayoutEffect(() => {
+		applyInjectedSourceTextRef.current = applyInjectedSourceText;
+	}, [applyInjectedSourceText]);
 
 	const syncScrollableLayoutCaps = useCallback(() => {
 		const shellElement = shellRef.current;
@@ -1258,10 +1341,17 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		scheduleLauncherBlurAutoHideRestore(QA_RESULT_BLUR_AUTO_HIDE_RESTORE_AFTER_SETTLE_MS);
 	}, [qaAutoResizeFrozen, scheduleLauncherBlurAutoHideRestore]);
 
+	useEffect(() => {
+		if (windowKind === "clipboard_history") {
+			setClipboardPanelOpen(true);
+		}
+	}, [windowKind]);
+
 	useAutoResizeWindow(shellRef, {
+		enabled: launcherViewActive,
 		allowShrink: !qaAutoResizeFrozen,
 		onResizeSettled: handleQaResultResizeSettled,
-		resetKey: clipboardPanelOpen ? "clipboard-panel" : "launcher",
+		resetKey: clipboardPanelVisible ? "clipboard-panel" : "launcher",
 	});
 
 	useEffect(
@@ -1274,10 +1364,17 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		let debounceTimer: number | null = null;
 
 		async function loadSuggestions() {
+			const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
 			if (suggestionMode === "file") {
 				setSuggestionLoading(true);
 				try {
 					const nextMatches = await searchFiles(currentFileNeedle, 8);
+					console.debug("[launcher] file suggestions completed", {
+						elapsedMs:
+							(typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt,
+						queryLength: currentFileNeedle.trim().length,
+						resultCount: nextMatches.length,
+					});
 					if (!cancelled) {
 						showSuggestions({ fileMatches: nextMatches });
 					}
@@ -1299,6 +1396,12 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 				setSuggestionLoading(true);
 				try {
 					const nextMatches = await matchActions(suggestionQuery);
+					console.debug("[launcher] action suggestions completed", {
+						elapsedMs:
+							(typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt,
+						queryLength: suggestionQuery.rawText.trim().length,
+						resultCount: nextMatches.length,
+					});
 					if (!cancelled) {
 						showSuggestions({
 							actionMatches: suggestionQuery.rawText.trim().startsWith("/")
@@ -1324,6 +1427,12 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 				setSuggestionLoading(true);
 				try {
 					const nextMatches = await searchApps(textBeforeCaret, 8);
+					console.debug("[launcher] app suggestions completed", {
+						elapsedMs:
+							(typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt,
+						queryLength: textBeforeCaret.trim().length,
+						resultCount: nextMatches.length,
+					});
 					if (!cancelled) {
 						showSuggestions({ appMatches: nextMatches });
 					}
@@ -1388,12 +1497,40 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 				window.clearTimeout(debounceTimer);
 			}
 		};
-	}, [currentFileNeedle, launcherMode, suggestionMode, suggestionQuery, textBeforeCaret]);
+	}, [
+		currentFileNeedle,
+		launcherMode,
+		resetSuggestions,
+		suggestionMode,
+		suggestionQuery,
+		textBeforeCaret,
+	]);
 
 	useEffect(() => {
+		let active = true;
+		const unlistenCallbacks: Array<() => void> = [];
+		const registerUnlisten = (label: string, promise: Promise<(() => void) | null>) => {
+			void promise
+				.then((unlisten) => {
+					if (!unlisten) {
+						return;
+					}
+
+					if (!active) {
+						unlisten();
+						return;
+					}
+
+					unlistenCallbacks.push(unlisten);
+				})
+				.catch((error: unknown) => {
+					console.warn(`failed to subscribe ${label}`, error);
+				});
+		};
+
 		void getWorkspace().then((nextWorkspace) => {
 			setWorkspaceState(nextWorkspace);
-			resetQaConversation();
+			resetQaConversationRef.current();
 		});
 		void getAcpAgents().then((catalog) => {
 			setAgentCatalog(catalog);
@@ -1411,74 +1548,194 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			setActiveSessionId(activeSession?.sessionId ?? null);
 		});
 
-		const workspaceUnlistenPromise = onWorkspaceUpdated((nextWorkspace) => {
-			setWorkspaceState(nextWorkspace);
-			resetQaConversation();
-		});
-		const clipboardHistoryUnlistenPromise = onClipboardHistoryUpdated((snapshot) => {
-			setClipboardHistory(snapshot);
-		});
-		const openClipboardHistoryPanelUnlistenPromise = onOpenClipboardHistoryPanel((payload) => {
-			setClipboardSelectionMode(payload.selectionMode);
-			setClipboardPanelOpen(true);
-			setWorkspacePickerOpen(false);
-			setAgentPickerOpen(false);
-			setSessionPanelOpen(false);
-			setSuggestionsHidden(true);
-		});
-		const ocrErrorUnlistenPromise = onOcrError((message) => {
-			if (
-				shortcutTranslationEpochRef.current !== null &&
-				shortcutTranslationEpochRef.current !== launcherResetEpochRef.current
-			) {
-				return;
-			}
+		registerUnlisten(
+			"workspace updates",
+			onWorkspaceUpdated((nextWorkspace) => {
+				setWorkspaceState(nextWorkspace);
+				resetQaConversationRef.current();
+			}),
+		);
+		registerUnlisten(
+			"clipboard history updates",
+			onClipboardHistoryUpdated((snapshot) => {
+				setClipboardHistory(snapshot);
+			}),
+		);
+		registerUnlisten(
+			"clipboard history insert into launcher",
+			onInsertClipboardHistoryTextIntoLauncher((payload) => {
+				const currentRawText = rawTextRef.current;
+				const currentCaretIndex = boundedCaretIndexRef.current;
+				const nextRawText = replaceTextRange(
+					currentRawText,
+					currentCaretIndex,
+					currentCaretIndex,
+					payload.text,
+				);
+				pendingSelectionRef.current = nextRawText.caretIndex;
+				updateRawTextRef.current(nextRawText.value, nextRawText.caretIndex);
+				setClipboardPanelOpen(false);
+				scheduleLauncherInputFocusRef.current();
+				setError(null);
+			}),
+		);
+		registerUnlisten(
+			"open clipboard history panel",
+			onOpenClipboardHistoryPanel((payload) => {
+				setClipboardSelectionMode(payload.selectionMode);
+				setClipboardPanelOpen(true);
+				setWorkspacePickerOpen(false);
+				setAgentPickerOpen(false);
+				setSessionPanelOpen(false);
+				setSuggestionsHidden(true);
+			}),
+		);
+		registerUnlisten(
+			"reveal launcher main panel",
+			onRevealLauncherMainPanel(() => {
+				setClipboardPanelOpen(false);
+				setClipboardSelectionMode("paste_externally");
+			}),
+		);
+		registerUnlisten(
+			"OCR error",
+			onOcrError((message) => {
+				if (
+					shortcutTranslationEpochRef.current !== null &&
+					shortcutTranslationEpochRef.current !== launcherResetEpochRef.current
+				) {
+					return;
+				}
 
-			shortcutTranslationEpochRef.current = null;
-			setShortcutTranslationPending(false);
-			setOperationStatusText(null);
-			setError(message);
-			scheduleLauncherInputFocus();
-		});
-		const ocrTranslationStartedUnlistenPromise = onOcrTranslationStarted((payload) => {
-			shortcutTranslationEpochRef.current = launcherResetEpochRef.current;
-			setShortcutTranslationPending(true);
-			setOperationStatusText("模型请求中 · 正在翻译文本");
-			applyInjectedSourceText(payload.sourceMode, payload.sourceText);
-			setLatestSubmittedText(payload.sourceText.trim() || "快捷翻译");
-		});
-		const ocrTranslationUnlistenPromise = onOcrTranslationResult((payload) => {
-			if (
-				shortcutTranslationEpochRef.current === null ||
-				shortcutTranslationEpochRef.current !== launcherResetEpochRef.current
-			) {
-				return;
-			}
+				shortcutTranslationEpochRef.current = null;
+				setShortcutTranslationPending(false);
+				setOperationStatusText(null);
+				setError(message);
+				scheduleLauncherInputFocusRef.current();
+			}),
+		);
+		registerUnlisten(
+			"OCR translation started",
+			onOcrTranslationStarted((payload) => {
+				shortcutTranslationEpochRef.current = launcherResetEpochRef.current;
+				setShortcutTranslationPending(true);
+				setOperationStatusText("模型请求中 · 正在翻译文本");
+				setResult(null);
+				applyInjectedSourceTextRef.current(payload.sourceMode, payload.sourceText);
+				setLatestSubmittedText(payload.sourceText.trim() || "快捷翻译");
+			}),
+		);
+		registerUnlisten(
+			"OCR translation stream",
+			onOcrTranslationStream((payload) => {
+				if (
+					shortcutTranslationEpochRef.current === null ||
+					shortcutTranslationEpochRef.current !== launcherResetEpochRef.current
+				) {
+					return;
+				}
 
-			shortcutTranslationEpochRef.current = null;
-			setShortcutTranslationPending(false);
-			setOperationStatusText(null);
-			applyInjectedSourceText(payload.sourceMode, payload.sourceText);
-			setLatestSubmittedText(payload.sourceText.trim() || "快捷翻译");
-			setResult(payload.result);
-		});
-		const executionProgressUnlistenPromise = onExecutionProgress((payload) => {
-			if (
-				activeTrackedRequestEpochRef.current === null ||
-				activeTrackedRequestEpochRef.current !== launcherResetEpochRef.current
-			) {
-				return;
-			}
+				setOperationStatusText("模型响应中 · 正在输出译文");
+				setLatestSubmittedText(payload.sourceText.trim() || "快捷翻译");
+				setResult({
+					status: "success",
+					primaryText: payload.partialText,
+					secondaryText: null,
+					structuredPayload: null,
+					nextActions: ["copy_text"],
+					shouldCloseLauncher: false,
+				});
+			}),
+		);
+		registerUnlisten(
+			"OCR translation result",
+			onOcrTranslationResult((payload) => {
+				if (
+					shortcutTranslationEpochRef.current === null ||
+					shortcutTranslationEpochRef.current !== launcherResetEpochRef.current
+				) {
+					return;
+				}
 
-			setOperationStatusText(payload.statusText);
-		});
+				shortcutTranslationEpochRef.current = null;
+				setShortcutTranslationPending(false);
+				setOperationStatusText(null);
+				setLatestSubmittedText(payload.sourceText.trim() || "快捷翻译");
+				setResult(payload.result);
+			}),
+		);
+		registerUnlisten(
+			"execution progress",
+			onExecutionProgress((payload) => {
+				if (
+					activeTrackedRequestEpochRef.current === null ||
+					activeTrackedRequestEpochRef.current !== launcherResetEpochRef.current
+				) {
+					return;
+				}
+
+				setOperationStatusText(payload.statusText);
+				if (payload.actionId === "translate_text" && typeof payload.partialText === "string") {
+					setResult({
+						status: "success",
+						primaryText: payload.partialText,
+						secondaryText: null,
+						structuredPayload: null,
+						nextActions: ["copy_text"],
+						shouldCloseLauncher: false,
+					});
+					return;
+				}
+
+				if (payload.actionId === "rag_answer" && typeof payload.partialText === "string") {
+					if (payload.partialText.length === 0) {
+						setResult(null);
+						return;
+					}
+
+					setResult({
+						status: "success",
+						primaryText: payload.partialText,
+						secondaryText: null,
+						structuredPayload: {
+							render: "markdown",
+						},
+						nextActions: ["copy_text"],
+						shouldCloseLauncher: false,
+					});
+				}
+			}),
+		);
+		return () => {
+			active = false;
+			unlistenCallbacks.forEach((unlisten) => unlisten());
+		};
+	}, []);
+
+	useEffect(() => {
+		let active = true;
+		let updatesUnlisten: (() => void) | null = null;
+		let removalsUnlisten: (() => void) | null = null;
+
 		void subscribeAcpSessionUpdates((detail) => {
 			setSessionDetails((current) => upsertSessionDetailRecord(current, detail));
 			setSessionSummaries((current) => upsertSessionSummary(current, detail.session));
 			if (detail.session.isActive) {
 				setActiveSessionId(detail.session.sessionId);
 			}
-		});
+		})
+			.then((unlisten) => {
+				if (!active) {
+					unlisten?.();
+					return;
+				}
+
+				updatesUnlisten = unlisten;
+			})
+			.catch((error: unknown) => {
+				console.warn("failed to subscribe ACP session updates", error);
+			});
+
 		void subscribeAcpSessionRemovals((sessionId) => {
 			setSessionDetails((current) => {
 				const next = { ...current };
@@ -1487,43 +1744,65 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			});
 			setSessionSummaries((current) => current.filter((item) => item.sessionId !== sessionId));
 			setActiveSessionId((current) => (current === sessionId ? null : current));
-		});
+		})
+			.then((unlisten) => {
+				if (!active) {
+					unlisten?.();
+					return;
+				}
+
+				removalsUnlisten = unlisten;
+			})
+			.catch((error: unknown) => {
+				console.warn("failed to subscribe ACP session removals", error);
+			});
 
 		return () => {
-			void workspaceUnlistenPromise.then((unlisten) => unlisten?.());
-			void clipboardHistoryUnlistenPromise.then((unlisten) => unlisten?.());
-			void openClipboardHistoryPanelUnlistenPromise.then((unlisten) => unlisten?.());
-			void ocrErrorUnlistenPromise.then((unlisten) => unlisten?.());
-			void ocrTranslationStartedUnlistenPromise.then((unlisten) => unlisten?.());
-			void ocrTranslationUnlistenPromise.then((unlisten) => unlisten?.());
-			void executionProgressUnlistenPromise.then((unlisten) => unlisten?.());
+			active = false;
+			updatesUnlisten?.();
+			removalsUnlisten?.();
 		};
-	}, [applyInjectedSourceText, resetQaConversation, scheduleLauncherInputFocus]);
+	}, []);
 
 	useEffect(() => {
-		let cancelled = false;
+		let active = true;
+		let unlisten: (() => void) | null = null;
 
-		async function refreshRagRuntimeStatus() {
-			try {
-				const nextStatus = await getRagRuntimeStatus();
-				if (!cancelled) {
+		void getRagRuntimeStatus()
+			.then((nextStatus) => {
+				if (active) {
 					setRagRuntimeStatus(nextStatus);
 				}
-			} catch {
-				if (!cancelled) {
+			})
+			.catch(() => {
+				if (active) {
 					setRagRuntimeStatus((current) => current);
 				}
+			});
+		void onRagRuntimeStatus((nextStatus) => {
+			if (active) {
+				setRagRuntimeStatus(nextStatus);
 			}
-		}
+		})
+			.then((dispose) => {
+				if (!dispose) {
+					return;
+				}
 
-		void refreshRagRuntimeStatus();
-		const intervalId = window.setInterval(() => {
-			void refreshRagRuntimeStatus();
-		}, 1500);
+				if (!active) {
+					dispose();
+					return;
+				}
+
+				unlisten = dispose;
+			})
+			.catch((error: unknown) => {
+				console.warn("failed to subscribe RAG runtime status", error);
+			});
 
 		return () => {
-			cancelled = true;
-			window.clearInterval(intervalId);
+			active = false;
+			unlisten?.();
 		};
 	}, []);
 
@@ -1532,14 +1811,19 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			return;
 		}
 
+		if (!launcherViewActive) {
+			return;
+		}
+
+		let active = true;
 		let unlistenFocusChanged: (() => void) | null = null;
 		const shouldSkipReactiveLauncherInputFocus = () =>
 			(desktopRuntimeAvailable && suspendReactiveLauncherInputFocusRef.current) ||
-			clipboardPanelOpen;
+			clipboardPanelVisibleRef.current;
 
 		function handleDocumentVisibilityChange() {
 			if (document.visibilityState === "visible" && !shouldSkipReactiveLauncherInputFocus()) {
-				scheduleLauncherInputFocus();
+				scheduleLauncherInputFocusRef.current();
 			}
 		}
 
@@ -1547,7 +1831,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			if (shouldSkipReactiveLauncherInputFocus()) {
 				return;
 			}
-			scheduleLauncherInputFocus();
+			scheduleLauncherInputFocusRef.current();
 		}
 
 		document.addEventListener("visibilitychange", handleDocumentVisibilityChange);
@@ -1557,26 +1841,30 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			void getCurrentWindow()
 				.onFocusChanged(({ payload: focused }) => {
 					if (focused && !shouldSkipReactiveLauncherInputFocus()) {
-						scheduleLauncherInputFocus();
+						scheduleLauncherInputFocusRef.current();
 					}
 				})
 				.then((unlisten) => {
+					if (!active) {
+						unlisten();
+						return;
+					}
+
 					unlistenFocusChanged = unlisten;
+				})
+				.catch((error: unknown) => {
+					console.warn("failed to subscribe launcher focus changes", error);
 				});
 		}
 
 		return () => {
+			active = false;
 			clearScheduledLauncherInputFocus();
 			document.removeEventListener("visibilitychange", handleDocumentVisibilityChange);
 			window.removeEventListener("focus", handleWindowFocus);
 			unlistenFocusChanged?.();
 		};
-	}, [
-		clearScheduledLauncherInputFocus,
-		clipboardPanelOpen,
-		desktopRuntimeAvailable,
-		scheduleLauncherInputFocus,
-	]);
+	}, [clearScheduledLauncherInputFocus, desktopRuntimeAvailable, launcherViewActive]);
 
 	useDismissOnPointerDownOutside({
 		open: workspacePickerOpen,
@@ -1607,15 +1895,6 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 
 		logElement.scrollTop = 0;
 	}, [activeSessionScrollAnchor]);
-
-	function resetSuggestions(resetSelectedIndex: boolean = false) {
-		setActionMatches([]);
-		setFileMatches([]);
-		setAppMatches([]);
-		if (resetSelectedIndex) {
-			setSelectedIndex(0);
-		}
-	}
 
 	function showSuggestions(nextSuggestions: {
 		actionMatches?: ActionMatch[];
@@ -1648,6 +1927,11 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 	}, []);
 
 	const dismissClipboardHistoryPanel = useCallback(() => {
+		if (windowKind === "clipboard_history") {
+			void dismissClipboardHistoryWindow();
+			return;
+		}
+
 		setClipboardPanelOpen(false);
 		if (clipboardSelectionMode === "insert_into_launcher") {
 			scheduleLauncherInputFocus();
@@ -1655,7 +1939,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		}
 
 		void dismissLauncher();
-	}, [clipboardSelectionMode, dismissLauncher, scheduleLauncherInputFocus]);
+	}, [clipboardSelectionMode, dismissLauncher, scheduleLauncherInputFocus, windowKind]);
 
 	const findClipboardEntry = useCallback(
 		(entryId: string | null): ClipboardHistoryEntry | null => {
@@ -1695,6 +1979,12 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			}
 
 			if (clipboardSelectionMode === "insert_into_launcher") {
+				if (windowKind === "clipboard_history") {
+					await insertClipboardHistoryTextIntoLauncher(entry.text);
+					setError(null);
+					return;
+				}
+
 				const nextRawText = replaceTextRange(
 					rawText,
 					boundedCaretIndex,
@@ -1722,6 +2012,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			boundedCaretIndex,
 			clipboardSelectionMode,
 			findClipboardEntry,
+			windowKind,
 			rawText,
 			scheduleLauncherInputFocus,
 			updateClipboardHistorySnapshot,
@@ -1788,11 +2079,33 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			return;
 		}
 
-		if (!clipboardPanelOpen) {
+		if (!clipboardPanelVisible) {
 			return;
 		}
 
 		const handleWindowKeyDown = (event: globalThis.KeyboardEvent) => {
+			if (event.altKey && !event.metaKey && !event.ctrlKey) {
+				const pinnedIndex = getPinnedClipboardHotkeyIndex(event.code);
+				if (pinnedIndex !== null) {
+					const pinnedEntry = clipboardHistory.pinnedEntries[pinnedIndex];
+					if (pinnedEntry) {
+						event.preventDefault();
+						void handleClipboardEntryPaste(pinnedEntry.id);
+					}
+					return;
+				}
+
+				const recentIndex = getRecentClipboardHotkeyIndex(event.code);
+				if (recentIndex !== null) {
+					const recentEntry = clipboardHistory.recentEntries[recentIndex];
+					if (recentEntry) {
+						event.preventDefault();
+						void handleClipboardEntryPaste(recentEntry.id);
+					}
+					return;
+				}
+			}
+
 			if (
 				(event.key === "Delete" || event.key === "Backspace") &&
 				!event.metaKey &&
@@ -1839,8 +2152,11 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			window.removeEventListener("keydown", handleWindowKeyDown, true);
 		};
 	}, [
-		clipboardPanelOpen,
+		clipboardHistory.pinnedEntries,
+		clipboardHistory.recentEntries,
+		clipboardPanelVisible,
 		dismissClipboardHistoryPanel,
+		handleClipboardEntryPaste,
 		handleSelectedClipboardEntryDelete,
 		handleSelectedClipboardEntryPaste,
 		handleSelectedClipboardEntryTogglePin,
@@ -1848,13 +2164,13 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 	]);
 
 	useDismissOnPointerDownOutside({
-		open: clipboardPanelOpen,
+		open: clipboardPanelVisible,
 		triggerRef: inputAnchorRef,
 		panelRef: clipboardPanelRef,
 		onDismiss: dismissClipboardHistoryPanel,
 	});
 
-	function appendRagConversationTurn(question: string, answer: string) {
+	const appendRagConversationTurn = useCallback((question: string, answer: string) => {
 		const normalizedQuestion = question.trim();
 		const normalizedAnswer = answer.trim();
 		if (!normalizedQuestion || !normalizedAnswer) {
@@ -1868,144 +2184,174 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 				{ role: "assistant" as const, content: normalizedAnswer },
 			].slice(-12),
 		);
-	}
+	}, []);
 
-	function applyQaResult(prompt: string, executionResult: ExecutionResult) {
-		if (executionResult.status !== "success" || !executionResult.primaryText) {
-			return false;
-		}
-		const payload = isRagAnswerStructuredPayload(executionResult.structuredPayload)
-			? executionResult.structuredPayload
-			: null;
+	const applyQaResult = useCallback(
+		(prompt: string, executionResult: ExecutionResult) => {
+			if (executionResult.status !== "success" || !executionResult.primaryText) {
+				return false;
+			}
+			const payload = isRagAnswerStructuredPayload(executionResult.structuredPayload)
+				? executionResult.structuredPayload
+				: null;
 
-		setQaAutoResizeFrozen(true);
-		void armLauncherBlurAutoHideSuppression(QA_RESULT_BLUR_AUTO_HIDE_SUPPRESSION_MS).catch(
-			(error: unknown) => {
-				console.warn("failed to arm launcher blur suppression for QA result", error);
-			},
-		);
-		if (desktopRuntimeAvailable && launcherBlurAutoHideEnabledRef.current) {
-			suspendReactiveLauncherInputFocusRef.current = true;
-			clearScheduledLauncherInputFocus();
-			launcherBlurAutoHideEnabledRef.current = false;
-			void setLauncherBlurAutoHideEnabled(false).catch((error: unknown) => {
-				console.warn("failed to disable launcher blur auto-hide for QA result", error);
-			});
-		}
-		scheduleLauncherBlurAutoHideRestore(QA_RESULT_BLUR_AUTO_HIDE_SUPPRESSION_MS);
-
-		const timestamp = Date.now();
-		const userMessage: AcpSessionMessage = {
-			id: `${timestamp}-user`,
-			role: "user",
-			blocks: [
-				{
-					type: "content",
-					text: prompt,
+			setQaAutoResizeFrozen(true);
+			void armLauncherBlurAutoHideSuppression(QA_RESULT_BLUR_AUTO_HIDE_SUPPRESSION_MS).catch(
+				(error: unknown) => {
+					console.warn("failed to arm launcher blur suppression for QA result", error);
 				},
-			],
-			pending: false,
-		};
-		const assistantMessage: AcpSessionMessage = {
-			id: `${timestamp}-assistant`,
-			role: "assistant",
-			blocks: buildQaAssistantMessageBlocks(executionResult, payload),
-			pending: false,
-		};
-
-		setQaMessages((current) =>
-			current.length > 0
-				? [...current, userMessage, assistantMessage]
-				: [userMessage, assistantMessage],
-		);
-		setQaConversationState(
-			payload?.conversationState ?? {
-				previousResponseId: payload?.responseId ?? null,
-				continuationScope: null,
-				citations: payload?.citations ?? [],
-				actions: payload?.actions ?? [],
-				toolCalls: payload?.tools.calls ?? [],
-			},
-		);
-		setQaRetrieval(payload?.retrieval ?? null);
-		setResult(null);
-		return true;
-	}
-
-	function activatePendingSlashAction(descriptor: ActionDescriptor) {
-		flushSync(() => {
-			setActiveSlashAction(descriptor);
-			pendingSelectionRef.current = 0;
-			updateRawText("", 0);
-			resetSuggestions(true);
-		});
-	}
-
-	async function executeLauncherAction(
-		descriptor: ActionDescriptor,
-		query = fullQuery,
-		options?: {
-			onSuccess?: () => void;
-		},
-	) {
-		const requestEpoch = beginTrackedLauncherRequest();
-		const nextOperationStatus = resolveLauncherOperationStatus(descriptor.id);
-		if (nextOperationStatus) {
-			setOperationStatusText(nextOperationStatus);
-		}
-		setOperationPending(true);
-		try {
-			const executionResult = await executeAction({
-				actionId: descriptor.id,
-				query,
-				conversation: descriptor.id === "rag_answer" ? ragConversation : undefined,
-				conversationState: descriptor.id === "rag_answer" ? qaConversationState : undefined,
-			});
-
-			if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
-				return false;
+			);
+			if (desktopRuntimeAvailable && launcherBlurAutoHideEnabledRef.current) {
+				suspendReactiveLauncherInputFocusRef.current = true;
+				clearScheduledLauncherInputFocus();
+				launcherBlurAutoHideEnabledRef.current = false;
+				void setLauncherBlurAutoHideEnabled(false).catch((error: unknown) => {
+					console.warn("failed to disable launcher blur auto-hide for QA result", error);
+				});
 			}
+			scheduleLauncherBlurAutoHideRestore(QA_RESULT_BLUR_AUTO_HIDE_SUPPRESSION_MS);
 
-			setLatestSubmittedText(query.rawText.trim() || descriptor.title);
-			options?.onSuccess?.();
-			const appliedQaResult =
-				descriptor.id === "rag_answer" &&
-				applyQaResult(extractQaPrompt(query.rawText), executionResult);
-			if (!appliedQaResult) {
-				setResult(executionResult);
-			}
-			setError(null);
-			if (appliedQaResult && executionResult.primaryText) {
-				appendRagConversationTurn(extractQaPrompt(query.rawText), executionResult.primaryText);
-			} else if (descriptor.id !== "rag_answer") {
-				resetQaConversation();
-			}
+			const timestamp = Date.now();
+			const userMessage: AcpSessionMessage = {
+				id: `${timestamp}-user`,
+				role: "user",
+				blocks: [
+					{
+						type: "content",
+						text: prompt,
+					},
+				],
+				pending: false,
+			};
+			const assistantMessage: AcpSessionMessage = {
+				id: `${timestamp}-assistant`,
+				role: "assistant",
+				blocks: buildQaAssistantMessageBlocks(executionResult, payload),
+				pending: false,
+			};
 
-			// Hide the always-on-top launcher first so opener targets can take focus.
-			if (executionResult.shouldCloseLauncher) {
-				await dismissLauncher();
-			}
-			await applyClientEffect(executionResult);
-
+			setQaMessages((current) =>
+				current.length > 0
+					? [...current, userMessage, assistantMessage]
+					: [userMessage, assistantMessage],
+			);
+			setQaConversationState(
+				payload?.conversationState ?? {
+					previousResponseId: payload?.responseId ?? null,
+					continuationScope: null,
+					citations: payload?.citations ?? [],
+					actions: payload?.actions ?? [],
+					toolCalls: payload?.tools.calls ?? [],
+				},
+			);
+			setQaRetrieval(payload?.retrieval ?? null);
+			setResult(null);
 			return true;
-		} catch (executionError) {
-			if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
-				return false;
-			}
+		},
+		[
+			clearScheduledLauncherInputFocus,
+			desktopRuntimeAvailable,
+			scheduleLauncherBlurAutoHideRestore,
+		],
+	);
 
-			setError(getErrorMessage(executionError, "动作执行失败"));
-			return false;
-		} finally {
-			const requestStillCurrent = isTrackedLauncherRequestCurrent(requestEpoch);
-			endTrackedLauncherRequest(requestEpoch);
-			if (requestStillCurrent && nextOperationStatus) {
-				setOperationStatusText(null);
+	const activatePendingSlashAction = useCallback(
+		(descriptor: ActionDescriptor) => {
+			flushSync(() => {
+				setActiveSlashAction(descriptor);
+				pendingSelectionRef.current = 0;
+				updateRawText("", 0);
+				resetSuggestions(true);
+			});
+		},
+		[resetSuggestions, updateRawText],
+	);
+
+	const executeLauncherAction = useCallback(
+		async (
+			descriptor: ActionDescriptor,
+			query = fullQuery,
+			options?: {
+				onSuccess?: () => void;
+			},
+		) => {
+			const requestEpoch = beginTrackedLauncherRequest();
+			const nextOperationStatus = resolveLauncherOperationStatus(descriptor.id);
+			if (nextOperationStatus) {
+				setOperationStatusText(nextOperationStatus);
 			}
-			if (requestStillCurrent) {
-				setOperationPending(false);
+			if (descriptor.id === "translate_text") {
+				setResult(null);
 			}
-		}
-	}
+			setOperationPending(true);
+			try {
+				const executionResult = await executeAction({
+					actionId: descriptor.id,
+					query,
+					conversation: descriptor.id === "rag_answer" ? ragConversation : undefined,
+					conversationState: descriptor.id === "rag_answer" ? qaConversationState : undefined,
+				});
+
+				if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
+					return false;
+				}
+
+				setLatestSubmittedText(query.rawText.trim() || descriptor.title);
+				options?.onSuccess?.();
+				const appliedQaResult =
+					descriptor.id === "rag_answer" &&
+					applyQaResult(extractQaPrompt(query.rawText), executionResult);
+				if (!appliedQaResult) {
+					setResult(executionResult);
+				}
+				setError(null);
+				if (appliedQaResult && executionResult.primaryText) {
+					appendRagConversationTurn(extractQaPrompt(query.rawText), executionResult.primaryText);
+				} else if (descriptor.id !== "rag_answer") {
+					resetQaConversation();
+				}
+
+				// Hide the always-on-top launcher first so opener targets can take focus.
+				if (executionResult.shouldCloseLauncher) {
+					await dismissLauncher();
+				}
+				await applyClientEffect(executionResult);
+
+				return true;
+			} catch (executionError) {
+				if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
+					return false;
+				}
+
+				if (descriptor.id === "rag_answer") {
+					setResult(null);
+				}
+				setError(getErrorMessage(executionError, "动作执行失败"));
+				return false;
+			} finally {
+				const requestStillCurrent = isTrackedLauncherRequestCurrent(requestEpoch);
+				endTrackedLauncherRequest(requestEpoch);
+				if (requestStillCurrent && nextOperationStatus) {
+					setOperationStatusText(null);
+				}
+				if (requestStillCurrent) {
+					setOperationPending(false);
+				}
+			}
+		},
+		[
+			applyQaResult,
+			appendRagConversationTurn,
+			beginTrackedLauncherRequest,
+			dismissLauncher,
+			endTrackedLauncherRequest,
+			fullQuery,
+			isTrackedLauncherRequestCurrent,
+			qaConversationState,
+			ragConversation,
+			resetQaConversation,
+		],
+	);
 
 	async function runPendingSlashAction() {
 		if (!pendingSlashAction || rawText.trim().length === 0) {
@@ -2119,118 +2465,153 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		updateRawText(nextRawText.value, nextRawText.caretIndex);
 	}
 
-	function resolveSelectedAction(index: number = selectedIndex) {
-		const selected = visibleActionMatches[index];
-		if (!selected) {
-			return null;
-		}
+	const resolveSelectedAction = useCallback(
+		(index: number = selectedIndex) => {
+			const selected = visibleActionMatches[index];
+			if (!selected) {
+				return null;
+			}
 
-		const slashInputMatch = parseSlashActionInput(rawText, selected.descriptor.aliases);
-		if (!slashInputMatch) {
+			const slashInputMatch = parseSlashActionInput(rawText, selected.descriptor.aliases);
+			if (!slashInputMatch) {
+				return {
+					selected,
+					slashInputMatch: null,
+					resolvedRawText: rawText,
+				};
+			}
+
+			const completedCommand =
+				deriveActionCompletion(textBeforeCaret, selected) ??
+				slashInputMatch.alias ??
+				selected.descriptor.aliases[0] ??
+				selected.descriptor.title;
+			const commandTokenRange = findSlashCommandPrefixRange(rawText, slashInputMatch.commandToken);
+			const nextRawText = commandTokenRange
+				? replaceTextRange(
+						rawText,
+						commandTokenRange.start,
+						commandTokenRange.end,
+						completedCommand,
+					)
+				: replaceTextRange(rawText, 0, boundedCaretIndex, completedCommand);
+
 			return {
 				selected,
-				slashInputMatch: null,
-				resolvedRawText: rawText,
+				slashInputMatch: parseSlashActionInput(nextRawText.value, selected.descriptor.aliases),
+				resolvedRawText: nextRawText.value,
 			};
-		}
+		},
+		[boundedCaretIndex, rawText, selectedIndex, textBeforeCaret, visibleActionMatches],
+	);
 
-		const completedCommand =
-			deriveActionCompletion(textBeforeCaret, selected) ??
-			slashInputMatch.alias ??
-			selected.descriptor.aliases[0] ??
-			selected.descriptor.title;
-		const commandTokenRange = findSlashCommandPrefixRange(rawText, slashInputMatch.commandToken);
-		const nextRawText = commandTokenRange
-			? replaceTextRange(rawText, commandTokenRange.start, commandTokenRange.end, completedCommand)
-			: replaceTextRange(rawText, 0, boundedCaretIndex, completedCommand);
+	const runSelectedAction = useCallback(
+		async (index: number = selectedIndex) => {
+			const resolvedAction = resolveSelectedAction(index);
+			if (!resolvedAction) {
+				return;
+			}
 
-		return {
-			selected,
-			slashInputMatch: parseSlashActionInput(nextRawText.value, selected.descriptor.aliases),
-			resolvedRawText: nextRawText.value,
-		};
-	}
+			const { selected, slashInputMatch, resolvedRawText } = resolvedAction;
+			const explicitSlashSelection =
+				rawText.trimStart().startsWith("/") &&
+				selected.descriptor.aliases.some((alias) => alias.startsWith("/"));
 
-	async function runSelectedAction(index: number = selectedIndex) {
-		const resolvedAction = resolveSelectedAction(index);
-		if (!resolvedAction) {
-			return;
-		}
+			const payloadState = explicitSlashSelection
+				? deriveSelectedSlashActionPayload(rawText, boundedCaretIndex, selected.descriptor.aliases)
+				: slashInputMatch
+					? deriveSlashActionPayload(rawText, boundedCaretIndex, selected.descriptor.aliases)
+					: null;
+			const actionRawText = payloadState?.value ?? slashInputMatch?.content ?? rawText;
+			if ((explicitSlashSelection || slashInputMatch) && actionRawText.length === 0) {
+				activatePendingSlashAction(selected.descriptor);
+				return;
+			}
 
-		const { selected, slashInputMatch, resolvedRawText } = resolvedAction;
-		const explicitSlashSelection =
-			rawText.trimStart().startsWith("/") &&
-			selected.descriptor.aliases.some((alias) => alias.startsWith("/"));
+			const actionQuery =
+				explicitSlashSelection || slashInputMatch
+					? buildQuery(inputMode, actionRawText)
+					: fullQuery;
+			if (explicitSlashSelection || slashInputMatch) {
+				setActiveSlashAction(selected.descriptor);
+				pendingSelectionRef.current = payloadState?.caretIndex ?? actionRawText.length;
+				updateRawText(actionRawText, payloadState?.caretIndex ?? actionRawText.length);
+				resetSuggestions(true);
+				await executeLauncherAction(selected.descriptor, actionQuery, {
+					onSuccess: () => {
+						setActiveSlashAction(null);
+					},
+				});
+				return;
+			}
 
-		const payloadState = explicitSlashSelection
-			? deriveSelectedSlashActionPayload(rawText, boundedCaretIndex, selected.descriptor.aliases)
-			: slashInputMatch
-				? deriveSlashActionPayload(rawText, boundedCaretIndex, selected.descriptor.aliases)
-				: null;
-		const actionRawText = payloadState?.value ?? slashInputMatch?.content ?? rawText;
-		if ((explicitSlashSelection || slashInputMatch) && actionRawText.length === 0) {
-			activatePendingSlashAction(selected.descriptor);
-			return;
-		}
-
-		const actionQuery =
-			explicitSlashSelection || slashInputMatch ? buildQuery(inputMode, actionRawText) : fullQuery;
-		if (explicitSlashSelection || slashInputMatch) {
-			setActiveSlashAction(selected.descriptor);
-			pendingSelectionRef.current = payloadState?.caretIndex ?? actionRawText.length;
-			updateRawText(actionRawText, payloadState?.caretIndex ?? actionRawText.length);
-			resetSuggestions(true);
 			await executeLauncherAction(selected.descriptor, actionQuery, {
 				onSuccess: () => {
-					setActiveSlashAction(null);
+					if (resolvedRawText !== rawText) {
+						pendingSelectionRef.current = resolvedRawText.length;
+						updateRawText(resolvedRawText, resolvedRawText.length);
+					}
 				},
 			});
-			return;
-		}
+		},
+		[
+			activatePendingSlashAction,
+			boundedCaretIndex,
+			executeLauncherAction,
+			fullQuery,
+			inputMode,
+			rawText,
+			resetSuggestions,
+			resolveSelectedAction,
+			selectedIndex,
+			updateRawText,
+		],
+	);
 
-		await executeLauncherAction(selected.descriptor, actionQuery, {
-			onSuccess: () => {
-				if (resolvedRawText !== rawText) {
-					pendingSelectionRef.current = resolvedRawText.length;
-					updateRawText(resolvedRawText, resolvedRawText.length);
+	const runSelectedApp = useCallback(
+		async (index: number = selectedIndex) => {
+			const selected = visibleAppMatches[index];
+			if (!selected) {
+				return;
+			}
+
+			const requestEpoch = beginTrackedLauncherRequest();
+			setOperationPending(true);
+			try {
+				const executionResult = await launchApp(selected.path);
+				if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
+					return;
 				}
-			},
-		});
-	}
+				setLatestSubmittedText(rawText.trim() || selected.name);
+				setResult(executionResult);
+				setError(null);
 
-	async function runSelectedApp(index: number = selectedIndex) {
-		const selected = visibleAppMatches[index];
-		if (!selected) {
-			return;
-		}
-
-		const requestEpoch = beginTrackedLauncherRequest();
-		setOperationPending(true);
-		try {
-			const executionResult = await launchApp(selected.path);
-			if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
-				return;
+				if (executionResult.shouldCloseLauncher) {
+					await dismissLauncher();
+				}
+			} catch (launchError) {
+				if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
+					return;
+				}
+				setError(getErrorMessage(launchError, "应用启动失败"));
+			} finally {
+				const requestStillCurrent = isTrackedLauncherRequestCurrent(requestEpoch);
+				endTrackedLauncherRequest(requestEpoch);
+				if (requestStillCurrent) {
+					setOperationPending(false);
+				}
 			}
-			setLatestSubmittedText(rawText.trim() || selected.name);
-			setResult(executionResult);
-			setError(null);
-
-			if (executionResult.shouldCloseLauncher) {
-				await dismissLauncher();
-			}
-		} catch (launchError) {
-			if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
-				return;
-			}
-			setError(getErrorMessage(launchError, "应用启动失败"));
-		} finally {
-			const requestStillCurrent = isTrackedLauncherRequestCurrent(requestEpoch);
-			endTrackedLauncherRequest(requestEpoch);
-			if (requestStillCurrent) {
-				setOperationPending(false);
-			}
-		}
-	}
+		},
+		[
+			beginTrackedLauncherRequest,
+			dismissLauncher,
+			endTrackedLauncherRequest,
+			isTrackedLauncherRequestCurrent,
+			rawText,
+			selectedIndex,
+			visibleAppMatches,
+		],
+	);
 
 	async function runSessionPrompt() {
 		if (!activeSessionId) {
@@ -2472,16 +2853,19 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		setCaretIndex(element.selectionEnd ?? 0);
 	}
 
-	async function applyWorkspaceSelection(path: string, fallbackMessage: string) {
-		try {
-			const nextWorkspace = await setWorkspace(path);
-			setWorkspaceState(nextWorkspace);
-			resetQaConversation();
-			setError(null);
-		} catch (workspaceError) {
-			setError(getErrorMessage(workspaceError, fallbackMessage));
-		}
-	}
+	const applyWorkspaceSelection = useCallback(
+		async (path: string, fallbackMessage: string) => {
+			try {
+				const nextWorkspace = await setWorkspace(path);
+				setWorkspaceState(nextWorkspace);
+				resetQaConversation();
+				setError(null);
+			} catch (workspaceError) {
+				setError(getErrorMessage(workspaceError, fallbackMessage));
+			}
+		},
+		[resetQaConversation],
+	);
 
 	async function handleWorkspacePick() {
 		setWorkspacePickerOpen(false);
@@ -2497,10 +2881,13 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		}
 	}
 
-	async function handleWorkspaceCrumbClick(path: string) {
-		setWorkspacePickerOpen(false);
-		await applyWorkspaceSelection(path, "切换工作目录失败");
-	}
+	const handleWorkspaceCrumbClick = useCallback(
+		async (path: string) => {
+			setWorkspacePickerOpen(false);
+			await applyWorkspaceSelection(path, "切换工作目录失败");
+		},
+		[applyWorkspaceSelection],
+	);
 
 	async function handleRecentWorkspaceClick(path: string) {
 		setWorkspacePickerOpen(false);
@@ -2513,22 +2900,25 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 		setError(null);
 	}
 
-	async function createAndActivateSession(requestEpoch: number = launcherResetEpochRef.current) {
-		const detail = await createAcpSession(selectedAgent?.id ?? null);
-		if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
-			throw new Error("launcher reset while creating ACP session");
-		}
-		setSessionDetails((current) => upsertSessionDetailRecord(current, detail));
-		const summaries = await activateAcpSession(detail.session.sessionId);
-		if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
-			throw new Error("launcher reset while activating ACP session");
-		}
-		setSessionSummaries(summaries);
-		setActiveSessionId(detail.session.sessionId);
-		return detail;
-	}
+	const createAndActivateSession = useCallback(
+		async (requestEpoch: number = launcherResetEpochRef.current) => {
+			const detail = await createAcpSession(selectedAgent?.id ?? null);
+			if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
+				throw new Error("launcher reset while creating ACP session");
+			}
+			setSessionDetails((current) => upsertSessionDetailRecord(current, detail));
+			const summaries = await activateAcpSession(detail.session.sessionId);
+			if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
+				throw new Error("launcher reset while activating ACP session");
+			}
+			setSessionSummaries(summaries);
+			setActiveSessionId(detail.session.sessionId);
+			return detail;
+		},
+		[isTrackedLauncherRequestCurrent, selectedAgent?.id],
+	);
 
-	async function handleCreateSession() {
+	const handleCreateSession = useCallback(async () => {
 		const requestEpoch = beginTrackedLauncherRequest();
 		setCreatingSession(true);
 		try {
@@ -2551,47 +2941,64 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 				setCreatingSession(false);
 			}
 		}
-	}
+	}, [
+		beginTrackedLauncherRequest,
+		createAndActivateSession,
+		endTrackedLauncherRequest,
+		isTrackedLauncherRequestCurrent,
+	]);
 
-	async function handleSessionDotClick(sessionId: string) {
-		const nextSessionId = activeSessionId === sessionId ? null : sessionId;
-		try {
-			const summaries = await activateAcpSession(nextSessionId);
-			setSessionSummaries(summaries);
-			setActiveSessionId(nextSessionId);
-			if (nextSessionId && !sessionDetails[nextSessionId]) {
-				const detail = await getAcpSessionDetail(nextSessionId);
-				if (detail) {
-					setSessionDetails((current) => upsertSessionDetailRecord(current, detail));
+	const handleSessionDotClick = useCallback(
+		async (sessionId: string) => {
+			const nextSessionId = activeSessionId === sessionId ? null : sessionId;
+			try {
+				const summaries = await activateAcpSession(nextSessionId);
+				setSessionSummaries(summaries);
+				setActiveSessionId(nextSessionId);
+				if (nextSessionId && !sessionDetails[nextSessionId]) {
+					const detail = await getAcpSessionDetail(nextSessionId);
+					if (detail) {
+						setSessionDetails((current) => upsertSessionDetailRecord(current, detail));
+					}
 				}
+			} catch (sessionError) {
+				setError(getErrorMessage(sessionError, "切换 session 失败"));
 			}
-		} catch (sessionError) {
-			setError(getErrorMessage(sessionError, "切换 session 失败"));
-		}
-	}
+		},
+		[activeSessionId, sessionDetails],
+	);
 
-	async function handleSessionPanelSelect(sessionId: string) {
-		await handleSessionDotClick(sessionId);
-		setSessionPanelOpen(false);
-	}
+	const handleSessionPanelSelect = useCallback(
+		async (sessionId: string) => {
+			await handleSessionDotClick(sessionId);
+			setSessionPanelOpen(false);
+		},
+		[handleSessionDotClick],
+	);
 
-	async function closeSessionById(sessionId: string, collapsePanelWhenLast: boolean) {
-		try {
-			await closeAcpSession(sessionId);
-			if (activeSessionId === sessionId) {
-				setActiveSessionId(null);
+	const closeSessionById = useCallback(
+		async (sessionId: string, collapsePanelWhenLast: boolean) => {
+			try {
+				await closeAcpSession(sessionId);
+				if (activeSessionId === sessionId) {
+					setActiveSessionId(null);
+				}
+				if (collapsePanelWhenLast && sessionSummaries.length <= 1) {
+					setSessionPanelOpen(false);
+				}
+			} catch (sessionError) {
+				setError(getErrorMessage(sessionError, "关闭 session 失败"));
 			}
-			if (collapsePanelWhenLast && sessionSummaries.length <= 1) {
-				setSessionPanelOpen(false);
-			}
-		} catch (sessionError) {
-			setError(getErrorMessage(sessionError, "关闭 session 失败"));
-		}
-	}
+		},
+		[activeSessionId, sessionSummaries.length],
+	);
 
-	async function handleCloseSession(sessionId: string) {
-		await closeSessionById(sessionId, true);
-	}
+	const handleCloseSession = useCallback(
+		async (sessionId: string) => {
+			await closeSessionById(sessionId, true);
+		},
+		[closeSessionById],
+	);
 
 	async function handleCancelActiveSession() {
 		if (!activeSessionId) {
@@ -2624,6 +3031,93 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 			});
 	}
 
+	const handleToggleWorkspacePicker = useCallback(() => {
+		setWorkspacePickerOpen((current) => !current);
+		setClipboardPanelOpen(false);
+	}, []);
+
+	const handleSelectWorkspaceCrumb = useCallback(
+		(path: string) => {
+			void handleWorkspaceCrumbClick(path);
+		},
+		[handleWorkspaceCrumbClick],
+	);
+
+	const handleToggleAgentPicker = useCallback(() => {
+		setAgentPickerOpen((current) => !current);
+		setClipboardPanelOpen(false);
+	}, []);
+
+	const handleCreateSessionClick = useCallback(() => {
+		void handleCreateSession();
+	}, [handleCreateSession]);
+
+	const handleToggleSessionPanel = useCallback(() => {
+		setSessionPanelOpen((current) => !current);
+		setClipboardPanelOpen(false);
+	}, []);
+
+	const handleSelectSessionDot = useCallback(
+		(sessionId: string) => {
+			void handleSessionDotClick(sessionId);
+		},
+		[handleSessionDotClick],
+	);
+
+	const handleOpenSessionPanel = useCallback(() => {
+		setSessionPanelOpen(true);
+		setClipboardPanelOpen(false);
+	}, []);
+
+	const handleRunSelectedActionFromPopup = useCallback(
+		(index: number) => {
+			void runSelectedAction(index);
+		},
+		[runSelectedAction],
+	);
+
+	const handleRunSelectedAppFromPopup = useCallback(
+		(index: number) => {
+			void runSelectedApp(index);
+		},
+		[runSelectedApp],
+	);
+
+	const handleSelectSessionFromPanel = useCallback(
+		(sessionId: string) => {
+			void handleSessionPanelSelect(sessionId);
+		},
+		[handleSessionPanelSelect],
+	);
+
+	const handleCloseSessionFromPanel = useCallback(
+		(sessionId: string) => {
+			void handleCloseSession(sessionId);
+		},
+		[handleCloseSession],
+	);
+
+	const handlePasteClipboardEntryFromPanel = useCallback(
+		(entryId: string) => {
+			void handleClipboardEntryPaste(entryId);
+		},
+		[handleClipboardEntryPaste],
+	);
+
+	const handleToggleClipboardPinFromPanel = useCallback(
+		(entryId: string) => {
+			void handleClipboardEntryTogglePin(entryId);
+		},
+		[handleClipboardEntryTogglePin],
+	);
+
+	const handleDeleteClipboardEntryFromPanel = useCallback(
+		(entryId: string) => {
+			void handleClipboardEntryDelete(entryId);
+		},
+		[handleClipboardEntryDelete],
+	);
+
 	const inputPlaceholder = activeSessionId
 		? "向当前 ACP session 发送消息，或用 @ 插入当前 workspace 文件路径"
 		: pendingSlashAction
@@ -2632,33 +3126,27 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 
 	return (
 		<main
-			className={
-				clipboardPanelOpen ? "launcher-shell launcher-shell-clipboard-only" : "launcher-shell"
-			}
+			className={["launcher-shell", clipboardPanelVisible ? "launcher-shell-clipboard-only" : null]
+				.filter(Boolean)
+				.join(" ")}
 			ref={shellRef}
 		>
-			{!clipboardPanelOpen ? (
+			{!clipboardPanelVisible ? (
 				<section className="launcher-frame" ref={frameRef} style={{ width: `${frameWidth}px` }}>
 					<LauncherHeader
 						workspacePickerOpen={workspacePickerOpen}
 						workspacePickerTriggerRef={workspacePickerTriggerRef}
 						workspaceBreadcrumbs={workspaceBreadcrumbs}
-						onToggleWorkspacePicker={() => {
-							setWorkspacePickerOpen((current) => !current);
-							setClipboardPanelOpen(false);
-						}}
-						onSelectWorkspaceCrumb={(path) => void handleWorkspaceCrumbClick(path)}
+						onToggleWorkspacePicker={handleToggleWorkspacePicker}
+						onSelectWorkspaceCrumb={handleSelectWorkspaceCrumb}
 						onWorkspaceDragStart={handleWorkspaceDragStart}
 						agentConfigured={agentConfigured}
 						agentPickerOpen={agentPickerOpen}
 						agentPickerTriggerRef={agentPickerTriggerRef}
 						selectedAgentName={selectedAgent?.name ?? null}
-						onToggleAgentPicker={() => {
-							setAgentPickerOpen((current) => !current);
-							setClipboardPanelOpen(false);
-						}}
+						onToggleAgentPicker={handleToggleAgentPicker}
 						creatingSession={creatingSession}
-						onCreateSession={() => void handleCreateSession()}
+						onCreateSession={handleCreateSessionClick}
 						sessionPanelOpen={sessionPanelOpen}
 						sessionPanelTriggerRef={sessionPanelTriggerRef}
 						sessionTriggerSummary={sessionTriggerSummary}
@@ -2666,15 +3154,9 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 						visibleSessionDots={visibleSessionDots}
 						activeSessionId={activeSessionId}
 						overflowSessionCount={overflowSessionCount}
-						onToggleSessionPanel={() => {
-							setSessionPanelOpen((current) => !current);
-							setClipboardPanelOpen(false);
-						}}
-						onSelectSessionDot={(sessionId) => void handleSessionDotClick(sessionId)}
-						onOpenSessionPanel={() => {
-							setSessionPanelOpen(true);
-							setClipboardPanelOpen(false);
-						}}
+						onToggleSessionPanel={handleToggleSessionPanel}
+						onSelectSessionDot={handleSelectSessionDot}
+						onOpenSessionPanel={handleOpenSessionPanel}
 					/>
 
 					<RestoreNoticeList restoreNotices={restoreNotices} />
@@ -2733,6 +3215,7 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 						qaMessages={qaMessages}
 						sessionLogRef={sessionLogRef}
 						result={result}
+						resultPending={operationPending || shortcutTranslationPending}
 						jsonPreview={jsonPreview}
 						markdownPreview={markdownPreview}
 						onOpenRagCitation={(citation) => void handleOpenRagCitation(citation)}
@@ -2740,9 +3223,9 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 				</section>
 			) : null}
 
-			{!clipboardPanelOpen ? (
+			{!clipboardPanelVisible ? (
 				<>
-					<CompletionPopup
+					<LauncherSuggestionsSection
 						hasSuggestions={hasSuggestions}
 						suggestionMode={suggestionMode}
 						popupId={launcherCompletionPopupId}
@@ -2755,11 +3238,11 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 						visibleAppMatches={visibleAppMatches}
 						onSelectIndex={setSelectedIndex}
 						onSelectFile={selectFile}
-						onRunSelectedAction={(index) => void runSelectedAction(index)}
-						onRunSelectedApp={(index) => void runSelectedApp(index)}
+						onRunSelectedAction={handleRunSelectedActionFromPopup}
+						onRunSelectedApp={handleRunSelectedAppFromPopup}
 					/>
 
-					<SessionPanel
+					<LauncherSessionSection
 						open={sessionPanelOpen}
 						offset={sessionPanelOffset}
 						panelRef={sessionPanelRef}
@@ -2769,26 +3252,26 @@ export function LauncherPage({ onOpenSettings }: LauncherPageProps) {
 						sessionAttentionCount={sessionAttentionCount}
 						activeSessionId={activeSessionId}
 						workspace={workspace}
-						onSelectSession={(sessionId) => void handleSessionPanelSelect(sessionId)}
-						onCloseSession={(sessionId) => void handleCloseSession(sessionId)}
+						onSelectSession={handleSelectSessionFromPanel}
+						onCloseSession={handleCloseSessionFromPanel}
 					/>
 				</>
 			) : null}
 
-			<ClipboardHistoryPanel
-				open={clipboardPanelOpen}
+			<LauncherClipboardSection
+				open={clipboardPanelVisible}
 				panelRef={clipboardPanelRef}
 				selectionMode={clipboardSelectionMode}
 				pinnedEntries={clipboardHistory.pinnedEntries}
 				recentEntries={clipboardHistory.recentEntries}
 				selectedEntryId={selectedClipboardEntryId}
 				onSelectEntry={setSelectedClipboardEntryId}
-				onPasteEntry={(entryId) => void handleClipboardEntryPaste(entryId)}
-				onTogglePin={(entryId) => void handleClipboardEntryTogglePin(entryId)}
-				onDeleteEntry={(entryId) => void handleClipboardEntryDelete(entryId)}
+				onPasteEntry={handlePasteClipboardEntryFromPanel}
+				onTogglePin={handleToggleClipboardPinFromPanel}
+				onDeleteEntry={handleDeleteClipboardEntryFromPanel}
 			/>
 
-			{!clipboardPanelOpen ? (
+			{!clipboardPanelVisible ? (
 				<>
 					<WorkspacePickerPanel
 						open={workspacePickerOpen}

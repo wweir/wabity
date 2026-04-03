@@ -23,6 +23,12 @@ export interface OpenClipboardHistoryPanelEvent {
 	selectionMode: ClipboardHistorySelectionMode;
 }
 
+export type RevealLauncherMainPanelEvent = Record<string, never>;
+
+export interface InsertClipboardHistoryTextIntoLauncherEvent {
+	text: string;
+}
+
 export interface GeneralSettings {
 	autoStart: boolean;
 	showInDock: boolean;
@@ -255,12 +261,15 @@ export type AcpMcpServerConfig =
 	| AcpMcpServerHttpConfig
 	| AcpMcpServerSseConfig;
 
+export type AcpAgentLaunchMode = "direct" | "login_shell" | "interactive_shell";
+
 export interface AcpAgentConfig {
 	id: string;
 	name: string;
 	program: string;
 	args: string[];
 	shellCommand: string | null;
+	launchMode: AcpAgentLaunchMode;
 }
 
 export interface AcpAgentCatalog {

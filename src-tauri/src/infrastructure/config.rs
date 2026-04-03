@@ -6,8 +6,9 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::domain::acp::{
-    AcpAgentConfig, AcpMcpServerConfig, AcpMcpServerHttpConfig, AcpMcpServerSseConfig,
-    AcpMcpServerStdioConfig, AcpNameValuePair, BuiltinMcpConfig, BuiltinMcpModuleKey,
+    AcpAgentConfig, AcpAgentLaunchMode, AcpMcpServerConfig, AcpMcpServerHttpConfig,
+    AcpMcpServerSseConfig, AcpMcpServerStdioConfig, AcpNameValuePair, BuiltinMcpConfig,
+    BuiltinMcpModuleKey,
 };
 use crate::domain::notification::NotificationSettings;
 use crate::domain::settings::{
@@ -184,8 +185,10 @@ pub struct SavedAcpSession {
     pub agent_program: String,
     #[serde(default)]
     pub agent_args: Vec<String>,
-    #[serde(default)]
+    #[serde(default, alias = "agent_shell_command")]
     pub agent_shell_command: Option<String>,
+    #[serde(default, alias = "agent_launch_mode")]
+    pub agent_launch_mode: AcpAgentLaunchMode,
     #[serde(default)]
     pub mcp_servers: Vec<AcpMcpServerConfig>,
     #[serde(default)]
@@ -208,12 +211,18 @@ impl AcpConfig {
                 || !self.legacy_args.is_empty()
             {
                 let name = derive_agent_name(legacy_shell_command.as_deref(), &legacy_program);
+                let launch_mode = normalize_agent_launch_mode(
+                    AcpAgentLaunchMode::LoginShell,
+                    &legacy_program,
+                    &legacy_shell_command,
+                );
                 self.agents.push(AcpAgentConfig {
                     id: make_agent_id(&name, 0, &HashSet::new()),
                     name,
                     program: legacy_program,
                     args: self.legacy_args.clone(),
                     shell_command: legacy_shell_command,
+                    launch_mode,
                     mcp_servers: Vec::new(),
                 });
             }
@@ -221,8 +230,6 @@ impl AcpConfig {
 
         let mut used_ids = HashSet::new();
         for (index, agent) in self.agents.iter_mut().enumerate() {
-            agent.name =
-                normalize_agent_name(&agent.name, &agent.program, agent.shell_command.as_deref());
             agent.program = agent.program.trim().to_string();
             agent.args = agent
                 .args
@@ -236,6 +243,21 @@ impl AcpConfig {
                 .map(|value| value.trim())
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned);
+            agent.launch_mode = normalize_agent_launch_mode(
+                agent.launch_mode,
+                &agent.program,
+                &agent.shell_command,
+            );
+            if agent.launch_mode == AcpAgentLaunchMode::Direct {
+                if let Some((program, args)) =
+                    parse_direct_agent_command(agent.shell_command.as_deref())
+                {
+                    agent.program = program;
+                    agent.args = args;
+                }
+            }
+            agent.name =
+                normalize_agent_name(&agent.name, &agent.program, agent.shell_command.as_deref());
             agent.mcp_servers.clear();
             agent.id = make_agent_id(&agent.id, index, &used_ids);
             used_ids.insert(agent.id.clone());
@@ -255,6 +277,32 @@ impl AcpConfig {
         }
 
         for snapshot in &mut self.saved_sessions {
+            snapshot.agent_program = snapshot.agent_program.trim().to_string();
+            snapshot.agent_args = snapshot
+                .agent_args
+                .iter()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .collect();
+            snapshot.agent_shell_command = snapshot
+                .agent_shell_command
+                .as_ref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+            snapshot.agent_launch_mode = normalize_agent_launch_mode(
+                snapshot.agent_launch_mode,
+                &snapshot.agent_program,
+                &snapshot.agent_shell_command,
+            );
+            if snapshot.agent_launch_mode == AcpAgentLaunchMode::Direct {
+                if let Some((program, args)) =
+                    parse_direct_agent_command(snapshot.agent_shell_command.as_deref())
+                {
+                    snapshot.agent_program = program;
+                    snapshot.agent_args = args;
+                }
+            }
             if snapshot.agent_name.trim().is_empty() {
                 snapshot.agent_name = derive_agent_name(
                     snapshot.agent_shell_command.as_deref(),
@@ -419,6 +467,28 @@ fn normalize_agent_name(name: &str, program: &str, shell_command: Option<&str>) 
     derive_agent_name(shell_command, program)
 }
 
+fn normalize_agent_launch_mode(
+    launch_mode: AcpAgentLaunchMode,
+    program: &str,
+    shell_command: &Option<String>,
+) -> AcpAgentLaunchMode {
+    if shell_command.is_none() && !program.trim().is_empty() {
+        return AcpAgentLaunchMode::Direct;
+    }
+
+    launch_mode
+}
+
+fn parse_direct_agent_command(shell_command: Option<&str>) -> Option<(String, Vec<String>)> {
+    let parsed = shlex::split(shell_command?.trim())?;
+    let program = parsed.first()?.trim();
+    if program.is_empty() {
+        return None;
+    }
+
+    Some((program.to_string(), parsed[1..].to_vec()))
+}
+
 #[derive(Debug, Clone, Default)]
 struct LlmProviderIdTargets {
     llm_id: Option<String>,
@@ -489,11 +559,15 @@ impl LlmSettings {
                     .to_string();
                 expanded_provider.api_key = expanded_provider.api_key.trim().to_string();
                 expanded_provider.model = expanded_provider.model_name().to_string();
-                if !expanded_provider.has_responses_model() {
+                let can_handle_ai_task = expanded_provider.resolved_profile().can_handle_ai_task();
+                let can_handle_embedding =
+                    expanded_provider.resolved_profile().can_handle_embedding();
+                let uses_responses_api = expanded_provider.resolved_profile().uses_responses_api();
+                if !uses_responses_api {
                     expanded_provider.supports_multimodal = false;
                     expanded_provider.supports_stateful = false;
                 }
-                if !expanded_provider.has_llm_model() {
+                if !can_handle_ai_task {
                     expanded_provider.supports_multimodal = false;
                 }
                 expanded_provider.id = make_llm_provider_id(
@@ -509,10 +583,10 @@ impl LlmSettings {
                 );
                 used_ids.insert(expanded_provider.id.clone());
 
-                if expanded_provider.has_llm_model() {
+                if can_handle_ai_task {
                     targets.llm_id = Some(expanded_provider.id.clone());
                 }
-                if expanded_provider.has_embedding_model() {
+                if can_handle_embedding {
                     targets.embedding_id = Some(expanded_provider.id.clone());
                 }
 
@@ -550,9 +624,9 @@ fn normalize_llm_provider_reference(
                 .or_else(|| Some(provider_id.to_string()))
         })
         .filter(|provider_id| {
-            providers
-                .iter()
-                .any(|provider| &provider.id == provider_id && provider.has_llm_model())
+            providers.iter().any(|provider| {
+                &provider.id == provider_id && provider.resolved_profile().can_handle_ai_task()
+            })
         })
 }
 
@@ -567,10 +641,9 @@ impl OcrSettings {
         if resolved_provider_id
             .as_ref()
             .map(|provider_id| {
-                llm_settings
-                    .providers
-                    .iter()
-                    .any(|provider| &provider.id == provider_id && provider.has_responses_model())
+                llm_settings.providers.iter().any(|provider| {
+                    &provider.id == provider_id && provider.resolved_profile().can_handle_ocr()
+                })
             })
             .unwrap_or(false)
         {
@@ -581,7 +654,7 @@ impl OcrSettings {
         self.llm_provider_id = llm_settings
             .providers
             .iter()
-            .find(|provider| provider.has_responses_model())
+            .find(|provider| provider.resolved_profile().can_handle_ocr())
             .map(|provider| provider.id.clone());
     }
 }
@@ -627,10 +700,10 @@ impl RagSettings {
         if resolved_provider_id
             .as_ref()
             .map(|provider_id| {
-                llm_settings
-                    .providers
-                    .iter()
-                    .any(|provider| &provider.id == provider_id && provider.has_embedding_model())
+                llm_settings.providers.iter().any(|provider| {
+                    &provider.id == provider_id
+                        && provider.resolved_profile().can_handle_embedding()
+                })
             })
             .unwrap_or(false)
         {
@@ -641,7 +714,7 @@ impl RagSettings {
         self.embedding_provider_id = llm_settings
             .providers
             .iter()
-            .find(|provider| provider.has_embedding_model())
+            .find(|provider| provider.resolved_profile().can_handle_embedding())
             .map(|provider| provider.id.clone());
     }
 }
@@ -746,8 +819,6 @@ fn expand_llm_provider(provider: LlmProviderConfig) -> Vec<LlmProviderConfig> {
 
     if llm_model.is_empty() && embedding_model.is_empty() {
         let mut fallback_provider = provider;
-        fallback_provider.model_type = LlmModelType::Llm;
-        fallback_provider.protocol = LlmProviderProtocol::Responses;
         fallback_provider.model.clear();
         fallback_provider.supports_multimodal = false;
         fallback_provider.supports_stateful = false;
@@ -1202,6 +1273,7 @@ mod tests {
             program: "codex-acp".to_string(),
             args: Vec::new(),
             shell_command: Some("codex-acp".to_string()),
+            launch_mode: AcpAgentLaunchMode::LoginShell,
             mcp_servers: Vec::new(),
         });
         config.acp.mcp_servers = vec![
@@ -1349,8 +1421,41 @@ saved_sessions = []
         assert_eq!(parsed.acp.agents[0].name, "Codex");
         assert_eq!(parsed.acp.agents[0].program, "codex-acp");
         assert_eq!(
+            parsed.acp.agents[0].launch_mode,
+            AcpAgentLaunchMode::LoginShell
+        );
+        assert_eq!(
             parsed.acp.default_agent_id.as_deref(),
             Some(parsed.acp.agents[0].id.as_str())
+        );
+    }
+
+    #[test]
+    fn parse_config_content_derives_direct_agent_program_from_shell_command() {
+        let content = r#"
+[acp]
+saved_sessions = []
+
+[[acp.agents]]
+id = "agent-1"
+name = "Direct Agent"
+shell_command = "uvx --from example-agent agent --stdio"
+launch_mode = "direct"
+"#;
+
+        let parsed = parse_config_content(content).expect("direct agent should parse");
+
+        assert_eq!(parsed.acp.agents.len(), 1);
+        assert_eq!(parsed.acp.agents[0].launch_mode, AcpAgentLaunchMode::Direct);
+        assert_eq!(parsed.acp.agents[0].program, "uvx");
+        assert_eq!(
+            parsed.acp.agents[0].args,
+            vec![
+                "--from".to_string(),
+                "example-agent".to_string(),
+                "agent".to_string(),
+                "--stdio".to_string()
+            ]
         );
     }
 
@@ -1475,13 +1580,13 @@ embeddingProviderId = "combo"
             .llm
             .providers
             .iter()
-            .find(|provider| provider.has_responses_model())
+            .find(|provider| provider.resolved_profile().can_handle_ai_task())
             .expect("llm provider should exist");
         let embedding_provider = parsed
             .llm
             .providers
             .iter()
-            .find(|provider| provider.has_embedding_model())
+            .find(|provider| provider.resolved_profile().can_handle_embedding())
             .expect("embedding provider should exist");
         assert_eq!(llm_provider.id, "combo");
         assert_eq!(embedding_provider.id, "combo-embedding");
@@ -1582,5 +1687,45 @@ sourceDirectories = ["/tmp/docs"]
                 .chain(["**/*.png".to_string()])
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn normalize_llm_settings_keeps_empty_chat_provider_shape() {
+        let mut settings = LlmSettings {
+            providers: vec![crate::domain::settings::LlmProviderConfig {
+                id: "chat".to_string(),
+                name: "Chat".to_string(),
+                base_url: "https://api.example.com/v1".to_string(),
+                api_key: String::new(),
+                model_type: crate::domain::settings::LlmModelType::Llm,
+                protocol: crate::domain::settings::LlmProviderProtocol::ChatCompletions,
+                model: "   ".to_string(),
+                model_identity_hint: None,
+                builtin_preset_id: None,
+                builtin_preset_model_id: None,
+                managed_base_url: false,
+                supports_multimodal: true,
+                supports_stateful: true,
+                ..crate::domain::settings::LlmProviderConfig::default()
+            }],
+            translation_provider_id: Some("chat".to_string()),
+            question_answer_provider_id: Some("chat".to_string()),
+            ..LlmSettings::default()
+        };
+
+        settings.normalize();
+
+        assert_eq!(settings.providers.len(), 1);
+        assert_eq!(
+            settings.providers[0].protocol,
+            crate::domain::settings::LlmProviderProtocol::ChatCompletions
+        );
+        assert_eq!(
+            settings.providers[0].model_type,
+            crate::domain::settings::LlmModelType::Llm
+        );
+        assert_eq!(settings.providers[0].model, "");
+        assert_eq!(settings.translation_provider_id, None);
+        assert_eq!(settings.question_answer_provider_id, None);
     }
 }

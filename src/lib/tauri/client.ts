@@ -1,5 +1,6 @@
 import { invoke, isTauri, Channel } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
 import type {
 	ActionMatch,
@@ -15,7 +16,9 @@ import type {
 	AcpMcpServerCatalog,
 	AcpMcpServerConfig,
 	ClipboardHistorySnapshot,
+	InsertClipboardHistoryTextIntoLauncherEvent,
 	OpenClipboardHistoryPanelEvent,
+	RevealLauncherMainPanelEvent,
 	AcpRestoreNotice,
 	AcpSessionDetail,
 	AcpSessionSummary,
@@ -80,9 +83,16 @@ export interface OcrTranslationStartedEvent {
 	sourceText: string;
 }
 
+export interface OcrTranslationStreamEvent {
+	sourceMode: "ocr" | "selection";
+	sourceText: string;
+	partialText: string;
+}
+
 export interface ExecutionProgressEvent {
 	actionId: string;
 	statusText: string;
+	partialText?: string | null;
 }
 
 const browserAppSettings: AppSettings = {
@@ -752,6 +762,24 @@ async function listenIfDesktop<T>(
 	});
 }
 
+async function subscribeChannelIfDesktop<T>(
+	command: string,
+	unsubscribeCommand: string,
+	callback: (payload: T) => void,
+): Promise<UnlistenFn | null> {
+	if (!canUseTauriInvoke()) {
+		return null;
+	}
+
+	const channel = new Channel<T>();
+	channel.onmessage = callback;
+	await invokeDesktop(command, { onEvent: channel });
+	return () => {
+		channel.onmessage = () => {};
+		void invokeIfDesktop(unsubscribeCommand, { channelId: channel.id });
+	};
+}
+
 function buildBrowserSessionDetail(sessionId: string): AcpSessionDetail {
 	return {
 		session: {
@@ -796,7 +824,13 @@ export async function openDocumentReference(path: string): Promise<void> {
 }
 
 export async function hideLauncherWindow(): Promise<void> {
-	return invokeIfDesktop("hide_launcher_window");
+	return invokeIfDesktop("hide_launcher_window", {
+		windowLabel: await resolveCurrentWindowLabel(),
+	});
+}
+
+export async function dismissClipboardHistoryPanel(): Promise<void> {
+	return invokeIfDesktop("dismiss_clipboard_history_panel");
 }
 
 export async function beginTransientWindowInteraction(): Promise<void> {
@@ -817,7 +851,22 @@ export async function setLauncherBlurAutoHideEnabled(enabled: boolean): Promise<
 	return invokeIfDesktop("set_launcher_blur_auto_hide_enabled", { enabled });
 }
 
-let lastLauncherWindowSize: { width: number; height: number } | null = null;
+const lastLauncherWindowSizeByLabel = new Map<string, { width: number; height: number }>();
+let currentWindowLabelPromise: Promise<string | null> | null = null;
+
+async function resolveCurrentWindowLabel(): Promise<string | null> {
+	if (!isDesktopRuntimeAvailable()) {
+		return null;
+	}
+
+	if (!currentWindowLabelPromise) {
+		currentWindowLabelPromise = Promise.resolve()
+			.then(() => getCurrentWindow().label)
+			.catch(() => null);
+	}
+
+	return currentWindowLabelPromise;
+}
 
 export async function resizeLauncherWindow(size: { width: number; height: number }): Promise<void> {
 	if (!canUseTauriInvoke()) {
@@ -826,6 +875,8 @@ export async function resizeLauncherWindow(size: { width: number; height: number
 
 	const nextWidth = Math.max(1, Math.ceil(size.width));
 	const nextHeight = Math.max(1, Math.ceil(size.height));
+	const windowLabel = (await resolveCurrentWindowLabel()) ?? "main";
+	const lastLauncherWindowSize = lastLauncherWindowSizeByLabel.get(windowLabel) ?? null;
 
 	if (
 		lastLauncherWindowSize?.width === nextWidth &&
@@ -834,9 +885,13 @@ export async function resizeLauncherWindow(size: { width: number; height: number
 		return;
 	}
 
-	lastLauncherWindowSize = { width: nextWidth, height: nextHeight };
+	await invokeDesktop<void>("resize_launcher_window", {
+		width: nextWidth,
+		height: nextHeight,
+		windowLabel,
+	});
 
-	await invokeDesktop<void>("resize_launcher_window", { width: nextWidth, height: nextHeight });
+	lastLauncherWindowSizeByLabel.set(windowLabel, { width: nextWidth, height: nextHeight });
 }
 
 export async function onOcrError(callback: (message: string) => void): Promise<UnlistenFn | null> {
@@ -855,10 +910,22 @@ export async function onOcrTranslationStarted(
 	return listenIfDesktop("ocr-translation-started", callback);
 }
 
+export async function onOcrTranslationStream(
+	callback: (payload: OcrTranslationStreamEvent) => void,
+): Promise<UnlistenFn | null> {
+	return listenIfDesktop("ocr-translation-stream", callback);
+}
+
 export async function onExecutionProgress(
 	callback: (payload: ExecutionProgressEvent) => void,
 ): Promise<UnlistenFn | null> {
 	return listenIfDesktop("execution-progress", callback);
+}
+
+export async function onRagRuntimeStatus(
+	callback: (payload: RagRuntimeStatus) => void,
+): Promise<UnlistenFn | null> {
+	return listenIfDesktop("rag-runtime-status", callback);
 }
 
 // Shortcut configuration
@@ -880,6 +947,22 @@ export async function onOpenClipboardHistoryPanel(
 	callback: (payload: OpenClipboardHistoryPanelEvent) => void,
 ): Promise<UnlistenFn | null> {
 	return listenIfDesktop("open-clipboard-history-panel", callback);
+}
+
+export async function onRevealLauncherMainPanel(
+	callback: (payload: RevealLauncherMainPanelEvent) => void,
+): Promise<UnlistenFn | null> {
+	return listenIfDesktop("reveal-launcher-main-panel", callback);
+}
+
+export async function onInsertClipboardHistoryTextIntoLauncher(
+	callback: (payload: InsertClipboardHistoryTextIntoLauncherEvent) => void,
+): Promise<UnlistenFn | null> {
+	return listenIfDesktop("insert-clipboard-history-text-into-launcher", callback);
+}
+
+export async function insertClipboardHistoryTextIntoLauncher(text: string): Promise<void> {
+	return invokeIfDesktop("insert_clipboard_history_text_into_launcher", { text });
 }
 
 export async function getAppSettings(): Promise<AppSettings> {
@@ -1074,24 +1157,20 @@ export async function closeAcpSession(sessionId: string): Promise<void> {
 
 export async function subscribeAcpSessionUpdates(
 	callback: (detail: AcpSessionDetail) => void,
-): Promise<void> {
-	if (!canUseTauriInvoke()) {
-		return;
-	}
-
-	const channel = new Channel<AcpSessionDetail>();
-	channel.onmessage = callback;
-	await invoke("subscribe_acp_session_updates", { onEvent: channel });
+): Promise<UnlistenFn | null> {
+	return subscribeChannelIfDesktop(
+		"subscribe_acp_session_updates",
+		"unsubscribe_acp_session_updates",
+		callback,
+	);
 }
 
 export async function subscribeAcpSessionRemovals(
 	callback: (sessionId: string) => void,
-): Promise<void> {
-	if (!canUseTauriInvoke()) {
-		return;
-	}
-
-	const channel = new Channel<string>();
-	channel.onmessage = callback;
-	await invoke("subscribe_acp_session_removals", { onEvent: channel });
+): Promise<UnlistenFn | null> {
+	return subscribeChannelIfDesktop(
+		"subscribe_acp_session_removals",
+		"unsubscribe_acp_session_removals",
+		callback,
+	);
 }

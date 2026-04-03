@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import type { AcpAgentLaunchMode } from "../../lib/tauri/types";
 import type {
 	AcpMcpServerDraft,
 	McpTransport,
@@ -263,6 +264,7 @@ export const acpAgentOptions = [
 		id: "opencode",
 		label: "OpenCode",
 		command: "opencode acp",
+		launchMode: "login_shell" as const,
 		summary:
 			"OpenCode 是开源 AI coding agent，支持终端、桌面端和 IDE；这里预填的是它的 ACP 启动命令。",
 		installCommand: "curl -fsSL https://opencode.ai/install | bash",
@@ -278,6 +280,7 @@ export const acpAgentOptions = [
 		id: "claude-agent",
 		label: "Claude Agent",
 		command: "claude-agent-acp",
+		launchMode: "login_shell" as const,
 		summary:
 			"Claude Agent ACP 是 Zed 维护的 ACP 适配器，用来把 Claude Agent SDK 暴露给 ACP 客户端。",
 		installCommand: "npm install -g @zed-industries/claude-agent-acp",
@@ -302,6 +305,7 @@ export const acpAgentOptions = [
 		id: "codex",
 		label: "Codex",
 		command: "codex-acp",
+		launchMode: "login_shell" as const,
 		summary:
 			"Codex ACP 是 Zed 维护的 ACP 适配器，负责把 Codex CLI 暴露成可被 ACP 客户端调用的 Agent。",
 		installCommand: "npm install -g @zed-industries/codex-acp",
@@ -354,6 +358,30 @@ const mcpTransportOptionsInternal = [
 	},
 ] as const;
 
+export const acpAgentLaunchModeOptions: ReadonlyArray<{
+	value: AcpAgentLaunchMode;
+	label: string;
+	description: string;
+}> = [
+	{
+		value: "direct",
+		label: "直接执行",
+		description: "直接把命令拆成 program + args 执行，不读取 shell 配置。",
+	},
+	{
+		value: "login_shell",
+		label: "Login Shell",
+		description:
+			"通过用户默认 shell 的 login 模式启动，读取 login profile，不保证读取 .zshrc / .bashrc。",
+	},
+	{
+		value: "interactive_shell",
+		label: "Interactive Shell",
+		description:
+			"通过用户默认 shell 的 login + interactive 模式启动，更可能读取 .zshrc / .bashrc，但任何输出都可能污染 ACP stdio。",
+	},
+] as const;
+
 export const mcpTransportOptions = mcpTransportOptionsInternal;
 
 export function getMcpTransportMeta(transport: McpTransport) {
@@ -364,7 +392,14 @@ export function getMcpTransportMeta(transport: McpTransport) {
 }
 
 export function formatAcpAgentOptionLabel(option: AcpAgentOption, alreadyAdded: boolean) {
-	return `${option.label} · ${option.command}${alreadyAdded ? " · 已配置" : ""}`;
+	return `${option.label} · ${option.command} · ${getAcpAgentLaunchModeMeta(option.launchMode).label}${alreadyAdded ? " · 已配置" : ""}`;
+}
+
+export function getAcpAgentLaunchModeMeta(launchMode: AcpAgentLaunchMode) {
+	return (
+		acpAgentLaunchModeOptions.find((option) => option.value === launchMode) ??
+		acpAgentLaunchModeOptions[1]
+	);
 }
 
 export function renderPresetInstallGuide(
@@ -408,7 +443,8 @@ export function renderPresetInstallGuide(
 				<span className="settings-acp-preset-kicker">安装指引</span>
 				<span className="settings-agent-meta">自定义 Agent</span>
 				<span className="settings-help-text settings-help-text-tight">
-					自己准备一个能直接在 shell 里启动的 ACP Agent 命令，然后填进下面的启动命令输入框。
+					自己准备一个能在命令行里启动的 ACP Agent
+					命令，然后填进下面的启动命令输入框，并选择合适的启动模式。
 				</span>
 			</>
 		);

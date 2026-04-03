@@ -21,9 +21,9 @@ use tokio::{
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::domain::acp::{
-    AcpActionEvent, AcpAgentConfig, AcpMcpServerConfig, AcpMessageBlock, AcpMessageRole,
-    AcpRestoreNotice, AcpSessionDetail, AcpSessionErrorLevel, AcpSessionMessage, AcpSessionStatus,
-    AcpSessionSummary,
+    AcpActionEvent, AcpAgentConfig, AcpAgentLaunchMode, AcpMcpServerConfig, AcpMessageBlock,
+    AcpMessageRole, AcpRestoreNotice, AcpSessionDetail, AcpSessionErrorLevel, AcpSessionMessage,
+    AcpSessionStatus, AcpSessionSummary,
 };
 use crate::infrastructure::config::SavedAcpSession;
 use crate::services::notification::NotificationService;
@@ -183,8 +183,22 @@ impl AcpService {
         self.session_update_channels.write().await.push(channel);
     }
 
+    pub async fn unsubscribe_session_updates(&self, channel_id: u32) {
+        self.session_update_channels
+            .write()
+            .await
+            .retain(|channel| channel.id() != channel_id);
+    }
+
     pub async fn subscribe_session_removals(&self, channel: Channel<String>) {
         self.session_removal_channels.write().await.push(channel);
+    }
+
+    pub async fn unsubscribe_session_removals(&self, channel_id: u32) {
+        self.session_removal_channels
+            .write()
+            .await
+            .retain(|channel| channel.id() != channel_id);
     }
 
     async fn broadcast_session_update(&self, detail: AcpSessionDetail) {
@@ -194,17 +208,13 @@ impl AcpService {
             message_count = detail.messages.len(),
             "broadcasting session update"
         );
-        let channels = self.session_update_channels.read().await;
-        for channel in channels.iter() {
-            let _ = channel.send(detail.clone());
-        }
+        let mut channels = self.session_update_channels.write().await;
+        channels.retain(|channel| channel.send(detail.clone()).is_ok());
     }
 
     async fn broadcast_session_removal(&self, session_id: String) {
-        let channels = self.session_removal_channels.read().await;
-        for channel in channels.iter() {
-            let _ = channel.send(session_id.clone());
-        }
+        let mut channels = self.session_removal_channels.write().await;
+        channels.retain(|channel| channel.send(session_id.clone()).is_ok());
     }
 
     pub fn start_event_loop(&self) {
@@ -368,6 +378,7 @@ impl AcpService {
             program: snapshot.agent_program.clone(),
             args: snapshot.agent_args.clone(),
             shell_command: snapshot.agent_shell_command.clone(),
+            launch_mode: snapshot.agent_launch_mode,
             mcp_servers: Vec::new(),
         };
         let mcp_servers = snapshot.mcp_servers.clone();
@@ -807,33 +818,9 @@ impl SessionRecord {
         }
     }
 
-    fn thought_block_index(message: &AcpSessionMessage) -> Option<usize> {
-        message
-            .blocks
-            .iter()
-            .position(|block| matches!(block, AcpMessageBlock::Thought { .. }))
-    }
-
-    fn actions_block_index(message: &AcpSessionMessage) -> Option<usize> {
-        message
-            .blocks
-            .iter()
-            .position(|block| matches!(block, AcpMessageBlock::Actions { .. }))
-    }
-
-    fn content_block_index(message: &AcpSessionMessage) -> Option<usize> {
-        message
-            .blocks
-            .iter()
-            .position(|block| matches!(block, AcpMessageBlock::Content { .. }))
-    }
-
     fn append_assistant_chunk(&mut self, content: String) {
         if let Some(message) = self.pending_assistant_message_mut() {
-            if let Some(index) = Self::content_block_index(message) {
-                let AcpMessageBlock::Content { text } = &mut message.blocks[index] else {
-                    unreachable!("content block index must point to a content block");
-                };
+            if let Some(AcpMessageBlock::Content { text }) = message.blocks.last_mut() {
                 text.push_str(&content);
                 return;
             }
@@ -853,25 +840,17 @@ impl SessionRecord {
 
     fn append_thought_chunk(&mut self, content: String) {
         if let Some(message) = self.pending_assistant_message_mut() {
-            if let Some(index) = Self::thought_block_index(message) {
-                let AcpMessageBlock::Thought { content: thought } = &mut message.blocks[index]
-                else {
-                    unreachable!("thought block index must point to a thought block");
-                };
+            if let Some(AcpMessageBlock::Thought { content: thought }) = message.blocks.last_mut() {
                 thought.push_str(&content);
                 return;
             }
-            message
-                .blocks
-                .insert(0, AcpMessageBlock::Thought { content });
+            message.blocks.push(AcpMessageBlock::Thought { content });
             return;
         }
 
         self.start_assistant_message();
         if let Some(message) = self.pending_assistant_message_mut() {
-            message
-                .blocks
-                .insert(0, AcpMessageBlock::Thought { content });
+            message.blocks.push(AcpMessageBlock::Thought { content });
         }
     }
 
@@ -883,10 +862,7 @@ impl SessionRecord {
         detail: Option<String>,
     ) {
         if let Some(message) = self.pending_assistant_message_mut() {
-            if let Some(index) = Self::actions_block_index(message) {
-                let AcpMessageBlock::Actions { items } = &mut message.blocks[index] else {
-                    unreachable!("actions block index must point to an actions block");
-                };
+            if let Some(AcpMessageBlock::Actions { items }) = message.blocks.last_mut() {
                 items.push(AcpActionEvent {
                     kind,
                     title,
@@ -895,47 +871,27 @@ impl SessionRecord {
                 });
                 return;
             }
-            let insert_at = if let Some(index) = Self::thought_block_index(message) {
-                index + 1
-            } else if let Some(index) = Self::content_block_index(message) {
-                index
-            } else {
-                message.blocks.len()
-            };
-            message.blocks.insert(
-                insert_at,
-                AcpMessageBlock::Actions {
-                    items: vec![AcpActionEvent {
-                        kind,
-                        title,
-                        correlation_id,
-                        detail,
-                    }],
-                },
-            );
+            message.blocks.push(AcpMessageBlock::Actions {
+                items: vec![AcpActionEvent {
+                    kind,
+                    title,
+                    correlation_id,
+                    detail,
+                }],
+            });
             return;
         }
 
         self.start_assistant_message();
         if let Some(message) = self.pending_assistant_message_mut() {
-            let insert_at = if let Some(index) = Self::thought_block_index(message) {
-                index + 1
-            } else if let Some(index) = Self::content_block_index(message) {
-                index
-            } else {
-                message.blocks.len()
-            };
-            message.blocks.insert(
-                insert_at,
-                AcpMessageBlock::Actions {
-                    items: vec![AcpActionEvent {
-                        kind,
-                        title,
-                        correlation_id,
-                        detail,
-                    }],
-                },
-            );
+            message.blocks.push(AcpMessageBlock::Actions {
+                items: vec![AcpActionEvent {
+                    kind,
+                    title,
+                    correlation_id,
+                    detail,
+                }],
+            });
         }
     }
 
@@ -1026,7 +982,9 @@ async fn run_session_runtime(
     runtime_event_tx: mpsc::UnboundedSender<RuntimeEvent>,
 ) -> Result<()> {
     let mut command = build_agent_command(&agent, &workspace_root)?;
-    let spawn_target = if agent
+    let spawn_target = if agent.launch_mode == AcpAgentLaunchMode::Direct {
+        agent.program.clone()
+    } else if agent
         .shell_command
         .as_ref()
         .map(|value| !value.trim().is_empty())
@@ -1385,21 +1343,25 @@ fn build_agent_command(
     agent: &AcpAgentConfig,
     workspace_root: &std::path::Path,
 ) -> Result<Command> {
-    let mut command = if let Some(shell_command) = agent
-        .shell_command
-        .as_ref()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-    {
-        shell_command_command(shell_command)
-    } else {
-        if agent.program.trim().is_empty() {
-            anyhow::bail!("ACP agent program is empty");
-        }
+    let mut command = match agent.launch_mode {
+        AcpAgentLaunchMode::Direct => {
+            if agent.program.trim().is_empty() {
+                anyhow::bail!("ACP agent program is empty");
+            }
 
-        let mut command = Command::new(&agent.program);
-        command.args(&agent.args);
-        command
+            let mut command = Command::new(&agent.program);
+            command.args(&agent.args);
+            command
+        }
+        AcpAgentLaunchMode::LoginShell | AcpAgentLaunchMode::InteractiveShell => {
+            let shell_command = agent
+                .shell_command
+                .as_ref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .context("ACP agent shell command is empty")?;
+            shell_command_command(shell_command, agent.launch_mode)
+        }
     };
 
     command
@@ -1478,17 +1440,29 @@ fn build_mcp_servers(servers: &[AcpMcpServerConfig]) -> Vec<acp::McpServer> {
 }
 
 #[cfg(target_os = "windows")]
-fn shell_command_command(shell_command: &str) -> Command {
+fn shell_command_command(shell_command: &str, launch_mode: AcpAgentLaunchMode) -> Command {
     let mut command = Command::new("cmd");
-    command.args(["/C", shell_command]);
+    let shell_flag = match launch_mode {
+        AcpAgentLaunchMode::LoginShell => "/C",
+        AcpAgentLaunchMode::InteractiveShell => "/C",
+        AcpAgentLaunchMode::Direct => "/C",
+    };
+    command.args([shell_flag, shell_command]);
     command
 }
 
 #[cfg(not(target_os = "windows"))]
-fn shell_command_command(shell_command: &str) -> Command {
+fn shell_command_command(shell_command: &str, launch_mode: AcpAgentLaunchMode) -> Command {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
     let mut command = Command::new(shell);
-    command.args(["-lc", shell_command]);
+    match launch_mode {
+        AcpAgentLaunchMode::Direct | AcpAgentLaunchMode::LoginShell => {
+            command.args(["-l", "-c", shell_command]);
+        }
+        AcpAgentLaunchMode::InteractiveShell => {
+            command.args(["-i", "-l", "-c", shell_command]);
+        }
+    }
     command
 }
 
@@ -1551,6 +1525,7 @@ mod tests {
                 program: "agent".to_string(),
                 args: Vec::new(),
                 shell_command: None,
+                launch_mode: AcpAgentLaunchMode::Direct,
                 mcp_servers: Vec::new(),
             },
             mcp_servers: Vec::new(),
@@ -1722,9 +1697,10 @@ mod tests {
         assert!(matches!(
             &record.messages[0].blocks[..],
             [
+                AcpMessageBlock::Content { text: first },
                 AcpMessageBlock::Actions { items },
-                AcpMessageBlock::Content { text }
-            ] if items.len() == 1 && text == "part-1part-2"
+                AcpMessageBlock::Content { text: second }
+            ] if items.len() == 1 && first == "part-1" && second == "part-2"
         ));
     }
 
@@ -1745,9 +1721,10 @@ mod tests {
         assert!(matches!(
             &record.messages[0].blocks[..],
             [
-                AcpMessageBlock::Thought { content },
-                AcpMessageBlock::Actions { items }
-            ] if content == "think-1think-2" && items.len() == 1
+                AcpMessageBlock::Thought { content: first },
+                AcpMessageBlock::Actions { items },
+                AcpMessageBlock::Thought { content: second }
+            ] if first == "think-1" && items.len() == 1 && second == "think-2"
         ));
     }
 }

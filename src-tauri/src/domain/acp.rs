@@ -1,13 +1,29 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AcpAgentLaunchMode {
+    Direct,
+    #[default]
+    LoginShell,
+    InteractiveShell,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpAgentConfig {
+    #[serde(default)]
     pub id: String,
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
     pub program: String,
+    #[serde(default)]
     pub args: Vec<String>,
+    #[serde(default, alias = "shell_command")]
     pub shell_command: Option<String>,
+    #[serde(default, alias = "launch_mode")]
+    pub launch_mode: AcpAgentLaunchMode,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<AcpMcpServerConfig>,
 }

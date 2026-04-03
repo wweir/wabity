@@ -3,7 +3,6 @@ import type { AcpActionEvent, AcpMessageBlock, AcpSessionMessage } from "../../.
 import { MarkdownRenderer } from "./MarkdownRenderer";
 
 type ActionKind =
-	| "tool"
 	| "tool-call"
 	| "tool-update"
 	| "plan"
@@ -12,46 +11,45 @@ type ActionKind =
 	| "commands"
 	| "info"
 	| "error";
-type RawActionKind = Exclude<ActionKind, "tool">;
 
-interface ActionPill {
-	id: string;
-	kind: ActionKind;
-	title: string;
-	detail: string | null;
-	count: number;
-	correlationId: string | null;
-	inputDetail: string | null;
-	outputDetail: string | null;
+function isStepMarkerAction(action: AcpActionEvent) {
+	return action.kind === "info" && /^第\s*\d+\s*步$/u.test(action.title.trim());
 }
 
-function isStepMarkerPill(pill: ActionPill) {
-	return pill.kind === "info" && /^第\s*\d+\s*步$/u.test(pill.title.trim());
-}
-
-function getActionIcon(kind: ActionKind): string {
+function getActionKindLabel(kind: ActionKind): string {
 	switch (kind) {
-		case "tool":
 		case "tool-call":
-			return "⚙";
+			return "调用";
 		case "tool-update":
-			return "↻";
+			return "结果";
 		case "plan":
-			return "📋";
+			return "计划";
 		case "mode":
-			return "🔀";
+			return "模式";
 		case "config":
-			return "⚙";
+			return "配置";
 		case "commands":
-			return "📝";
+			return "命令";
 		case "info":
-			return "ℹ";
+			return "信息";
+		case "error":
+			return "错误";
 		default:
-			return "•";
+			return "事件";
 	}
 }
 
-function normalizeActionKind(kind: string): RawActionKind {
+function getActionPrefix(kind: ActionKind) {
+	switch (kind) {
+		case "tool-call":
+		case "tool-update":
+			return null;
+		default:
+			return getActionKindLabel(kind);
+	}
+}
+
+function normalizeActionKind(kind: string): ActionKind {
 	switch (kind) {
 		case "tool-call":
 		case "tool-update":
@@ -65,32 +63,6 @@ function normalizeActionKind(kind: string): RawActionKind {
 		default:
 			return "info";
 	}
-}
-
-function appendDetailSection(current: string | null, next: string | null) {
-	if (!next) {
-		return current;
-	}
-
-	if (!current || current === next) {
-		return next;
-	}
-
-	return `${current}\n\n${next}`;
-}
-
-function formatToolDetail(inputDetail: string | null, outputDetail: string | null) {
-	const sections: string[] = [];
-
-	if (inputDetail) {
-		sections.push(`输入\n${inputDetail}`);
-	}
-
-	if (outputDetail) {
-		sections.push(`输出\n${outputDetail}`);
-	}
-
-	return sections.length > 0 ? sections.join("\n\n") : null;
 }
 
 function decodeEscapedSequences(value: string) {
@@ -142,6 +114,22 @@ function formatActionDetailForDisplay(detail: string | null) {
 	return decodeEscapedSequences(detail);
 }
 
+function getActionTitle(action: AcpActionEvent, kind: ActionKind) {
+	if (action.title.trim().length > 0) {
+		return action.title;
+	}
+
+	return getActionKindLabel(kind);
+}
+
+function createActionId(action: AcpActionEvent, index: number) {
+	const kind = normalizeActionKind(action.kind);
+	const correlationId = action.correlationId ?? null;
+	return correlationId
+		? `${kind}:${correlationId}:${index}`
+		: `${kind}:${action.title.trim() || "untitled"}:${index}`;
+}
+
 function summarizeThoughtPreview(content: string) {
 	const singleLine = content.replace(/\s+/g, " ").trim();
 	if (singleLine.length <= 36) {
@@ -182,155 +170,82 @@ function splitThoughtParagraphs(content: string) {
 		.filter((paragraph) => paragraph.length > 0);
 }
 
-function createToolPill(action: AcpActionEvent, index: number): ActionPill {
-	const correlationId = action.correlationId ?? null;
-	const inputDetail = action.kind === "tool-call" ? action.detail : null;
-	const outputDetail = action.kind === "tool-update" ? action.detail : null;
-
-	return {
-		id: correlationId ? `tool:${correlationId}` : `tool:${action.title}:${index}`,
-		kind: "tool",
-		title: action.title || "工具调用",
-		detail: formatToolDetail(inputDetail, outputDetail),
-		count: 1,
-		correlationId,
-		inputDetail,
-		outputDetail,
-	};
-}
-
-function mergeToolAction(pill: ActionPill, action: AcpActionEvent) {
-	if (action.title && (!pill.title || pill.title === "工具调用" || pill.title === "工具结果")) {
-		pill.title = action.title;
-	}
-
-	if (action.kind === "tool-call") {
-		pill.inputDetail = appendDetailSection(pill.inputDetail, action.detail);
-	} else {
-		pill.outputDetail = appendDetailSection(pill.outputDetail, action.detail);
-	}
-
-	pill.detail = formatToolDetail(pill.inputDetail, pill.outputDetail);
-}
-
-function mergeActions(actions: AcpActionEvent[]): ActionPill[] {
-	const pills: ActionPill[] = [];
-	const toolPillIndexes = new Map<string, number>();
-
-	for (const [index, action] of actions.entries()) {
-		const correlationId = action.correlationId ?? null;
-		const isToolAction = action.kind === "tool-call" || action.kind === "tool-update";
-
-		if (isToolAction) {
-			if (correlationId) {
-				const pillIndex = toolPillIndexes.get(correlationId);
-				if (pillIndex !== undefined) {
-					mergeToolAction(pills[pillIndex], action);
-					continue;
-				}
-
-				pills.push(createToolPill(action, index));
-				toolPillIndexes.set(correlationId, pills.length - 1);
-				continue;
-			}
-
-			const previousPill = pills[pills.length - 1];
-			if (
-				action.kind === "tool-call" &&
-				previousPill &&
-				previousPill.kind === "tool" &&
-				previousPill.correlationId === null &&
-				previousPill.title === action.title &&
-				previousPill.outputDetail === null
-			) {
-				previousPill.count += 1;
-				mergeToolAction(previousPill, action);
-				continue;
-			}
-
-			pills.push(createToolPill(action, index));
-			continue;
-		}
-
-		pills.push({
-			id: correlationId
-				? `${action.kind}:${correlationId}`
-				: `${action.kind}:${action.title}:${index}`,
-			kind: normalizeActionKind(action.kind),
-			title: action.title,
-			detail: action.detail,
-			count: 1,
-			correlationId,
-			inputDetail: null,
-			outputDetail: null,
-		});
-	}
-
-	return pills;
-}
-
-function ActionBar({ actions }: { actions: AcpActionEvent[] }) {
-	const [expandedPill, setExpandedPill] = useState<string | null>(null);
-	const pills = useMemo(() => mergeActions(actions), [actions]);
-	const visibleDetailPill = expandedPill
-		? (pills.find((pill) => pill.id === expandedPill && !isStepMarkerPill(pill)) ?? null)
-		: null;
-	const detailPanelId = visibleDetailPill ? `action-detail-${visibleDetailPill.id}` : null;
+function ActionTrail({ actions }: { actions: AcpActionEvent[] }) {
+	const [expandedActionId, setExpandedActionId] = useState<string | null>(null);
+	const actionIds = useMemo(
+		() => actions.map((action, index) => createActionId(action, index)),
+		[actions],
+	);
 
 	useEffect(() => {
-		if (expandedPill && !pills.some((pill) => pill.id === expandedPill)) {
-			setExpandedPill(null);
+		if (expandedActionId && !actionIds.includes(expandedActionId)) {
+			setExpandedActionId(null);
 		}
-	}, [expandedPill, pills]);
+	}, [actionIds, expandedActionId]);
 
-	if (pills.length === 0) {
+	if (actions.length === 0) {
 		return null;
 	}
 
 	return (
-		<div className="action-bar" role="group" aria-label="操作轨迹">
-			<div className="action-bar-content">
-				{pills.map((pill) =>
-					isStepMarkerPill(pill) ? (
-						<span key={pill.id} className="action-step-marker">
-							{pill.title}
-						</span>
-					) : pill.detail ? (
-						<button
-							key={pill.id}
-							type="button"
-							className={`action-pill ${pill.kind} interactive${expandedPill === pill.id ? " detail-open" : ""}`}
-							aria-expanded={expandedPill === pill.id}
-							aria-controls={expandedPill === pill.id && detailPanelId ? detailPanelId : undefined}
-							aria-label={`${expandedPill === pill.id ? "收起" : "查看"} ${pill.title} 详情`}
-							onClick={() => setExpandedPill(expandedPill === pill.id ? null : pill.id)}
-						>
-							<span className="action-pill-icon">{getActionIcon(pill.kind)}</span>
-							<span className="action-pill-title">{pill.title}</span>
-							{pill.count > 1 ? <span className="action-pill-count">×{pill.count}</span> : null}
-						</button>
-					) : (
-						<span key={pill.id} className={`action-pill ${pill.kind}`}>
-							<span className="action-pill-icon">{getActionIcon(pill.kind)}</span>
-							<span className="action-pill-title">{pill.title}</span>
-							{pill.count > 1 ? <span className="action-pill-count">×{pill.count}</span> : null}
-						</span>
-					),
-				)}
-			</div>
-			{visibleDetailPill?.detail ? (
-				<div
-					className="action-bar-detail"
-					id={detailPanelId ?? undefined}
-					role="region"
-					aria-label={`${visibleDetailPill.title} 详情`}
-				>
-					<span className="action-bar-detail-label">
-						{visibleDetailPill.kind === "tool" ? "调用细节" : "详情"}
-					</span>
-					<pre>{formatActionDetailForDisplay(visibleDetailPill.detail)}</pre>
-				</div>
-			) : null}
+		<div className="action-trail" role="group" aria-label="执行轨迹">
+			<ol className="action-trail-list">
+				{actions.map((action, index) => {
+					const id = actionIds[index];
+					const kind = normalizeActionKind(action.kind);
+					const prefix = getActionPrefix(kind);
+					const title = getActionTitle(action, kind);
+					const detail = formatActionDetailForDisplay(action.detail);
+					const detailPanelId = detail ? `action-detail-${id}` : undefined;
+					const expanded = expandedActionId === id;
+
+					if (isStepMarkerAction(action)) {
+						return (
+							<li key={id} className="action-trail-step">
+								{title}
+							</li>
+						);
+					}
+
+					return (
+						<li key={id} className={`action-entry ${kind}`}>
+							{detail ? (
+								<button
+									type="button"
+									className={`action-entry-toggle${expanded ? " detail-open" : ""}`}
+									aria-expanded={expanded}
+									aria-controls={expanded ? detailPanelId : undefined}
+									aria-label={`${expanded ? "收起" : "展开"} ${title} 详情`}
+									onClick={() => setExpandedActionId(expanded ? null : id)}
+								>
+									<span className="action-entry-copy">
+										{prefix ? <span className="action-entry-kind">{prefix}</span> : null}
+										<span className="action-entry-title">{title}</span>
+									</span>
+									<span className="action-entry-disclosure">{expanded ? "▾" : "▸"}</span>
+								</button>
+							) : (
+								<div className="action-entry-body">
+									<span className="action-entry-copy">
+										{prefix ? <span className="action-entry-kind">{prefix}</span> : null}
+										<span className="action-entry-title">{title}</span>
+									</span>
+								</div>
+							)}
+							{detail && expanded ? (
+								<div
+									className="action-entry-detail"
+									id={detailPanelId}
+									role="region"
+									aria-label={`${title} 详情`}
+								>
+									<pre>{detail}</pre>
+								</div>
+							) : null}
+						</li>
+					);
+				})}
+			</ol>
 		</div>
 	);
 }
@@ -433,39 +348,6 @@ function MarkdownContent({ content, pending }: { content: string; pending: boole
 	);
 }
 
-function normalizeAssistantBlocks(blocks: AcpMessageBlock[]) {
-	const thoughtParts: string[] = [];
-	const actionItems: AcpActionEvent[] = [];
-	const contentParts: string[] = [];
-
-	for (const block of blocks) {
-		switch (block.type) {
-			case "thought":
-				thoughtParts.push(block.content);
-				break;
-			case "actions":
-				actionItems.push(...block.items);
-				break;
-			case "content":
-				contentParts.push(block.text);
-				break;
-		}
-	}
-
-	const normalizedBlocks: AcpMessageBlock[] = [];
-	if (contentParts.length > 0) {
-		normalizedBlocks.push({ type: "content", text: contentParts.join("") });
-	}
-	if (actionItems.length > 0) {
-		normalizedBlocks.push({ type: "actions", items: actionItems });
-	}
-	if (thoughtParts.length > 0) {
-		normalizedBlocks.push({ type: "thought", content: thoughtParts.join("") });
-	}
-
-	return normalizedBlocks;
-}
-
 function getUserMessageContent(message: AcpSessionMessage) {
 	return message.blocks
 		.filter(
@@ -485,7 +367,7 @@ export function SessionTimeline({ messages }: { messages: AcpSessionMessage[] })
 		const thoughtIds = orderedMessages.flatMap((message) =>
 			message.role !== "assistant"
 				? []
-				: normalizeAssistantBlocks(message.blocks).flatMap((block, index) =>
+				: message.blocks.flatMap((block, index) =>
 						block.type === "thought" ? [`${message.id}-thought-${index}`] : [],
 					),
 		);
@@ -542,17 +424,20 @@ export function SessionTimeline({ messages }: { messages: AcpSessionMessage[] })
 					return null;
 				}
 
-				const mergedBlocks = normalizeAssistantBlocks(message.blocks);
 				return (
-					<article key={message.id} className="session-message assistant">
+					<article
+						key={message.id}
+						className="session-message assistant"
+						data-session-pending={message.pending ? "true" : undefined}
+					>
 						<header className="session-message-role">
 							<span className="session-message-role-badge">Agent</span>
 						</header>
 						<div className="session-message-stack">
-							{mergedBlocks.length === 0 ? (
+							{message.blocks.length === 0 ? (
 								<p className="session-message-content pending">…</p>
 							) : (
-								mergedBlocks.map((block, index) => {
+								message.blocks.map((block, index) => {
 									const blockId = `${message.id}-${block.type}-${index}`;
 									switch (block.type) {
 										case "thought":
@@ -566,7 +451,7 @@ export function SessionTimeline({ messages }: { messages: AcpSessionMessage[] })
 												/>
 											);
 										case "actions":
-											return <ActionBar key={blockId} actions={block.items} />;
+											return <ActionTrail key={blockId} actions={block.items} />;
 										case "content":
 											return (
 												<MarkdownContent

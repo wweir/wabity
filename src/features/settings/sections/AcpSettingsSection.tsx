@@ -3,8 +3,10 @@ import {
 	DISCARD_DRAFT_BUTTON_LABEL,
 	SettingsDraftActionCard,
 	acpAgentOptions,
+	acpAgentLaunchModeOptions,
 	buildFieldIssueId,
 	formatAcpAgentOptionLabel,
+	getAcpAgentLaunchModeMeta,
 	getSettingsPanelId,
 	getSettingsTabId,
 	joinDescribedByIds,
@@ -57,7 +59,7 @@ export interface AcpSettingsSectionProps {
 	onSaveAgent: () => Promise<void>;
 	onRemoveAgent: (agentId: string) => void;
 	onApplyPresetSelection: () => void;
-	onAgentFieldChange: (agentId: string, key: "name" | "command", value: string) => void;
+	onAgentFieldChange: (agentId: string, key: AcpFieldKey, value: string) => void;
 }
 
 function AcpPresetSelectionCard({
@@ -93,7 +95,11 @@ function AcpPresetSelectionCard({
 								{acpAgentOptions.map((option) => {
 									const alreadyAdded =
 										showConfiguredState &&
-										acpAgents.some((agent) => agent.command.trim() === option.command);
+										acpAgents.some(
+											(agent) =>
+												agent.command.trim() === option.command &&
+												agent.launchMode === option.launchMode,
+										);
 									return (
 										<option key={option.id} value={option.id}>
 											{formatAcpAgentOptionLabel(option, alreadyAdded)}
@@ -228,7 +234,9 @@ export function AcpSettingsSection({
 												<strong className="settings-agent-name">
 													{agent.name.trim() || "未命名 Agent"}
 												</strong>
-												<span className="settings-agent-meta">{issueCount} 个问题</span>
+												<span className="settings-agent-meta">
+													{issueCount} 个问题 · {getAcpAgentLaunchModeMeta(agent.launchMode).label}
+												</span>
 											</div>
 											<span className="settings-agent-command-preview">
 												{agent.command.trim() || "还没有启动命令"}
@@ -372,7 +380,7 @@ export function AcpSettingsSection({
 											onChange={(event) =>
 												onAgentFieldChange(selectedAgent.id, "command", event.target.value)
 											}
-											placeholder="输入单行 shell 命令，例如 codex-acp"
+											placeholder="输入单行命令，例如 codex-acp"
 											ref={bindAcpFieldRef("agent", selectedAgent.id, "command")}
 											type="text"
 											value={selectedAgent.command}
@@ -381,12 +389,39 @@ export function AcpSettingsSection({
 											className="settings-help-text settings-help-text-tight"
 											id={`settings-acp-${selectedAgent.id}-command-help`}
 										>
-											这里只填写 Agent 启动命令；所有 Agent 仍共用同一份全局 MCP 配置。
+											这里只填写 Agent 启动命令；direct 会解析为 program + args，shell
+											模式会把整行交给用户默认 shell。所有 Agent 仍共用同一份全局 MCP 配置。
 										</span>
 										{renderFieldError(
 											buildFieldIssueId("acp", "command", selectedAgent.id),
 											selectedAgentFieldIssues.command,
 										)}
+									</label>
+									<label className="settings-label settings-label-stacked">
+										<span>启动模式</span>
+										<select
+											aria-describedby={joinDescribedByIds(
+												`settings-acp-${selectedAgent.id}-launch-mode-help`,
+											)}
+											className="settings-select"
+											onChange={(event) =>
+												onAgentFieldChange(selectedAgent.id, "launchMode", event.target.value)
+											}
+											ref={bindAcpFieldRef("agent", selectedAgent.id, "launchMode")}
+											value={selectedAgent.launchMode}
+										>
+											{acpAgentLaunchModeOptions.map((option) => (
+												<option key={option.value} value={option.value}>
+													{option.label}
+												</option>
+											))}
+										</select>
+										<span
+											className="settings-help-text settings-help-text-tight"
+											id={`settings-acp-${selectedAgent.id}-launch-mode-help`}
+										>
+											{getAcpAgentLaunchModeMeta(selectedAgent.launchMode).description}
+										</span>
 									</label>
 								</div>
 							</div>

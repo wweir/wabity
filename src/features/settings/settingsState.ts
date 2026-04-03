@@ -252,11 +252,15 @@ function nextDraftId(prefix: string) {
 	return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-export function parseTextLines(value: string) {
+function splitNonEmptyLines(value: string) {
 	return value
 		.split("\n")
 		.map((line) => line.trim())
 		.filter((line) => line.length > 0);
+}
+
+export function parseTextLines(value: string) {
+	return splitNonEmptyLines(value);
 }
 
 function detectPathSeparator(paths: Array<string | null | undefined>) {
@@ -298,25 +302,36 @@ export function formatTextLines(lines: string[]) {
 }
 
 export function parseKeyValueLines(value: string, label: string) {
-	return value
-		.split("\n")
-		.map((line) => line.trim())
-		.filter((line) => line.length > 0)
-		.map((line, index) => {
-			const separatorIndex = line.indexOf("=");
-			if (separatorIndex <= 0) {
-				throw new Error(`${label} 第 ${index + 1} 行必须是 KEY=VALUE`);
-			}
+	return splitNonEmptyLines(value).map((line, index) => {
+		const separatorIndex = line.indexOf("=");
+		if (separatorIndex <= 0) {
+			throw new Error(`${label} 第 ${index + 1} 行必须是 KEY=VALUE`);
+		}
 
-			return {
-				name: line.slice(0, separatorIndex).trim(),
-				value: line.slice(separatorIndex + 1).trim(),
-			};
-		});
+		return {
+			name: line.slice(0, separatorIndex).trim(),
+			value: line.slice(separatorIndex + 1).trim(),
+		};
+	});
 }
 
 function formatKeyValueLines(items: { name: string; value: string }[]) {
 	return items.map((item) => `${item.name}=${item.value}`).join("\n");
+}
+
+function createRemoteMcpServerDraft(
+	server: Extract<AcpMcpServerConfig, { transport: "http" | "sse" }>,
+): AcpMcpServerDraft {
+	return {
+		id: nextDraftId("mcp"),
+		transport: server.transport,
+		name: server.name,
+		command: "",
+		url: server.url,
+		argsText: "",
+		envText: "",
+		headersText: formatKeyValueLines(server.headers),
+	};
 }
 
 export function createMcpServerDraft(transport: McpTransport = "stdio"): AcpMcpServerDraft {
@@ -346,27 +361,8 @@ export function createMcpServerDraftFromConfig(server: AcpMcpServerConfig): AcpM
 				headersText: "",
 			};
 		case "http":
-			return {
-				id: nextDraftId("mcp"),
-				transport: "http",
-				name: server.name,
-				command: "",
-				url: server.url,
-				argsText: "",
-				envText: "",
-				headersText: formatKeyValueLines(server.headers),
-			};
 		case "sse":
-			return {
-				id: nextDraftId("mcp"),
-				transport: "sse",
-				name: server.name,
-				command: "",
-				url: server.url,
-				argsText: "",
-				envText: "",
-				headersText: formatKeyValueLines(server.headers),
-			};
+			return createRemoteMcpServerDraft(server);
 	}
 }
 
@@ -430,28 +426,24 @@ export function serializeMcpServerDraft(server: AcpMcpServerDraft): AcpMcpServer
 		};
 	}
 
-	if (server.transport === "http") {
-		return {
-			transport: "http",
-			name: server.name.trim(),
-			url: requireValidMcpRemoteUrl(server.url, "http"),
-			headers: parseKeyValueLines(server.headersText, "MCP headers"),
-		};
-	}
-
 	return {
-		transport: "sse",
+		transport: server.transport,
 		name: server.name.trim(),
-		url: requireValidMcpRemoteUrl(server.url, "sse"),
+		url: requireValidMcpRemoteUrl(server.url, server.transport),
 		headers: parseKeyValueLines(server.headersText, "MCP headers"),
 	};
 }
 
-export function createAgentDraft(name = "", command = ""): AcpAgentDraft {
+export function createAgentDraft(
+	name = "",
+	command = "",
+	launchMode: AcpAgentDraft["launchMode"] = "login_shell",
+): AcpAgentDraft {
 	return {
 		id: nextDraftId("agent"),
 		name,
 		command,
+		launchMode,
 	};
 }
 
@@ -569,56 +561,115 @@ export function providerIsEmbeddingModel(provider: Pick<LlmProviderConfig, "mode
 	return provider.modelType === "embedding";
 }
 
-function providerHasLlmModel(
-	provider: Pick<LlmProviderConfig, "modelType" | "model" | "protocol">,
-) {
-	return providerIsLlmModel(provider) && provider.model.trim().length > 0;
+interface ResolvedLlmProviderProfile {
+	configured: boolean;
+	kind: LlmProviderKind;
+	canHandleAiTask: boolean;
+	canHandleOcr: boolean;
+	canHandleRagEmbedding: boolean;
+	supportsMultimodal: boolean;
+	supportsStateful: boolean;
 }
 
-function providerUsesResponsesProtocol(
-	provider: Pick<LlmProviderConfig, "modelType" | "protocol">,
-) {
-	return providerIsLlmModel(provider) && provider.protocol === "responses";
+function resolveLlmProviderProfile(
+	provider: Pick<
+		LlmProviderConfig,
+		"modelType" | "model" | "protocol" | "supportsMultimodal" | "supportsStateful"
+	>,
+): ResolvedLlmProviderProfile {
+	const configured = provider.model.trim().length > 0;
+	if (provider.modelType === "embedding") {
+		return {
+			configured,
+			kind: "embedding",
+			canHandleAiTask: false,
+			canHandleOcr: false,
+			canHandleRagEmbedding: configured,
+			supportsMultimodal: false,
+			supportsStateful: false,
+		};
+	}
+
+	if (provider.protocol === "chat_completions") {
+		return {
+			configured,
+			kind: "llm_chat_completions",
+			canHandleAiTask: configured,
+			canHandleOcr: false,
+			canHandleRagEmbedding: false,
+			supportsMultimodal: false,
+			supportsStateful: false,
+		};
+	}
+
+	const supportsMultimodal = configured && provider.supportsMultimodal;
+	const supportsStateful = configured && provider.supportsStateful;
+	return {
+		configured,
+		kind: supportsStateful ? "llm_responses_stateful" : "llm_responses_stateless",
+		canHandleAiTask: configured,
+		canHandleOcr: supportsMultimodal,
+		canHandleRagEmbedding: false,
+		supportsMultimodal,
+		supportsStateful,
+	};
 }
 
 export function providerHasResponsesModel(
 	provider: Pick<LlmProviderConfig, "modelType" | "model" | "protocol">,
 ) {
-	return providerHasLlmModel(provider) && providerUsesResponsesProtocol(provider);
-}
-
-function providerHasEmbeddingModel(provider: Pick<LlmProviderConfig, "modelType" | "model">) {
-	return providerIsEmbeddingModel(provider) && provider.model.trim().length > 0;
+	const profile = resolveLlmProviderProfile({
+		...provider,
+		supportsMultimodal: false,
+		supportsStateful: false,
+	});
+	return (
+		profile.configured &&
+		(profile.kind === "llm_responses_stateless" || profile.kind === "llm_responses_stateful")
+	);
 }
 
 export function providerCanHandleAiTask(
 	provider: Pick<LlmProviderConfig, "modelType" | "model" | "protocol">,
 ) {
-	return providerHasLlmModel(provider);
+	return resolveLlmProviderProfile({
+		...provider,
+		supportsMultimodal: false,
+		supportsStateful: false,
+	}).canHandleAiTask;
 }
 
 export function providerCanHandleOcr(
 	provider: Pick<LlmProviderConfig, "modelType" | "model" | "protocol" | "supportsMultimodal">,
 ) {
-	return providerHasResponsesModel(provider) && provider.supportsMultimodal;
+	return resolveLlmProviderProfile({
+		...provider,
+		supportsStateful: false,
+	}).canHandleOcr;
 }
 
 export function providerCanHandleRagEmbedding(
 	provider: Pick<LlmProviderConfig, "modelType" | "model">,
 ) {
-	return providerHasEmbeddingModel(provider);
+	return resolveLlmProviderProfile({
+		...provider,
+		protocol: "responses",
+		supportsMultimodal: false,
+		supportsStateful: false,
+	}).canHandleRagEmbedding;
 }
 
 function sanitizeLlmProviderDraft(provider: LlmProviderConfig) {
 	const sanitized = { ...provider };
-	if (!providerUsesResponsesProtocol(sanitized)) {
+	const profile = resolveLlmProviderProfile(sanitized);
+	if (profile.kind !== "llm_responses_stateless" && profile.kind !== "llm_responses_stateful") {
 		sanitized.supportsMultimodal = false;
 		sanitized.supportsStateful = false;
 	}
-	if (sanitized.supportsMultimodal && !providerCanHandleOcr(sanitized)) {
+	if (sanitized.supportsMultimodal && !profile.canHandleOcr) {
 		sanitized.supportsMultimodal = false;
 	}
-	if (sanitized.supportsStateful && !providerHasResponsesModel(sanitized)) {
+	if (sanitized.supportsStateful && !profile.supportsStateful) {
 		sanitized.supportsStateful = false;
 	}
 	if (!sanitized.model.trim()) {
@@ -708,11 +759,12 @@ export function reconcileRagSettings(
 }
 
 export function summarizeLlmProviderProfile(provider: LlmProviderConfig) {
-	if (providerHasLlmModel(provider)) {
-		const kindLabel = getLlmProviderKindLabel(getLlmProviderKind(provider));
-		return provider.supportsMultimodal ? `${kindLabel} · 多模态` : kindLabel;
+	const profile = resolveLlmProviderProfile(provider);
+	if (profile.canHandleAiTask) {
+		const kindLabel = getLlmProviderKindLabel(profile.kind);
+		return profile.supportsMultimodal ? `${kindLabel} · 多模态` : kindLabel;
 	}
-	if (providerHasEmbeddingModel(provider)) {
+	if (profile.canHandleRagEmbedding) {
 		return "Embedding";
 	}
 
@@ -722,15 +774,11 @@ export function summarizeLlmProviderProfile(provider: LlmProviderConfig) {
 export function getLlmProviderKind(
 	provider: Pick<LlmProviderConfig, "modelType" | "protocol" | "supportsStateful">,
 ): LlmProviderKind {
-	if (provider.modelType === "embedding") {
-		return "embedding";
-	}
-
-	if (provider.protocol === "chat_completions") {
-		return "llm_chat_completions";
-	}
-
-	return provider.supportsStateful ? "llm_responses_stateful" : "llm_responses_stateless";
+	return resolveLlmProviderProfile({
+		...provider,
+		model: "__resolved__",
+		supportsMultimodal: false,
+	}).kind;
 }
 
 export function getLlmProviderKindLabel(kind: LlmProviderKind) {
@@ -790,22 +838,25 @@ export function getLlmProviderUsageBadges(
 		"modelType" | "protocol" | "supportsMultimodal" | "supportsStateful"
 	>,
 ): string[] {
-	if (providerIsEmbeddingModel(provider)) {
+	const profile = resolveLlmProviderProfile({
+		...provider,
+		model: "__resolved__",
+	});
+	if (profile.kind === "embedding") {
 		return ["RAG 索引", "RAG 检索"];
 	}
 
-	const providerKind = getLlmProviderKind(provider);
-	if (providerKind === "llm_chat_completions") {
+	if (profile.kind === "llm_chat_completions") {
 		return ["翻译", "RAG 问答", "Chat Completions"];
 	}
 
-	const badges = provider.supportsMultimodal
+	const badges = profile.supportsMultimodal
 		? ["翻译", "RAG 问答", "OCR", "Responses"]
 		: ["翻译", "RAG 问答", "Responses"];
-	if (providerKind === "llm_responses_stateful") {
+	if (profile.kind === "llm_responses_stateful") {
 		badges.push("Stateful");
 	}
-	if (providerKind === "llm_responses_stateless") {
+	if (profile.kind === "llm_responses_stateless") {
 		badges.push("Stateless");
 	}
 	return badges;
@@ -817,20 +868,23 @@ export function getLlmProviderUsageDescription(
 		"modelType" | "protocol" | "supportsMultimodal" | "supportsStateful"
 	>,
 ): string {
-	if (providerIsEmbeddingModel(provider)) {
+	const profile = resolveLlmProviderProfile({
+		...provider,
+		model: "__resolved__",
+	});
+	if (profile.kind === "embedding") {
 		return "Embedding 条目只会出现在 RAG 的 embedding 列表，不会进入翻译 LLM、问答 LLM 或 OCR。";
 	}
 
-	const providerKind = getLlmProviderKind(provider);
-	if (providerKind === "llm_chat_completions") {
+	if (profile.kind === "llm_chat_completions") {
 		return "这个条目会走 OpenAI 兼容 chat/completions 协议，当前可供翻译和 RAG 问答复用；继续追问时始终回退到显式历史，不支持 response_id 续链，也不会进入 OCR 列表。";
 	}
 
 	const statefulText =
-		providerKind === "llm_responses_stateful"
+		profile.kind === "llm_responses_stateful"
 			? "这是 responses 的 stateful 版本，继续追问时会优先复用上一轮 response_id。"
 			: "这是 responses 的 stateless 版本，继续追问时不会复用上一轮 response_id，而是回退到显式历史。";
-	if (provider.supportsMultimodal) {
+	if (profile.supportsMultimodal) {
 		return `这个条目会走 OpenAI 兼容 responses 协议，当前可供翻译、RAG 问答和 OCR 复用。${statefulText}`;
 	}
 
@@ -921,6 +975,7 @@ export function buildAcpDraftSnapshot(agents: AcpAgentDraft[]) {
 			id: agent.id,
 			name: agent.name,
 			command: agent.command,
+			launchMode: agent.launchMode,
 		})),
 	});
 }

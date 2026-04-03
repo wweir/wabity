@@ -49,7 +49,7 @@ pub async fn paste_clipboard_history_entry(
         .prepare_entry_for_external_paste(&entry_id)
         .await
         .map_err(|error| error.to_string())?;
-    window::hide_main_window(&app).map_err(|error| error.to_string())?;
+    window::hide_launcher_window(&app, Some("clipboard")).map_err(|error| error.to_string())?;
     match window::reactivate_clipboard_external_paste_target(&app) {
         Ok(Some(target_pid)) => {
             let target_became_frontmost = window::wait_for_frontmost_application_pid(

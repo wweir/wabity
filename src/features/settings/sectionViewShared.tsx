@@ -6,7 +6,7 @@ export type BindAcpFieldRef = (
 	scope: "agent" | "server",
 	id: string,
 	field: McpFieldKey | AcpFieldKey,
-) => (node: HTMLInputElement | HTMLTextAreaElement | null) => void;
+) => (node: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | null) => void;
 export type BindLlmFieldRef = (
 	id: string,
 	field: LlmFieldKey,

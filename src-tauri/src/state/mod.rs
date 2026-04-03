@@ -32,9 +32,9 @@ use crate::services::{
 use crate::{
     domain::{
         acp::{
-            AcpAgentCatalog, AcpAgentConfig, AcpMcpServerCatalog, AcpMcpServerConfig,
-            AcpNameValuePair, AcpRestoreNotice, AcpSessionDetail, AcpSessionSummary,
-            BuiltinMcpConfig, BuiltinMcpServerStatus,
+            AcpAgentCatalog, AcpAgentConfig, AcpAgentLaunchMode, AcpMcpServerCatalog,
+            AcpMcpServerConfig, AcpNameValuePair, AcpRestoreNotice, AcpSessionDetail,
+            AcpSessionSummary, BuiltinMcpConfig, BuiltinMcpServerStatus,
         },
         execution::{ExecutionProgressEvent, ExecutionRequest, ExecutionResult},
         rag::{RagRuntimeStatus, RagScanResult},
@@ -107,7 +107,10 @@ impl AppState {
             home_path: home_workspace_root().map(|path| path.to_string_lossy().into_owned()),
             display_home_as_tilde: display_home_as_tilde(),
         };
-        let rag_index = RagIndexService::new(ConfigStore::data_dir()?);
+        let rag_index = RagIndexService::new_with_app_handle(
+            Some(app_handle.clone()),
+            ConfigStore::data_dir()?,
+        );
         rag_index
             .apply_settings(config.rag.clone(), config.llm.clone())
             .await;
@@ -162,15 +165,28 @@ impl AppState {
             }
             "translate_text" => {
                 let settings = self.app_settings().await?;
-                tokio::task::spawn_blocking(move || {
-                    translate::execute_translation(
+                {
+                    let mut partial_text = String::new();
+                    let mut on_text_delta = |delta: &str| {
+                        partial_text.push_str(delta);
+                        if let Some(progress_event_tx) = progress_event_tx.as_ref() {
+                            progress_event_tx(ExecutionProgressEvent {
+                                action_id: "translate_text".to_string(),
+                                status_text: "模型响应中 · 正在输出译文".to_string(),
+                                partial_text: Some(partial_text.clone()),
+                            });
+                        }
+                    };
+                    translate::execute_translation_with_callbacks(
                         &request.query.raw_text,
                         &settings.prompts,
                         &settings.llm,
+                        translate::TranslationCallbacks {
+                            on_text_delta: Some(&mut on_text_delta),
+                        },
                     )
-                })
-                .await
-                .context("failed to join translation task")?
+                    .await
+                }
             }
             "rag_answer" => {
                 let settings = self.app_settings().await?;
@@ -553,6 +569,7 @@ impl AppState {
             agent_program: agent.program.clone(),
             agent_args: agent.args.clone(),
             agent_shell_command: agent.shell_command.clone(),
+            agent_launch_mode: agent.launch_mode,
             mcp_servers: mcp_servers.to_vec(),
             last_updated_at_ms: summary.last_updated_at_ms,
         };
@@ -611,10 +628,7 @@ fn build_ocr_provider(settings: &OcrSettings, llm_settings: &LlmSettings) -> Arc
         OcrProviderKind::System => build_system_ocr_provider(),
         OcrProviderKind::LlmOcr => {
             match resolve_llm_provider(settings, llm_settings).and_then(|provider| {
-                if !provider.has_responses_model() {
-                    anyhow::bail!("OCR 选择的 LLM 配置缺少 responses 模型")
-                }
-                if !provider.supports_multimodal() {
+                if !provider.resolved_profile().can_handle_ocr() {
                     anyhow::bail!("OCR 选择的 LLM 配置未启用多模态能力")
                 }
                 OpenAiCompatibleOcrProvider::from_config(provider)
@@ -657,11 +671,9 @@ fn validate_llm_provider_reference(
         return Ok(());
     };
 
-    if settings
-        .providers
-        .iter()
-        .any(|provider| provider.id == provider_id && provider.has_llm_model())
-    {
+    if settings.providers.iter().any(|provider| {
+        provider.id == provider_id && provider.resolved_profile().can_handle_ai_task()
+    }) {
         return Ok(());
     }
 
@@ -674,10 +686,7 @@ fn validate_ocr_settings(settings: &OcrSettings, llm_settings: &LlmSettings) -> 
         OcrProviderKind::System => validate_system_ocr_settings(),
         OcrProviderKind::LlmOcr => {
             let provider = resolve_llm_provider(settings, llm_settings)?;
-            if !provider.has_responses_model() {
-                anyhow::bail!("OCR 选择的 LLM 配置缺少 responses 模型");
-            }
-            if !provider.supports_multimodal() {
+            if !provider.resolved_profile().can_handle_ocr() {
                 anyhow::bail!("OCR 选择的 LLM 配置未启用多模态能力");
             }
             OpenAiCompatibleOcrProvider::from_config(provider).map(|_| ())
@@ -721,7 +730,7 @@ fn validate_rag_settings(settings: &RagSettings, llm_settings: &LlmSettings) -> 
             .iter()
             .find(|provider| provider.id == provider_id)
             .with_context(|| format!("RAG 选择的 embedding provider 不存在: {provider_id}"))?;
-        if !provider.has_embedding_model() {
+        if !provider.resolved_profile().can_handle_embedding() {
             anyhow::bail!("RAG 只接受启用了 embedding 能力的 provider");
         }
         validate_llm_provider_config(provider)
@@ -757,13 +766,14 @@ fn validate_llm_provider_config(provider: &LlmProviderConfig) -> Result<()> {
     if provider.base_url.trim().is_empty() {
         anyhow::bail!("LLM provider base URL 不能为空");
     }
-    if provider.model_name().is_empty() {
+    let resolved_profile = provider.resolved_profile();
+    if resolved_profile.model_name().is_none() {
         anyhow::bail!("LLM provider model 不能为空");
     }
-    if provider.supports_multimodal && !provider.has_responses_model() {
+    if provider.supports_multimodal && !resolved_profile.uses_responses_api() {
         anyhow::bail!("多模态开关当前只能和 responses 协议一起使用");
     }
-    if provider.supports_stateful && !provider.has_responses_model() {
+    if provider.supports_stateful && !resolved_profile.uses_responses_api() {
         anyhow::bail!("stateful 开关只能和 responses 协议一起使用");
     }
     validate_builtin_llm_provider_binding(provider)?;
@@ -931,22 +941,48 @@ fn normalize_acp_agent_catalog(catalog: AcpAgentCatalog) -> Result<AcpAgentCatal
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned);
-        let program = agent.program.trim().to_string();
+        let mut program = agent.program.trim().to_string();
+        let mut args = agent
+            .args
+            .into_iter()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
         if shell_command.is_none() && program.is_empty() {
             anyhow::bail!("第 {} 个 ACP agent 命令为空", index + 1);
+        }
+        let launch_mode = if shell_command.is_none() && !program.is_empty() {
+            AcpAgentLaunchMode::Direct
+        } else {
+            agent.launch_mode
+        };
+
+        if launch_mode == AcpAgentLaunchMode::Direct {
+            if let Some(command) = shell_command.as_deref() {
+                let parsed = shlex::split(command)
+                    .with_context(|| format!("第 {} 个 ACP agent 直连命令解析失败", index + 1))?;
+                if parsed.is_empty() {
+                    anyhow::bail!("第 {} 个 ACP agent 命令为空", index + 1);
+                }
+                program = parsed[0].clone();
+                args = parsed[1..].to_vec();
+            } else if program.is_empty() {
+                anyhow::bail!("第 {} 个 ACP agent 命令为空", index + 1);
+            }
+        } else if shell_command.is_none() {
+            anyhow::bail!(
+                "第 {} 个 ACP agent 选择了 shell 启动模式，但没有提供 shell 命令",
+                index + 1
+            );
         }
 
         agents.push(AcpAgentConfig {
             id: agent.id.trim().to_string(),
             name,
             program,
-            args: agent
-                .args
-                .into_iter()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-                .collect(),
+            args,
             shell_command,
+            launch_mode,
             mcp_servers: Vec::new(),
         });
     }
@@ -1122,7 +1158,12 @@ pub struct ShortcutRuntimeState {
     launcher_shortcut: Arc<StdRwLock<Option<Shortcut>>>,
     ocr_translate_shortcut: Arc<StdRwLock<Option<Shortcut>>>,
     open_clipboard_history_shortcut: Arc<StdRwLock<Option<Shortcut>>>,
+    launcher_view_mode: Arc<StdRwLock<LauncherWindowViewMode>>,
+    launcher_main_window_size: Arc<StdRwLock<Option<LauncherWindowSize>>>,
+    launcher_clipboard_window_size: Arc<StdRwLock<Option<LauncherWindowSize>>>,
     launcher_visible: Arc<AtomicBool>,
+    clipboard_history_visible: Arc<AtomicBool>,
+    clipboard_window_preserves_launcher_focus: Arc<AtomicBool>,
     launcher_blur_auto_hide_enabled: Arc<AtomicBool>,
     launcher_resize_reposition_until: Arc<StdRwLock<Option<Instant>>>,
     launcher_blur_auto_hide_suppressed_until: Arc<StdRwLock<Option<Instant>>>,
@@ -1142,7 +1183,12 @@ impl Default for ShortcutRuntimeState {
             launcher_shortcut: Arc::new(StdRwLock::new(None)),
             ocr_translate_shortcut: Arc::new(StdRwLock::new(None)),
             open_clipboard_history_shortcut: Arc::new(StdRwLock::new(None)),
+            launcher_view_mode: Arc::new(StdRwLock::new(LauncherWindowViewMode::Main)),
+            launcher_main_window_size: Arc::new(StdRwLock::new(None)),
+            launcher_clipboard_window_size: Arc::new(StdRwLock::new(None)),
             launcher_visible: Arc::new(AtomicBool::new(false)),
+            clipboard_history_visible: Arc::new(AtomicBool::new(false)),
+            clipboard_window_preserves_launcher_focus: Arc::new(AtomicBool::new(false)),
             launcher_blur_auto_hide_enabled: Arc::new(AtomicBool::new(true)),
             launcher_resize_reposition_until: Arc::new(StdRwLock::new(None)),
             launcher_blur_auto_hide_suppressed_until: Arc::new(StdRwLock::new(None)),
@@ -1165,6 +1211,18 @@ pub enum ShortcutAction {
     ToggleLauncher,
     OcrTranslate,
     OpenClipboardHistory,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LauncherWindowViewMode {
+    Main,
+    ClipboardHistory,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LauncherWindowSize {
+    pub width: f64,
+    pub height: f64,
 }
 
 impl ShortcutRuntimeState {
@@ -1211,8 +1269,68 @@ impl ShortcutRuntimeState {
         self.launcher_visible.load(Ordering::SeqCst)
     }
 
+    #[cfg(test)]
+    pub fn launcher_view_mode(&self) -> LauncherWindowViewMode {
+        *self.launcher_view_mode.read().unwrap()
+    }
+
+    pub fn set_launcher_view_mode(&self, mode: LauncherWindowViewMode) {
+        *self.launcher_view_mode.write().unwrap() = mode;
+    }
+
+    pub fn cached_launcher_window_size(
+        &self,
+        mode: LauncherWindowViewMode,
+    ) -> Option<LauncherWindowSize> {
+        match mode {
+            LauncherWindowViewMode::Main => *self.launcher_main_window_size.read().unwrap(),
+            LauncherWindowViewMode::ClipboardHistory => {
+                *self.launcher_clipboard_window_size.read().unwrap()
+            }
+        }
+    }
+
+    pub fn remember_launcher_window_size(
+        &self,
+        mode: LauncherWindowViewMode,
+        size: LauncherWindowSize,
+    ) {
+        match mode {
+            LauncherWindowViewMode::Main => {
+                *self.launcher_main_window_size.write().unwrap() = Some(size)
+            }
+            LauncherWindowViewMode::ClipboardHistory => {
+                *self.launcher_clipboard_window_size.write().unwrap() = Some(size);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub fn remember_current_launcher_window_size(&self, size: LauncherWindowSize) {
+        self.remember_launcher_window_size(self.launcher_view_mode(), size);
+    }
+
     pub fn set_launcher_visible(&self, visible: bool) {
         self.launcher_visible.store(visible, Ordering::SeqCst);
+    }
+
+    pub fn is_clipboard_history_visible(&self) -> bool {
+        self.clipboard_history_visible.load(Ordering::SeqCst)
+    }
+
+    pub fn set_clipboard_history_visible(&self, visible: bool) {
+        self.clipboard_history_visible
+            .store(visible, Ordering::SeqCst);
+    }
+
+    pub fn clipboard_window_preserves_launcher_focus(&self) -> bool {
+        self.clipboard_window_preserves_launcher_focus
+            .load(Ordering::SeqCst)
+    }
+
+    pub fn set_clipboard_window_preserves_launcher_focus(&self, preserve: bool) {
+        self.clipboard_window_preserves_launcher_focus
+            .store(preserve, Ordering::SeqCst);
     }
 
     pub fn is_launcher_blur_auto_hide_enabled(&self) -> bool {
@@ -1365,14 +1483,15 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        effective_mcp_servers, normalize_mcp_remote_url, reconcile_saved_session_builtin_mcp,
-        validate_llm_provider_config, validate_rag_settings, ShortcutAction, ShortcutRuntimeState,
+        effective_mcp_servers, normalize_acp_agent_catalog, normalize_mcp_remote_url,
+        reconcile_saved_session_builtin_mcp, validate_llm_provider_config, validate_rag_settings,
+        LauncherWindowSize, LauncherWindowViewMode, ShortcutAction, ShortcutRuntimeState,
         SHORTCUT_PRESS_STALE_AFTER,
     };
     use crate::domain::{
         acp::{
-            AcpMcpServerCatalog, AcpMcpServerConfig, AcpMcpServerHttpConfig, BuiltinMcpConfig,
-            BuiltinMcpModuleKey,
+            AcpAgentCatalog, AcpAgentConfig, AcpAgentLaunchMode, AcpMcpServerCatalog,
+            AcpMcpServerConfig, AcpMcpServerHttpConfig, BuiltinMcpConfig, BuiltinMcpModuleKey,
         },
         settings::{LlmProviderConfig, LlmProviderModelEntry, LlmSettings, RagSettings},
     };
@@ -1445,6 +1564,62 @@ mod tests {
         let state = ShortcutRuntimeState::default();
 
         assert!(state.should_reposition_launcher_on_resize());
+    }
+
+    #[test]
+    fn launcher_window_view_mode_defaults_to_main() {
+        let state = ShortcutRuntimeState::default();
+
+        assert_eq!(state.launcher_view_mode(), LauncherWindowViewMode::Main);
+    }
+
+    #[test]
+    fn launcher_window_size_cache_round_trips_per_view_mode() {
+        let state = ShortcutRuntimeState::default();
+        let main_size = LauncherWindowSize {
+            width: 760.0,
+            height: 280.0,
+        };
+        let clipboard_size = LauncherWindowSize {
+            width: 452.0,
+            height: 398.0,
+        };
+
+        state.remember_launcher_window_size(LauncherWindowViewMode::Main, main_size);
+        state.remember_launcher_window_size(
+            LauncherWindowViewMode::ClipboardHistory,
+            clipboard_size,
+        );
+
+        assert_eq!(
+            state.cached_launcher_window_size(LauncherWindowViewMode::Main),
+            Some(main_size)
+        );
+        assert_eq!(
+            state.cached_launcher_window_size(LauncherWindowViewMode::ClipboardHistory),
+            Some(clipboard_size)
+        );
+    }
+
+    #[test]
+    fn current_launcher_window_size_cache_follows_current_view_mode() {
+        let state = ShortcutRuntimeState::default();
+        let clipboard_size = LauncherWindowSize {
+            width: 448.0,
+            height: 372.0,
+        };
+
+        state.set_launcher_view_mode(LauncherWindowViewMode::ClipboardHistory);
+        state.remember_current_launcher_window_size(clipboard_size);
+
+        assert_eq!(
+            state.cached_launcher_window_size(LauncherWindowViewMode::ClipboardHistory),
+            Some(clipboard_size)
+        );
+        assert_eq!(
+            state.cached_launcher_window_size(LauncherWindowViewMode::Main),
+            None
+        );
     }
 
     #[test]
@@ -1765,6 +1940,56 @@ mod tests {
     }
 
     #[test]
+    fn normalize_acp_agent_catalog_parses_direct_shell_command_into_argv() {
+        let catalog = AcpAgentCatalog {
+            agents: vec![AcpAgentConfig {
+                id: "agent-1".to_string(),
+                name: "Direct Agent".to_string(),
+                program: String::new(),
+                args: Vec::new(),
+                shell_command: Some("uvx --from example-agent agent --stdio".to_string()),
+                launch_mode: AcpAgentLaunchMode::Direct,
+                mcp_servers: Vec::new(),
+            }],
+            default_agent_id: None,
+        };
+
+        let normalized = normalize_acp_agent_catalog(catalog).expect("direct agent should parse");
+
+        assert_eq!(normalized.agents[0].program, "uvx");
+        assert_eq!(
+            normalized.agents[0].args,
+            vec![
+                "--from".to_string(),
+                "example-agent".to_string(),
+                "agent".to_string(),
+                "--stdio".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn normalize_acp_agent_catalog_rejects_invalid_direct_shell_command() {
+        let catalog = AcpAgentCatalog {
+            agents: vec![AcpAgentConfig {
+                id: "agent-1".to_string(),
+                name: "Broken Direct Agent".to_string(),
+                program: String::new(),
+                args: Vec::new(),
+                shell_command: Some("\"unterminated".to_string()),
+                launch_mode: AcpAgentLaunchMode::Direct,
+                mcp_servers: Vec::new(),
+            }],
+            default_agent_id: None,
+        };
+
+        let error = normalize_acp_agent_catalog(catalog)
+            .expect_err("invalid direct shell command should fail validation");
+
+        assert!(error.to_string().contains("直连命令解析失败"));
+    }
+
+    #[test]
     fn effective_mcp_servers_requires_running_builtin_server() {
         let catalog = AcpMcpServerCatalog {
             servers: vec![AcpMcpServerConfig::Http(AcpMcpServerHttpConfig {
@@ -1797,6 +2022,7 @@ mod tests {
             agent_program: "codex-acp".to_string(),
             agent_args: Vec::new(),
             agent_shell_command: None,
+            agent_launch_mode: AcpAgentLaunchMode::Direct,
             mcp_servers: vec![
                 builtin_mcp::builtin_server_config(),
                 AcpMcpServerConfig::Http(AcpMcpServerHttpConfig {
