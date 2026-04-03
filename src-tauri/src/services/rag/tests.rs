@@ -1062,6 +1062,7 @@ async fn run_watch_loop_preserves_existing_storage_when_config_is_invalid() {
     let runtime_status = Arc::new(AsyncRwLock::new(RagRuntimeStatus::default()));
     let runtime_generation = Arc::new(AtomicU64::new(0));
     let runtime_context = RagRuntimeContext {
+        app_handle: None,
         runtime_status: runtime_status.clone(),
         runtime_generation: runtime_generation.clone(),
         storage_lock: Arc::new(AsyncMutex::new(())),
@@ -1419,6 +1420,7 @@ async fn execute_path_update_plans_skips_untracked_missing_prefixes() {
         .expect("create current rag table");
 
     execute_path_update_plans(
+        None,
         &database_path,
         &metadata_path,
         &test_resolved_config(&root),
@@ -2136,6 +2138,7 @@ async fn stale_runtime_generation_cannot_override_current_status() {
     let runtime_generation = Arc::new(AtomicU64::new(2));
 
     set_runtime_status_for_generation(
+        None,
         &runtime_status,
         &runtime_generation,
         2,
@@ -2150,6 +2153,7 @@ async fn stale_runtime_generation_cannot_override_current_status() {
     )
     .await;
     set_runtime_status_for_generation(
+        None,
         &runtime_status,
         &runtime_generation,
         1,

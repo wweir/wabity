@@ -31,6 +31,7 @@ use super::{
         VECTOR_INDEX_REBUILD_MIN_DIRTY_CHUNKS, VECTOR_INDEX_REBUILD_MIN_DIRTY_DELETES,
     },
 };
+use crate::services::rag_query;
 
 #[derive(Debug, Clone)]
 struct StoredChunkVector {
@@ -289,6 +290,7 @@ pub(super) fn can_skip_vector_index_build(error: &anyhow::Error) -> bool {
 }
 
 pub(super) async fn clear_index(database_path: &Path) -> Result<()> {
+    rag_query::invalidate_rag_query_db_cache(database_path).await;
     tokio::fs::create_dir_all(database_path)
         .await
         .with_context(|| {

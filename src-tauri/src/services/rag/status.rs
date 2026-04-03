@@ -3,13 +3,16 @@ use std::sync::{
     Arc,
 };
 
+use tauri::AppHandle;
 use tokio::sync::RwLock as AsyncRwLock;
 
 use crate::domain::rag::{RagRuntimePhase, RagRuntimeStatus};
+use crate::infrastructure::window;
 
 use super::{config::now_unix_ms, model::RuntimeProgress};
 
 pub(super) async fn set_runtime_status(
+    app_handle: Option<&AppHandle>,
     runtime_status: &Arc<AsyncRwLock<RagRuntimeStatus>>,
     runtime_guard: Option<(&Arc<AtomicU64>, u64)>,
     phase: RagRuntimePhase,
@@ -38,9 +41,15 @@ pub(super) async fn set_runtime_status(
         last_error,
         updated_at_ms: u64::try_from(now_unix_ms()).unwrap_or_default(),
     };
+    if let Some(app_handle) = app_handle {
+        if let Err(error) = window::emit_rag_runtime_status(app_handle, &status) {
+            tracing::debug!(?error, "failed to emit RAG runtime status event");
+        }
+    }
 }
 
 pub(super) async fn set_runtime_status_for_generation(
+    app_handle: Option<&AppHandle>,
     runtime_status: &Arc<AsyncRwLock<RagRuntimeStatus>>,
     runtime_generation: &Arc<AtomicU64>,
     generation: u64,
@@ -49,6 +58,7 @@ pub(super) async fn set_runtime_status_for_generation(
     last_error: Option<String>,
 ) {
     set_runtime_status(
+        app_handle,
         runtime_status,
         Some((runtime_generation, generation)),
         phase,

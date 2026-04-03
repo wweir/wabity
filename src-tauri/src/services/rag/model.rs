@@ -5,6 +5,7 @@ use std::{
 };
 
 use globset::GlobSet;
+use tauri::AppHandle;
 use tokio::sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock};
 
 use crate::{
@@ -80,6 +81,7 @@ pub(crate) struct RagRuntimeInputs {
 
 #[derive(Clone)]
 pub(crate) struct RagRuntimeContext {
+    pub(crate) app_handle: Option<AppHandle>,
     pub(crate) runtime_status: Arc<AsyncRwLock<RagRuntimeStatus>>,
     pub(crate) runtime_generation: Arc<AtomicU64>,
     pub(crate) storage_lock: Arc<AsyncMutex<()>>,

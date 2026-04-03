@@ -9,6 +9,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use notify::{event::ModifyKind, Event, EventKind, RecursiveMode, Watcher};
+use tauri::AppHandle;
 use tokio::{
     sync::{mpsc, Mutex as AsyncMutex, RwLock as AsyncRwLock},
     task::JoinHandle,
@@ -35,6 +36,7 @@ use super::{
 
 #[derive(Clone)]
 pub struct RagIndexService {
+    app_handle: Option<AppHandle>,
     data_dir: PathBuf,
     pub(super) runtime: Arc<AsyncRwLock<Option<JoinHandle<()>>>>,
     runtime_inputs: Arc<AsyncRwLock<Option<RagRuntimeInputs>>>,
@@ -45,7 +47,12 @@ pub struct RagIndexService {
 
 impl RagIndexService {
     pub fn new(data_dir: PathBuf) -> Self {
+        Self::new_with_app_handle(None, data_dir)
+    }
+
+    pub fn new_with_app_handle(app_handle: Option<AppHandle>, data_dir: PathBuf) -> Self {
         Self {
+            app_handle,
             data_dir,
             runtime: Arc::new(AsyncRwLock::new(None)),
             runtime_inputs: Arc::new(AsyncRwLock::new(None)),
@@ -87,7 +94,9 @@ impl RagIndexService {
         let runtime_status = self.runtime_status.clone();
         let runtime_generation = self.runtime_generation.clone();
         let generation = runtime_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let status_app_handle = self.app_handle.clone();
         let runtime_context = RagRuntimeContext {
+            app_handle: self.app_handle.clone(),
             runtime_status: runtime_status.clone(),
             runtime_generation: runtime_generation.clone(),
             storage_lock: self.storage_lock.clone(),
@@ -105,6 +114,7 @@ impl RagIndexService {
             .await
             {
                 set_runtime_status_for_generation(
+                    status_app_handle.as_ref(),
                     &runtime_status,
                     &runtime_generation,
                     generation,
@@ -130,7 +140,14 @@ impl RagIndexService {
         let resolved = resolve_rag_config(settings, llm_settings)?;
         let runtime_status = Arc::new(AsyncRwLock::new(RagRuntimeStatus::default()));
         let _storage_guard = self.storage_lock.lock().await;
-        rebuild_index_locked(&self.data_dir, &resolved, &runtime_status, None).await
+        rebuild_index_locked(
+            self.app_handle.as_ref(),
+            &self.data_dir,
+            &resolved,
+            &runtime_status,
+            None,
+        )
+        .await
     }
 }
 
@@ -150,6 +167,7 @@ pub(super) async fn run_watch_loop(
                 clear_index(&database_path).await?;
                 clear_metadata_store(&metadata_path).await?;
                 set_runtime_status_for_generation(
+                    runtime_context.app_handle.as_ref(),
                     &runtime_context.runtime_status,
                     &runtime_context.runtime_generation,
                     runtime_context.generation,
@@ -161,6 +179,7 @@ pub(super) async fn run_watch_loop(
                 return Ok(());
             }
             set_runtime_status_for_generation(
+                runtime_context.app_handle.as_ref(),
                 &runtime_context.runtime_status,
                 &runtime_context.runtime_generation,
                 runtime_context.generation,
@@ -177,6 +196,7 @@ pub(super) async fn run_watch_loop(
         &data_dir,
         &metadata_path,
         &resolved,
+        runtime_context.app_handle.as_ref(),
         &runtime_context.runtime_status,
         Some((
             &runtime_context.runtime_generation,
@@ -220,6 +240,7 @@ pub(super) async fn run_watch_loop(
         }
 
         if let Err(error) = process_event_batch(
+            runtime_context.app_handle.as_ref(),
             &data_dir,
             &resolved,
             &runtime_context.runtime_status,
@@ -233,6 +254,7 @@ pub(super) async fn run_watch_loop(
         .await
         {
             set_runtime_status_for_generation(
+                runtime_context.app_handle.as_ref(),
                 &runtime_context.runtime_status,
                 &runtime_context.runtime_generation,
                 runtime_context.generation,
@@ -247,6 +269,7 @@ pub(super) async fn run_watch_loop(
 }
 
 async fn process_event_batch(
+    app_handle: Option<&AppHandle>,
     data_dir: &Path,
     resolved: &super::model::ResolvedRagConfig,
     runtime_status: &Arc<AsyncRwLock<RagRuntimeStatus>>,
@@ -294,12 +317,20 @@ async fn process_event_batch(
     }
 
     if full_rescan {
-        rebuild_index_locked(data_dir, resolved, runtime_status, runtime_guard).await?;
+        rebuild_index_locked(
+            app_handle,
+            data_dir,
+            resolved,
+            runtime_status,
+            runtime_guard,
+        )
+        .await?;
         return Ok(());
     }
 
     if !changed_paths.is_empty() {
         set_runtime_status(
+            app_handle,
             runtime_status,
             runtime_guard,
             RagRuntimePhase::Scanning,
@@ -315,6 +346,7 @@ async fn process_event_batch(
 
     if changed_paths.is_empty() {
         set_runtime_status(
+            app_handle,
             runtime_status,
             runtime_guard,
             RagRuntimePhase::Idle,
@@ -352,6 +384,7 @@ async fn process_event_batch(
     .context("failed to join RAG path batch planning task")??;
 
     execute_path_update_plans(
+        app_handle,
         &database_path,
         &metadata_path,
         resolved,
@@ -362,6 +395,7 @@ async fn process_event_batch(
     .await?;
 
     set_runtime_status(
+        app_handle,
         runtime_status,
         runtime_guard,
         RagRuntimePhase::Idle,

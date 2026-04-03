@@ -12,8 +12,8 @@ use serde_json::{json, Value};
 use tokio::{fs, net::TcpListener, task::JoinHandle};
 use wabity_lib::question_answer_backend::{
     answer_question, ExecutionConversationRole, ExecutionConversationState,
-    ExecutionConversationTurn, ExecutionStatus, LlmModelType, LlmProviderConfig,
-    LlmProviderProtocol, LlmSettings, QuestionAnswerBackendRequest, RagSettings,
+    ExecutionConversationTurn, ExecutionProgressEvent, ExecutionStatus, LlmModelType,
+    LlmProviderConfig, LlmProviderProtocol, LlmSettings, QuestionAnswerBackendRequest, RagSettings,
 };
 
 #[derive(Clone)]
@@ -24,9 +24,11 @@ enum MockScenario {
     DirectAnswerWithEmbeddedThinkingContent,
     HistoryAwareDirectAnswer,
     RejectOutsideWorkspaceRead,
+    ChatRejectsStreaming,
     ResponsesStatelessReadWorkspaceFile,
     ResponsesStatelessFollowUp,
     ResponsesStatefulFollowUp,
+    ResponsesRejectStreaming,
 }
 
 #[derive(Clone)]
@@ -294,6 +296,32 @@ async fn mock_chat_completions(
                 }]
             })),
         ),
+        (MockScenario::ChatRejectsStreaming, 0)
+            if payload.get("stream") == Some(&Value::Bool(true)) =>
+        {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "message": "streaming is not supported for this provider"
+                    }
+                })),
+            )
+        }
+        (MockScenario::ChatRejectsStreaming, _) => (
+            StatusCode::OK,
+            Json(json!({
+                "id": "chatcmpl-stream-fallback",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": "已回退到非流式 chat/completions。"
+                    },
+                    "finish_reason": "stop"
+                }]
+            })),
+        ),
         _ => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
@@ -442,6 +470,31 @@ async fn mock_responses(
                 })),
             )
         }
+        (MockScenario::ResponsesRejectStreaming, 0)
+            if payload.get("stream") == Some(&Value::Bool(true)) =>
+        {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "message": "streaming is not supported for this provider"
+                    }
+                })),
+            )
+        }
+        (MockScenario::ResponsesRejectStreaming, _) => (
+            StatusCode::OK,
+            Json(json!({
+                "id": "resp-stream-fallback",
+                "output": [{
+                    "type": "message",
+                    "content": [{
+                        "type": "output_text",
+                        "text": "已回退到非流式 responses。"
+                    }]
+                }]
+            })),
+        ),
         _ => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
@@ -551,6 +604,88 @@ async fn question_answer_backend_supports_standalone_integration_test() {
                 .and_then(Value::as_str)
                 .is_some_and(|content| content.contains("alpha line"))
     }));
+}
+
+#[tokio::test]
+async fn question_answer_backend_falls_back_to_non_streaming_chat_provider() {
+    let workspace_root = temp_test_root("chat-stream-fallback");
+    fs::create_dir_all(&workspace_root)
+        .await
+        .expect("failed to create temp workspace");
+
+    let (base_url, requests, server_handle) =
+        spawn_chat_completion_server(MockScenario::ChatRejectsStreaming).await;
+    let llm_settings = build_llm_settings(base_url, LlmProviderProtocol::ChatCompletions, false);
+    let progress_event_tx = Arc::new(|_event: ExecutionProgressEvent| {});
+
+    let result = answer_question(QuestionAnswerBackendRequest {
+        data_dir: &workspace_root,
+        workspace_root: &workspace_root,
+        raw_text: "/ask 直接回答即可",
+        conversation: &[],
+        conversation_state: None,
+        prompts_settings: &Default::default(),
+        rag_settings: &RagSettings::default(),
+        llm_settings: &llm_settings,
+        mcp_servers: &[],
+        progress_event_tx: Some(progress_event_tx),
+    })
+    .await
+    .expect("question backend should fall back to non-stream chat request");
+
+    server_handle.abort();
+
+    assert_eq!(result.status, ExecutionStatus::Success);
+    assert_eq!(
+        result.primary_text.as_deref(),
+        Some("已回退到非流式 chat/completions。")
+    );
+
+    let recorded_requests = requests.lock().expect("failed to lock recorded requests");
+    assert_eq!(recorded_requests.len(), 2);
+    assert_eq!(recorded_requests[0]["stream"], Value::Bool(true));
+    assert_eq!(recorded_requests[1]["stream"], Value::Bool(false));
+}
+
+#[tokio::test]
+async fn question_answer_backend_falls_back_to_non_streaming_responses_provider() {
+    let workspace_root = temp_test_root("responses-stream-fallback");
+    fs::create_dir_all(&workspace_root)
+        .await
+        .expect("failed to create temp workspace");
+
+    let (base_url, requests, server_handle) =
+        spawn_responses_server(MockScenario::ResponsesRejectStreaming).await;
+    let llm_settings = build_llm_settings(base_url, LlmProviderProtocol::Responses, false);
+    let progress_event_tx = Arc::new(|_event: ExecutionProgressEvent| {});
+
+    let result = answer_question(QuestionAnswerBackendRequest {
+        data_dir: &workspace_root,
+        workspace_root: &workspace_root,
+        raw_text: "/ask 直接回答即可",
+        conversation: &[],
+        conversation_state: None,
+        prompts_settings: &Default::default(),
+        rag_settings: &RagSettings::default(),
+        llm_settings: &llm_settings,
+        mcp_servers: &[],
+        progress_event_tx: Some(progress_event_tx),
+    })
+    .await
+    .expect("question backend should fall back to non-stream responses request");
+
+    server_handle.abort();
+
+    assert_eq!(result.status, ExecutionStatus::Success);
+    assert_eq!(
+        result.primary_text.as_deref(),
+        Some("已回退到非流式 responses。")
+    );
+
+    let recorded_requests = requests.lock().expect("failed to lock recorded requests");
+    assert_eq!(recorded_requests.len(), 2);
+    assert_eq!(recorded_requests[0]["stream"], Value::Bool(true));
+    assert_eq!(recorded_requests[1]["stream"], Value::Bool(false));
 }
 
 #[tokio::test]

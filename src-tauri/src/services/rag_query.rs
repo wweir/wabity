@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::Path};
+use std::{collections::HashMap, path::Path, sync::OnceLock, time::Instant};
 
 use anyhow::{bail, Context, Result};
 use arrow_array::{Array, Float32Array, Float64Array, Int32Array, RecordBatch, StringArray};
@@ -6,8 +6,10 @@ use futures::TryStreamExt;
 use lancedb::{
     connect,
     query::{ExecutableQuery, QueryBase, Select},
+    Connection as LanceConnection,
 };
 use serde::Serialize;
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::domain::settings::{LlmProviderConfig, LlmSettings, RagSettings};
 use crate::services::document_extract::DocumentKind;
@@ -93,6 +95,14 @@ pub async fn search_chunks(
     top_k: usize,
     min_score: f32,
 ) -> Result<RagSearchResult> {
+    let total_started_at = Instant::now();
+    let search_span = tracing::info_span!(
+        "rag_search_chunks",
+        query_len = query.trim().chars().count(),
+        top_k,
+        min_score
+    );
+    let _search_span = search_span.enter();
     let trimmed_query = query.trim();
     if trimmed_query.is_empty() {
         bail!("query 不能为空");
@@ -120,6 +130,12 @@ pub async fn search_chunks(
     let filtered_hits = prune_search_hits(ranked_hits, top_k, min_score);
     let metadata_path = rag::rag_metadata_database_path(data_dir);
     let pending_indexing = rag::metadata_store_has_pending_rows(&metadata_path)?;
+    tracing::info!(
+        elapsed_ms = total_started_at.elapsed().as_millis(),
+        hit_count = filtered_hits.len(),
+        pending_indexing,
+        "rag search completed"
+    );
 
     Ok(RagSearchResult {
         query: trimmed_query.to_string(),
@@ -129,17 +145,52 @@ pub async fn search_chunks(
     })
 }
 
+fn rag_query_db_cache() -> &'static AsyncMutex<HashMap<String, LanceConnection>> {
+    static RAG_QUERY_DB_CACHE: OnceLock<AsyncMutex<HashMap<String, LanceConnection>>> =
+        OnceLock::new();
+
+    RAG_QUERY_DB_CACHE.get_or_init(|| AsyncMutex::new(HashMap::new()))
+}
+
+pub(crate) async fn invalidate_rag_query_db_cache(database_path: &Path) {
+    let normalized_path = database_path.to_string_lossy().into_owned();
+    let mut guard = rag_query_db_cache().lock().await;
+    let removed = guard.remove(&normalized_path).is_some();
+    tracing::debug!(
+        removed,
+        "invalidated cached LanceDB connection for RAG query"
+    );
+}
+
+async fn get_rag_query_db(database_path: &Path) -> Result<LanceConnection> {
+    let normalized_path = database_path.to_string_lossy().into_owned();
+    let mut guard = rag_query_db_cache().lock().await;
+    if let Some(db) = guard.get(&normalized_path) {
+        return Ok(db.clone());
+    }
+
+    let started_at = Instant::now();
+    let db = connect(&normalized_path)
+        .execute()
+        .await
+        .context("failed to open LanceDB database for RAG search")?;
+    tracing::info!(
+        elapsed_ms = started_at.elapsed().as_millis(),
+        "opened cached LanceDB connection for RAG query"
+    );
+    guard.insert(normalized_path, db.clone());
+    Ok(db)
+}
+
 async fn search_similar_chunks(
     data_dir: &Path,
     query: &str,
     embedding_provider: &LlmProviderConfig,
     top_k: usize,
 ) -> Result<Vec<RagSearchHit>> {
+    let vector_search_started_at = Instant::now();
     let database_path = rag::rag_database_path(data_dir);
-    let db = connect(database_path.to_string_lossy().as_ref())
-        .execute()
-        .await
-        .context("failed to open LanceDB database for RAG search")?;
+    let db = get_rag_query_db(&database_path).await?;
     let table_names = db
         .table_names()
         .execute()
@@ -202,6 +253,12 @@ async fn search_similar_chunks(
             .partial_cmp(&right.distance)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    tracing::info!(
+        elapsed_ms = vector_search_started_at.elapsed().as_millis(),
+        hit_count = hits.len(),
+        limit,
+        "rag vector search completed"
+    );
     Ok(hits)
 }
 
@@ -806,14 +863,23 @@ fn is_base64_like_chunk(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
     use crate::services::document_extract::DocumentKind;
 
     use super::{
         bm25_rank_to_score, build_lexical_match_query, distance_to_score, expanded_candidate_limit,
-        hybrid_candidate_score, is_base64_like_chunk, is_heading_only_chunk,
-        min_anchor_term_matches, min_lexical_presence, min_relevance_score, prune_search_hits,
-        rerank_search_hits, RagSearchHit, RankedSearchHit,
+        get_rag_query_db, hybrid_candidate_score, invalidate_rag_query_db_cache,
+        is_base64_like_chunk, is_heading_only_chunk, min_anchor_term_matches, min_lexical_presence,
+        min_relevance_score, prune_search_hits, rag_query_db_cache, rerank_search_hits,
+        RagSearchHit, RankedSearchHit,
     };
+
+    static NEXT_RAG_QUERY_CACHE_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
     fn test_search_hit(path: &str, text: impl Into<String>) -> RagSearchHit {
         RagSearchHit {
@@ -836,6 +902,42 @@ mod tests {
             lexical_score: 0.0,
             has_vector_signal: true,
         }
+    }
+
+    fn next_temp_rag_query_db_path() -> PathBuf {
+        let suffix = NEXT_RAG_QUERY_CACHE_TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or_default();
+        std::env::temp_dir().join(format!("wabity-rag-query-cache-{timestamp_ms}-{suffix}"))
+    }
+
+    #[tokio::test]
+    async fn invalidating_cached_rag_query_db_removes_cached_connection() {
+        let database_path = next_temp_rag_query_db_path();
+        tokio::fs::create_dir_all(&database_path)
+            .await
+            .expect("create temporary LanceDB directory");
+
+        get_rag_query_db(&database_path)
+            .await
+            .expect("open cached LanceDB connection");
+
+        let normalized_path = database_path.to_string_lossy().into_owned();
+        assert!(rag_query_db_cache()
+            .lock()
+            .await
+            .contains_key(&normalized_path));
+
+        invalidate_rag_query_db_cache(&database_path).await;
+
+        assert!(!rag_query_db_cache()
+            .lock()
+            .await
+            .contains_key(&normalized_path));
+
+        let _ = tokio::fs::remove_dir_all(&database_path).await;
     }
 
     #[test]

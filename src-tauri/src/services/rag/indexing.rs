@@ -2,12 +2,13 @@ use std::{
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::{atomic::AtomicU64, Arc},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use reqwest::Client as HttpClient;
+use tauri::AppHandle;
 use tokio::{
     sync::{mpsc, Mutex as AsyncMutex, RwLock as AsyncRwLock, Semaphore},
     task::JoinSet,
@@ -96,10 +97,12 @@ pub(super) enum PathUpdatePlan {
     Reindex(PreparedRagFile),
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn initialize_runtime_storage(
     data_dir: &Path,
     metadata_path: &Path,
     resolved: &ResolvedRagConfig,
+    app_handle: Option<&AppHandle>,
     runtime_status: &Arc<AsyncRwLock<RagRuntimeStatus>>,
     runtime_guard: Option<(&Arc<AtomicU64>, u64)>,
     storage_lock: &Arc<AsyncMutex<()>>,
@@ -107,7 +110,14 @@ pub(super) async fn initialize_runtime_storage(
 ) -> Result<()> {
     if start_mode == RagRuntimeStartMode::RebuildIndex {
         let _storage_guard = storage_lock.lock().await;
-        rebuild_index_locked(data_dir, resolved, runtime_status, runtime_guard).await?;
+        rebuild_index_locked(
+            app_handle,
+            data_dir,
+            resolved,
+            runtime_status,
+            runtime_guard,
+        )
+        .await?;
         return Ok(());
     }
 
@@ -116,6 +126,7 @@ pub(super) async fn initialize_runtime_storage(
 
     if metadata_store_has_active_records(metadata_path).await? {
         set_runtime_status(
+            app_handle,
             runtime_status,
             runtime_guard,
             RagRuntimePhase::Idle,
@@ -127,17 +138,27 @@ pub(super) async fn initialize_runtime_storage(
     }
 
     let _storage_guard = storage_lock.lock().await;
-    rebuild_index_locked(data_dir, resolved, runtime_status, runtime_guard).await?;
+    rebuild_index_locked(
+        app_handle,
+        data_dir,
+        resolved,
+        runtime_status,
+        runtime_guard,
+    )
+    .await?;
     Ok(())
 }
 
 pub(super) async fn rebuild_index_locked(
+    app_handle: Option<&AppHandle>,
     data_dir: &Path,
     resolved: &ResolvedRagConfig,
     runtime_status: &Arc<AsyncRwLock<RagRuntimeStatus>>,
     runtime_guard: Option<(&Arc<AtomicU64>, u64)>,
 ) -> Result<RagScanResult> {
+    let rebuild_started_at = Instant::now();
     set_runtime_status(
+        app_handle,
         runtime_status,
         runtime_guard,
         RagRuntimePhase::Scanning,
@@ -240,6 +261,7 @@ pub(super) async fn rebuild_index_locked(
                 }
 
                 set_rebuild_runtime_status(
+                    app_handle,
                     runtime_status,
                     runtime_guard,
                     plan.scanned_file_count,
@@ -256,6 +278,7 @@ pub(super) async fn rebuild_index_locked(
                 pending_file_count = pending_file_count.saturating_sub(1);
                 completed_file_count = completed_file_count.saturating_add(1);
                 set_rebuild_runtime_status(
+                    app_handle,
                     runtime_status,
                     runtime_guard,
                     plan.scanned_file_count,
@@ -299,6 +322,7 @@ pub(super) async fn rebuild_index_locked(
     vector_store.ensure_index().await?;
 
     set_runtime_status(
+        app_handle,
         runtime_status,
         runtime_guard,
         RagRuntimePhase::Idle,
@@ -306,6 +330,14 @@ pub(super) async fn rebuild_index_locked(
         None,
     )
     .await;
+    tracing::info!(
+        elapsed_ms = rebuild_started_at.elapsed().as_millis(),
+        scanned_file_count = plan.scanned_file_count,
+        indexed_file_count = plan.indexed_file_count,
+        skipped_file_count = plan.skipped_file_count,
+        chunk_count = plan.chunk_count,
+        "rag rebuild completed"
+    );
     Ok(build_scan_result(&database_path, resolved, &plan))
 }
 
@@ -478,6 +510,7 @@ async fn spawn_streaming_reindex_tasks(
 }
 
 async fn set_rebuild_runtime_status(
+    app_handle: Option<&AppHandle>,
     runtime_status: &Arc<AsyncRwLock<RagRuntimeStatus>>,
     runtime_guard: Option<(&Arc<AtomicU64>, u64)>,
     scanned_file_count: usize,
@@ -486,6 +519,7 @@ async fn set_rebuild_runtime_status(
 ) {
     let total_file_count = completed_file_count.saturating_add(pending_file_count);
     set_runtime_status(
+        app_handle,
         runtime_status,
         runtime_guard,
         if pending_file_count == 0 {
@@ -513,16 +547,24 @@ async fn write_metadata_records(
         return Ok(());
     }
 
+    let started_at = Instant::now();
+    let record_count = records.len();
     tokio::task::spawn_blocking({
         let metadata_path = metadata_path.to_path_buf();
         move || upsert_metadata_records(&metadata_path, &records)
     })
     .await
     .context(join_error_message)??;
+    tracing::info!(
+        record_count,
+        elapsed_ms = started_at.elapsed().as_millis(),
+        "rag metadata records persisted"
+    );
     Ok(())
 }
 
 pub(super) async fn execute_path_update_plans(
+    app_handle: Option<&AppHandle>,
     database_path: &Path,
     metadata_path: &Path,
     resolved: &ResolvedRagConfig,
@@ -614,6 +656,7 @@ pub(super) async fn execute_path_update_plans(
 
     if !files_to_index.is_empty() {
         set_runtime_status(
+            app_handle,
             runtime_status,
             runtime_guard,
             RagRuntimePhase::Indexing,
@@ -637,6 +680,7 @@ pub(super) async fn execute_path_update_plans(
                 .await?;
             let remaining = files_to_index.len().saturating_sub(index + 1);
             set_runtime_status(
+                app_handle,
                 runtime_status,
                 runtime_guard,
                 if remaining == 0 {
@@ -713,11 +757,13 @@ async fn persist_indexed_file(
     metadata_path: &Path,
     indexed: IndexedPreparedFile,
 ) -> Result<()> {
+    let persist_started_at = Instant::now();
     let IndexedPreparedFile {
         file,
         chunks,
         vectors,
     } = indexed;
+    let chunk_count = chunks.len();
 
     delete_vectors_with_filter(
         vector_store,
@@ -764,6 +810,11 @@ async fn persist_indexed_file(
     })
     .await
     .context("failed to join RAG metadata finalize task")??;
+    tracing::info!(
+        chunk_count,
+        elapsed_ms = persist_started_at.elapsed().as_millis(),
+        "rag indexed file persisted"
+    );
     Ok(())
 }
 
@@ -811,8 +862,15 @@ pub(super) async fn resolve_chunk_vectors(
     while start < remote_missing_inputs.len() {
         let end = batch_planner.next_batch_end(&remote_missing_inputs, start);
         let inputs = &remote_missing_inputs[start..end];
+        let embedding_started_at = Instant::now();
         let (vectors, embedding_stats) =
             request_embeddings_with_stats(client, &resolved.provider, inputs).await?;
+        tracing::info!(
+            batch_size = inputs.len(),
+            provider_id = %resolved.provider.id,
+            elapsed_ms = embedding_started_at.elapsed().as_millis(),
+            "rag embedding batch resolved for chunk vectors"
+        );
         for (offset, vector) in vectors.into_iter().enumerate() {
             let chunk_index = remote_missing_indexes[start + offset];
             resolved_vectors[chunk_index] = Some(vector);

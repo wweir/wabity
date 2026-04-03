@@ -50,6 +50,7 @@ pub(super) fn build_chat_assistant_tool_call_message(message: &Value) -> Value {
 
 pub(super) async fn request_chat_completions_turn(
     request_args: ChatCompletionsTurnRequest<'_>,
+    on_text_delta: Option<&mut (dyn FnMut(&str) + Send)>,
 ) -> Result<Value> {
     let client = OpenAiCompatibleClient::new_async(
         request_args.client,
@@ -57,21 +58,34 @@ pub(super) async fn request_chat_completions_turn(
         request_args.api_key,
         "LLM provider base URL",
     )?;
-    client
-        .post_json(
-            "/chat/completions",
-            &json!({
-                "model": request_args.model,
-                "messages": request_args.messages,
-                "tools": request_args.tool_catalog.request_tools,
-                "tool_choice": "auto",
-                "parallel_tool_calls": true,
-                "stream": false,
-            }),
-            "question answering from chat/completions API",
-            OpenAiCompatibleResponseFormat::Json,
-        )
-        .await
+    let body = json!({
+        "model": request_args.model,
+        "messages": request_args.messages,
+        "tools": request_args.tool_catalog.request_tools,
+        "tool_choice": "auto",
+        "parallel_tool_calls": true,
+        "stream": on_text_delta.is_some(),
+    });
+    if let Some(on_text_delta) = on_text_delta {
+        client
+            .post_json_with_text_stream(
+                "/chat/completions",
+                &body,
+                "question answering from chat/completions API",
+                OpenAiCompatibleResponseFormat::JsonOrSse,
+                on_text_delta,
+            )
+            .await
+    } else {
+        client
+            .post_json(
+                "/chat/completions",
+                &body,
+                "question answering from chat/completions API",
+                OpenAiCompatibleResponseFormat::JsonOrSse,
+            )
+            .await
+    }
 }
 
 pub(super) fn extract_chat_completion_message(payload: &Value) -> Result<Value> {

@@ -2,9 +2,13 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    path::{Path, PathBuf},
+    sync::OnceLock,
+    time::Instant,
+};
 
 use crate::domain::settings::LlmProviderConfig;
 use crate::infrastructure::openai_compatible::{
@@ -97,6 +101,22 @@ pub struct OpenAiCompatibleOcrProvider {
     client: reqwest::blocking::Client,
 }
 
+fn shared_async_ocr_http_client() -> Result<reqwest::Client> {
+    static OCR_HTTP_CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+
+    OCR_HTTP_CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(45))
+                .build()
+                .map_err(|error| {
+                    format!("failed to build HTTP client for OpenAI-compatible OCR: {error}")
+                })
+        })
+        .clone()
+        .map_err(|message| anyhow!(message.clone()))
+}
+
 impl OpenAiCompatibleOcrProvider {
     pub fn new(
         base_url: impl Into<String>,
@@ -142,6 +162,36 @@ impl OcrProvider for OpenAiCompatibleOcrProvider {
             request,
         )
     }
+}
+
+pub async fn recognize_with_openai_compatible_config(
+    config: &LlmProviderConfig,
+    request: &OcrRequest,
+) -> Result<OcrResult> {
+    validate_openai_compatible_ocr_config(config)?;
+    let model = config.model.trim();
+    let client = shared_async_ocr_http_client()?;
+    recognize_with_openai_compatible_async(
+        &client,
+        &config.base_url,
+        &config.api_key,
+        model,
+        request,
+    )
+    .await
+}
+
+fn validate_openai_compatible_ocr_config(config: &LlmProviderConfig) -> Result<()> {
+    if !config.resolved_profile().can_handle_ocr() {
+        bail!("OCR 选择的 LLM 配置未启用多模态能力");
+    }
+
+    let model = config.model.trim();
+    if model.is_empty() {
+        bail!("OpenAI-compatible OCR model must not be empty");
+    }
+
+    Ok(())
 }
 
 pub fn capture_interactive_screenshot() -> Result<Option<PathBuf>> {
@@ -287,6 +337,43 @@ fn recognize_with_openai_compatible(
         "OCR request to OpenAI-compatible endpoint",
         OpenAiCompatibleResponseFormat::JsonOrSse,
     )?;
+    Ok(map_openai_compatible_response_to_result(parsed))
+}
+
+async fn recognize_with_openai_compatible_async(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+    request: &OcrRequest,
+) -> Result<OcrResult> {
+    let started_at = Instant::now();
+    let image_path = Path::new(&request.image_path);
+    let image_data_url = encode_image_path_as_data_url(image_path)?;
+    let request_body = build_openai_compatible_ocr_request_body(model, &image_data_url);
+    let client =
+        OpenAiCompatibleClient::new_async(client, base_url, api_key, "OpenAI-compatible base URL")?;
+
+    tracing::debug!(
+        model,
+        image_path = %image_path.display(),
+        "sending OCR image to OpenAI-compatible multimodal model"
+    );
+
+    let parsed: Value = client
+        .post_json(
+            "/responses",
+            &request_body,
+            "OCR request to OpenAI-compatible endpoint",
+            OpenAiCompatibleResponseFormat::JsonOrSse,
+        )
+        .await?;
+    tracing::info!(
+        model,
+        elapsed_ms = started_at.elapsed().as_millis(),
+        image_path = %image_path.display(),
+        "openai-compatible OCR request completed"
+    );
     Ok(map_openai_compatible_response_to_result(parsed))
 }
 
@@ -481,9 +568,10 @@ mod tests {
         aggregate_text, average_confidence, block_for_focus_point,
         build_openai_compatible_ocr_request_body, encode_image_path_as_data_url,
         is_interactive_screenshot_cancelled, map_openai_compatible_response_to_result,
-        OcrBoundingBox, OcrPoint, OcrProvider, OcrRequest, OcrTextBlock,
-        OpenAiCompatibleOcrProvider, OPENAI_COMPATIBLE_OCR_PROMPT,
+        validate_openai_compatible_ocr_config, OcrBoundingBox, OcrPoint, OcrProvider, OcrRequest,
+        OcrTextBlock, OpenAiCompatibleOcrProvider, OPENAI_COMPATIBLE_OCR_PROMPT,
     };
+    use crate::domain::settings::{LlmModelType, LlmProviderConfig, LlmProviderProtocol};
     use crate::infrastructure::openai_compatible::{
         extract_provider_error_message, normalize_base_url,
     };
@@ -543,6 +631,25 @@ mod tests {
         blocks[1].confidence = None;
 
         assert_eq!(average_confidence(&blocks), Some(0.9));
+    }
+
+    #[test]
+    fn openai_compatible_ocr_config_rejects_provider_without_ocr_capability() {
+        let config = LlmProviderConfig {
+            id: "chat".to_string(),
+            name: "Chat".to_string(),
+            base_url: "https://api.example.com/v1".to_string(),
+            api_key: String::new(),
+            model_type: LlmModelType::Llm,
+            protocol: LlmProviderProtocol::ChatCompletions,
+            model: "qwen3-vl:8b".to_string(),
+            supports_multimodal: true,
+            ..LlmProviderConfig::default()
+        };
+
+        let error = validate_openai_compatible_ocr_config(&config).unwrap_err();
+
+        assert_eq!(error.to_string(), "OCR 选择的 LLM 配置未启用多模态能力");
     }
 
     #[test]

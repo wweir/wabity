@@ -12,6 +12,7 @@ use crate::{
 
 pub(super) async fn request_responses_turn(
     request_args: ResponsesTurnRequest<'_>,
+    on_text_delta: Option<&mut (dyn FnMut(&str) + Send)>,
 ) -> Result<Value> {
     let client = OpenAiCompatibleClient::new_async(
         request_args.client,
@@ -23,7 +24,7 @@ pub(super) async fn request_responses_turn(
         "model": request_args.model,
         "instructions": request_args.instructions,
         "input": request_args.input,
-        "stream": false,
+        "stream": on_text_delta.is_some(),
     });
     if !request_args.tool_catalog.request_tools.is_empty() {
         body["tools"] = Value::Array(request_args.tool_catalog.request_tools.clone());
@@ -33,14 +34,26 @@ pub(super) async fn request_responses_turn(
         body["previous_response_id"] = Value::String(previous_response_id.to_string());
     }
 
-    client
-        .post_json(
-            "/responses",
-            &body,
-            "question answering from responses API",
-            OpenAiCompatibleResponseFormat::JsonOrSse,
-        )
-        .await
+    if let Some(on_text_delta) = on_text_delta {
+        client
+            .post_json_with_text_stream(
+                "/responses",
+                &body,
+                "question answering from responses API",
+                OpenAiCompatibleResponseFormat::JsonOrSse,
+                on_text_delta,
+            )
+            .await
+    } else {
+        client
+            .post_json(
+                "/responses",
+                &body,
+                "question answering from responses API",
+                OpenAiCompatibleResponseFormat::JsonOrSse,
+            )
+            .await
+    }
 }
 
 pub(super) fn has_mcp_approval_request(payload: &Value) -> bool {

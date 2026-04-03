@@ -1,3 +1,5 @@
+use std::{sync::OnceLock, time::Instant};
+
 use anyhow::{Context, Result};
 use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
@@ -145,10 +147,17 @@ impl EmbeddingBatchPlanner {
 }
 
 pub(crate) fn build_embedding_client() -> Result<HttpClient> {
-    HttpClient::builder()
-        .timeout(EMBEDDING_REQUEST_TIMEOUT)
-        .build()
-        .context("failed to build embedding HTTP client")
+    static EMBEDDING_HTTP_CLIENT: OnceLock<Result<HttpClient, String>> = OnceLock::new();
+
+    EMBEDDING_HTTP_CLIENT
+        .get_or_init(|| {
+            HttpClient::builder()
+                .timeout(EMBEDDING_REQUEST_TIMEOUT)
+                .build()
+                .map_err(|error| format!("failed to build embedding HTTP client: {error}"))
+        })
+        .clone()
+        .map_err(|message| anyhow::anyhow!(message.clone()))
 }
 
 pub(crate) fn text_fingerprint(text: &str) -> String {
@@ -233,6 +242,7 @@ async fn request_embeddings_batch(
     provider: &LlmProviderConfig,
     inputs: &[String],
 ) -> Result<Vec<Vec<f32>>> {
+    let request_started_at = Instant::now();
     let client = OpenAiCompatibleClient::new_async(
         client,
         &provider.base_url,
@@ -250,6 +260,12 @@ async fn request_embeddings_batch(
             crate::infrastructure::openai_compatible::OpenAiCompatibleResponseFormat::Json,
         )
         .await?;
+    tracing::info!(
+        batch_size = inputs.len(),
+        provider_id = %provider.id,
+        elapsed_ms = request_started_at.elapsed().as_millis(),
+        "rag embedding request completed"
+    );
     Ok(parsed.data.into_iter().map(|item| item.embedding).collect())
 }
 

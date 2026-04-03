@@ -272,7 +272,7 @@ async fn request_answer(
                 base_url: context.base_url,
                 api_key: context.api_key,
                 model: context.model,
-                supports_stateful: context.provider.supports_stateful(),
+                supports_stateful: context.provider.resolved_profile().supports_stateful(),
                 system_prompt: context.system_prompt,
                 tool_catalog: &tool_catalog,
                 conversation: context.conversation,
@@ -378,6 +378,7 @@ async fn answer_with_responses(
         .conversation_state
         .map(|state| state.actions.clone())
         .unwrap_or_default();
+    let mut streaming_enabled = request.runtime.progress_event_tx.is_some();
     let mut round = 0usize;
 
     let final_answer = loop {
@@ -397,19 +398,56 @@ async fn answer_with_responses(
         } else {
             request.tool_catalog
         };
-        let response = match request_responses_turn(ResponsesTurnRequest {
-            client: request.client,
-            base_url: request.base_url,
-            api_key: request.api_key,
-            model: request.model,
-            instructions: request.system_prompt,
-            tool_catalog: active_tool_catalog,
-            previous_response_id: previous_response_id.as_deref(),
-            input: pending_input.clone(),
-        })
-        .await
-        {
+        let response = if streaming_enabled {
+            let mut streamed_answer = String::new();
+            let mut on_text_delta = |delta: &str| {
+                streamed_answer.push_str(delta);
+                emit_question_partial_answer(
+                    request.runtime.progress_event_tx.as_ref(),
+                    &streamed_answer,
+                );
+            };
+            request_responses_turn(
+                ResponsesTurnRequest {
+                    client: request.client,
+                    base_url: request.base_url,
+                    api_key: request.api_key,
+                    model: request.model,
+                    instructions: request.system_prompt,
+                    tool_catalog: active_tool_catalog,
+                    previous_response_id: previous_response_id.as_deref(),
+                    input: pending_input.clone(),
+                },
+                Some(&mut on_text_delta),
+            )
+            .await
+        } else {
+            request_responses_turn(
+                ResponsesTurnRequest {
+                    client: request.client,
+                    base_url: request.base_url,
+                    api_key: request.api_key,
+                    model: request.model,
+                    instructions: request.system_prompt,
+                    tool_catalog: active_tool_catalog,
+                    previous_response_id: previous_response_id.as_deref(),
+                    input: pending_input.clone(),
+                },
+                None,
+            )
+            .await
+        };
+        let response = match response {
             Ok(response) => response,
+            Err(error) if should_retry_without_stream(streaming_enabled, &error) => {
+                streaming_enabled = false;
+                clear_question_partial_answer(
+                    request.runtime.progress_event_tx.as_ref(),
+                    "文档问答 · 当前 provider 不兼容流式输出，已回退到非流式请求",
+                );
+                round = round.saturating_sub(1);
+                continue;
+            }
             Err(error)
                 if should_retry_without_response_chain(
                     round,
@@ -485,6 +523,10 @@ async fn answer_with_responses(
         let mcp_calls = extract_mcp_tool_calls(&response);
         let local_calls = extract_local_tool_calls(&response)?;
         if !mcp_calls.is_empty() || !local_calls.is_empty() {
+            clear_question_partial_answer(
+                request.runtime.progress_event_tx.as_ref(),
+                "文档问答 · 正在调用工具",
+            );
             actions.push(build_round_action(
                 round,
                 mcp_calls.len() + local_calls.len(),
@@ -617,6 +659,7 @@ async fn answer_with_chat_completions(
         .conversation_state
         .map(|state| state.actions.clone())
         .unwrap_or_default();
+    let mut streaming_enabled = request.runtime.progress_event_tx.is_some();
     let mut round = 0usize;
 
     let (final_answer, reasoning) = loop {
@@ -629,19 +672,62 @@ async fn answer_with_chat_completions(
                 "文档问答 · 正在等待模型继续分析"
             },
         );
-        let response = request_chat_completions_turn(ChatCompletionsTurnRequest {
-            client: request.client,
-            base_url: request.base_url,
-            api_key: request.api_key,
-            model: request.model,
-            tool_catalog: request.tool_catalog,
-            messages: &messages,
-        })
-        .await?;
+        let response = if streaming_enabled {
+            let mut streamed_answer = String::new();
+            let mut on_text_delta = |delta: &str| {
+                streamed_answer.push_str(delta);
+                emit_question_partial_answer(
+                    request.runtime.progress_event_tx.as_ref(),
+                    &streamed_answer,
+                );
+            };
+            request_chat_completions_turn(
+                ChatCompletionsTurnRequest {
+                    client: request.client,
+                    base_url: request.base_url,
+                    api_key: request.api_key,
+                    model: request.model,
+                    tool_catalog: request.tool_catalog,
+                    messages: &messages,
+                },
+                Some(&mut on_text_delta),
+            )
+            .await
+        } else {
+            request_chat_completions_turn(
+                ChatCompletionsTurnRequest {
+                    client: request.client,
+                    base_url: request.base_url,
+                    api_key: request.api_key,
+                    model: request.model,
+                    tool_catalog: request.tool_catalog,
+                    messages: &messages,
+                },
+                None,
+            )
+            .await
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err(error) if should_retry_without_stream(streaming_enabled, &error) => {
+                streaming_enabled = false;
+                clear_question_partial_answer(
+                    request.runtime.progress_event_tx.as_ref(),
+                    "文档问答 · 当前 provider 不兼容流式输出，已回退到非流式请求",
+                );
+                round = round.saturating_sub(1);
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let assistant_message = extract_chat_completion_message(&response)?;
         let local_calls = extract_chat_local_tool_calls(&assistant_message)?;
 
         if !local_calls.is_empty() {
+            clear_question_partial_answer(
+                request.runtime.progress_event_tx.as_ref(),
+                summarize_local_tool_progress(&local_calls),
+            );
             actions.push(build_round_action(round, local_calls.len()));
         } else if round > 1 {
             actions.push(AcpActionEvent {
@@ -752,6 +838,14 @@ fn emit_question_progress(
     progress_event_tx: Option<&Arc<dyn Fn(ExecutionProgressEvent) + Send + Sync>>,
     status_text: &str,
 ) {
+    emit_question_progress_with_partial(progress_event_tx, status_text, None);
+}
+
+fn emit_question_progress_with_partial(
+    progress_event_tx: Option<&Arc<dyn Fn(ExecutionProgressEvent) + Send + Sync>>,
+    status_text: &str,
+    partial_text: Option<String>,
+) {
     let Some(progress_event_tx) = progress_event_tx else {
         return;
     };
@@ -759,7 +853,45 @@ fn emit_question_progress(
     progress_event_tx(ExecutionProgressEvent {
         action_id: "rag_answer".to_string(),
         status_text: status_text.to_string(),
+        partial_text,
     });
+}
+
+fn emit_question_partial_answer(
+    progress_event_tx: Option<&Arc<dyn Fn(ExecutionProgressEvent) + Send + Sync>>,
+    partial_text: &str,
+) {
+    emit_question_progress_with_partial(
+        progress_event_tx,
+        "文档问答 · 正在输出回答",
+        Some(partial_text.to_string()),
+    );
+}
+
+fn clear_question_partial_answer(
+    progress_event_tx: Option<&Arc<dyn Fn(ExecutionProgressEvent) + Send + Sync>>,
+    status_text: &str,
+) {
+    emit_question_progress_with_partial(progress_event_tx, status_text, Some(String::new()));
+}
+
+fn should_retry_without_stream(streaming_enabled: bool, error: &anyhow::Error) -> bool {
+    if !streaming_enabled {
+        return false;
+    }
+
+    let message = error.to_string().to_ascii_lowercase();
+    (message.contains("stream") || message.contains("sse"))
+        && [
+            "unsupported",
+            "not supported",
+            "does not support",
+            "disabled",
+            "invalid",
+            "unexpected",
+        ]
+        .iter()
+        .any(|needle| message.contains(needle))
 }
 
 fn summarize_local_tool_progress(local_calls: &[LocalToolCall]) -> &'static str {
@@ -806,7 +938,7 @@ fn answer_protocol(provider: &LlmProviderConfig) -> QuestionAnswerProtocol {
 fn protocol_label(protocol: QuestionAnswerProtocol, provider: &LlmProviderConfig) -> String {
     match protocol {
         QuestionAnswerProtocol::Responses => {
-            if provider.supports_stateful() {
+            if provider.resolved_profile().supports_stateful() {
                 "responses(stateful)".to_string()
             } else {
                 "responses(stateless)".to_string()

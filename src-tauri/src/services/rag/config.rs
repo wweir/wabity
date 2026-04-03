@@ -256,13 +256,13 @@ pub(crate) fn resolve_embedding_provider<'a>(
         .iter()
         .find(|provider| provider.id == provider_id)
         .with_context(|| format!("RAG 选择的 embedding provider 不存在: {provider_id}"))?;
-    if !provider.has_embedding_model() {
+    if !provider.resolved_profile().can_handle_embedding() {
         bail!("RAG 只接受启用了 embedding 能力的 provider");
     }
     if provider.base_url.trim().is_empty() {
         bail!("RAG embedding provider base URL 不能为空");
     }
-    if provider.embedding_model_name().is_none() {
+    if provider.resolved_profile().model_name().is_none() {
         bail!("RAG embedding provider model 不能为空");
     }
 
