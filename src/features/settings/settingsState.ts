@@ -228,8 +228,54 @@ export function createDefaultAppSettings(): AppSettings {
 function formatDirectCommand(program: string, args: string[]) {
 	return [program, ...args]
 		.filter((value) => value.trim().length > 0)
-		.map((value) => (/[\s"]/u.test(value) ? JSON.stringify(value) : value))
+		.map(quoteDirectCommandArgument)
 		.join(" ");
+}
+
+function quoteDirectCommandArgument(value: string) {
+	if (!value) {
+		return '""';
+	}
+
+	if (isWindowsPlatform()) {
+		return quoteWindowsCommandArgument(value);
+	}
+
+	return /[\s"'\\]/u.test(value) ? `'${value.replace(/'/gu, `'"'"'`)}'` : value;
+}
+
+function quoteWindowsCommandArgument(value: string) {
+	if (!/[\s"]/u.test(value)) {
+		return value;
+	}
+
+	let quoted = '"';
+	let backslashes = 0;
+	for (const char of value) {
+		if (char === "\\") {
+			backslashes += 1;
+			continue;
+		}
+
+		if (char === '"') {
+			quoted += "\\".repeat(backslashes * 2 + 1);
+			quoted += '"';
+			backslashes = 0;
+			continue;
+		}
+
+		quoted += "\\".repeat(backslashes);
+		quoted += char;
+		backslashes = 0;
+	}
+
+	quoted += "\\".repeat(backslashes * 2);
+	quoted += '"';
+	return quoted;
+}
+
+function isWindowsPlatform() {
+	return typeof navigator !== "undefined" && /Windows/iu.test(navigator.userAgent);
 }
 
 export function deriveProgramFromCommand(command: string) {

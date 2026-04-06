@@ -16,9 +16,6 @@ import {
 	listLlmProviderModels,
 	onShortcutUpdated,
 	scanRagSources,
-	setAppSettings,
-	setAcpAgents,
-	setAcpMcpServers,
 	setShortcut,
 	defaultRagIgnoreGlobs,
 } from "../../lib/tauri/client";
@@ -59,7 +56,6 @@ import {
 	getMcpTransportMeta,
 	getSettingsPanelId,
 	getSettingsTabId,
-	settingsQuickLinks,
 	settingsSections,
 } from "./settingsShared";
 import {
@@ -98,9 +94,6 @@ import {
 	buildSavedMcpDraftState,
 	buildSavedRagDraftState,
 	buildTranslationTaskDraftSnapshot,
-	cloneLlmProviderDraft,
-	cloneSavedAcpDraftState,
-	cloneSavedMcpDraftState,
 	createAgentDraft,
 	createDefaultAppSettings,
 	createDefaultGeneralSettings,
@@ -113,7 +106,6 @@ import {
 	createLlmProviderDraft,
 	createMcpServerDraft,
 	createMcpServerDraftFromConfig,
-	deriveProgramFromCommand,
 	detachBuiltinTemplateFromProvider,
 	extraRagIgnoreGlobPlaceholder,
 	findBuiltinTemplate,
@@ -142,7 +134,6 @@ import {
 	reconcileRagSettings,
 	resolveRagDirectoryPickerDefaultPath,
 	selectExistingIdOrFirst,
-	serializeMcpServerDraft,
 	splitExtraRagIgnoreGlobs,
 	summarizeLlmProviderProfile,
 	validateAcpAgents,
@@ -150,6 +141,8 @@ import {
 	validateMcpServers,
 	validateRagSettings,
 } from "./settingsState";
+import { useSettingsPersistence } from "./useSettingsPersistence";
+import { useSettingsSectionNavigation } from "./useSettingsSectionNavigation";
 import "./settings.css";
 
 interface SettingsPageProps {
@@ -242,14 +235,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 	// Track which shortcut is being edited
 	const [editingShortcut, setEditingShortcut] = useState<keyof ShortcutConfig | null>(null);
 	const [savingShortcutKey, setSavingShortcutKey] = useState<keyof ShortcutConfig | null>(null);
-	const [savingSettings, setSavingSettings] = useState(false);
-	const [savingTranslationConfig, setSavingTranslationConfig] = useState(false);
-	const [savingQuestionAnswerConfig, setSavingQuestionAnswerConfig] = useState(false);
-	const [savingLlm, setSavingLlm] = useState(false);
-	const [savingOcr, setSavingOcr] = useState(false);
-	const [savingRag, setSavingRag] = useState(false);
 	const [scanningRag, setScanningRag] = useState(false);
-	const [savingMcp, setSavingMcp] = useState(false);
 	const [mcpPanelMode, setMcpPanelMode] = useState<McpPanelMode>("create");
 	const [settingsError, setSettingsError] = useState<string | null>(null);
 	const acpFieldRefs = useRef<
@@ -264,113 +250,26 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		ignoreGlobs: null,
 	});
 	const llmModelMenuRef = useRef<HTMLDivElement | null>(null);
-	const sectionTabRefs = useRef<Record<SettingsSectionId, HTMLButtonElement | null>>({
-		general: null,
-		prompts: null,
-		llm: null,
-		rag: null,
-		acp: null,
-		mcp: null,
-		skills: null,
-		about: null,
-	});
-	const sectionBlockRefs = useRef<Record<string, HTMLElement | null>>({});
-	const contentRef = useRef<HTMLDivElement | null>(null);
 	const shellRef = useRef<HTMLElement | null>(null);
 	const frameSize = useSettingsWindowFrame(shellRef);
 	const showLlmOcrFields = ocrSettings.provider === "llm_ocr";
 	const ragSourceDirectoryPlaceholder = resolveDocumentsDirectoryPath(workspaceContext);
 	const ragDirectoryPickerDefaultPath = resolveRagDirectoryPickerDefaultPath(workspaceContext);
-	const activeQuickLinks = settingsQuickLinks[activeSection];
-	const [activeSectionBlockId, setActiveSectionBlockId] = useState<string | null>(
-		settingsQuickLinks.general[0]?.id ?? null,
-	);
-
-	function handleSectionTabKeyDown(
-		event: ReactKeyboardEvent<HTMLButtonElement>,
-		sectionId: SettingsSectionId,
-	) {
-		const currentIndex = settingsSections.findIndex((section) => section.id === sectionId);
-		if (currentIndex < 0) {
-			return;
-		}
-
-		let nextIndex: number | null = null;
-		switch (event.key) {
-			case "ArrowRight":
-			case "ArrowDown":
-				nextIndex = (currentIndex + 1) % settingsSections.length;
-				break;
-			case "ArrowLeft":
-			case "ArrowUp":
-				nextIndex = (currentIndex - 1 + settingsSections.length) % settingsSections.length;
-				break;
-			case "Home":
-				nextIndex = 0;
-				break;
-			case "End":
-				nextIndex = settingsSections.length - 1;
-				break;
-			default:
-				return;
-		}
-
-		event.preventDefault();
-		const nextSectionId = settingsSections[nextIndex]?.id;
-		if (!nextSectionId) {
-			return;
-		}
-
-		setActiveSection(nextSectionId);
-		sectionTabRefs.current[nextSectionId]?.focus();
-	}
-
-	function bindSectionBlockRef(blockId: string) {
-		return (element: HTMLElement | null) => {
-			sectionBlockRefs.current[blockId] = element;
-		};
-	}
-
-	function scrollToSectionBlock(blockId: string) {
-		const target = sectionBlockRefs.current[blockId];
-		if (!target) {
-			return;
-		}
-
-		const prefersReducedMotion =
-			typeof window !== "undefined" &&
-			typeof window.matchMedia === "function" &&
-			window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-
-		setActiveSectionBlockId(blockId);
-
-		target.scrollIntoView({
-			behavior: prefersReducedMotion ? "auto" : "smooth",
-			block: "start",
-			inline: "nearest",
-		});
-	}
-
-	function handleViewSkill(skillId: string) {
-		setSelectedSkillId(skillId);
-		scrollToSectionBlock("skills-detail");
-	}
-
-	function handleSelectSection(sectionId: SettingsSectionId) {
-		setActiveSection(sectionId);
-
-		const firstBlockId = settingsQuickLinks[sectionId][0]?.id ?? null;
-		setActiveSectionBlockId(firstBlockId);
-
-		const root = contentRef.current;
-		if (!root) {
-			return;
-		}
-
-		root.scrollTo({
-			top: 0,
-		});
-	}
+	const {
+		activeQuickLinks,
+		activeSectionBlockId,
+		bindSectionBlockRef,
+		contentRef,
+		handleSectionTabKeyDown,
+		handleSelectSection,
+		handleViewSkill,
+		scrollToSectionBlock,
+		sectionTabRefs,
+	} = useSettingsSectionNavigation({
+		activeSection,
+		setActiveSection,
+		setSelectedSkillId,
+	});
 
 	function applyAgentDrafts(nextAgents: AcpAgentDraft[], nextSelectedAgentId: string | null) {
 		setAcpAgentsState(nextAgents);
@@ -994,60 +893,11 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		}
 	}, [selectedSkillId, skillCatalog.skills]);
 
-	useEffect(() => {
-		setActiveSectionBlockId(settingsQuickLinks[activeSection][0]?.id ?? null);
-	}, [activeSection]);
-
-	useEffect(() => {
-		const root = contentRef.current;
-		if (!root) {
-			return;
-		}
-
-		const observedBlocks = activeQuickLinks
-			.map((link) => sectionBlockRefs.current[link.id])
-			.filter((element): element is HTMLElement => element instanceof HTMLElement);
-
-		if (observedBlocks.length === 0) {
-			return;
-		}
-
-		const observer = new IntersectionObserver(
-			(entries) => {
-				const candidate = entries
-					.filter((entry) => entry.isIntersecting)
-					.sort(
-						(left, right) =>
-							right.intersectionRatio - left.intersectionRatio ||
-							left.boundingClientRect.top - right.boundingClientRect.top,
-					)[0];
-
-				if (!(candidate?.target instanceof HTMLElement)) {
-					return;
-				}
-
-				const nextBlockId = candidate.target.id;
-				setActiveSectionBlockId((current) => (current === nextBlockId ? current : nextBlockId));
-			},
-			{
-				root,
-				rootMargin: "-12% 0px -58% 0px",
-				threshold: [0.2, 0.4, 0.65],
-			},
-		);
-
-		observedBlocks.forEach((block) => observer.observe(block));
-		return () => {
-			observer.disconnect();
-		};
-	}, [activeQuickLinks]);
-
 	const handleShortcutClick = (key: keyof ShortcutConfig) => {
 		setEditingShortcut(key);
 	};
 
 	const isRecording = (key: keyof ShortcutConfig) => editingShortcut === key;
-	const [savingAgent, setSavingAgent] = useState(false);
 	const llmValidation = validateLlmSettings(llmSettings, builtinLlmTemplates);
 	const ragValidation = validateRagSettings(ragSettings, llmSettings);
 	const acpValidation = validateAcpAgents(acpAgents);
@@ -1078,6 +928,89 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 	);
 	const questionAnswerHasUnsavedChanges =
 		questionAnswerTaskDraftSnapshot !== persistedQuestionAnswerTaskDraftSnapshot;
+	const {
+		handleDiscardAcpDraft,
+		handleDiscardLlmDraft,
+		handleDiscardMcpDraft,
+		handleDiscardQuestionAnswerDraft,
+		handleDiscardRagDraft,
+		handleDiscardTranslationDraft,
+		handleSaveAgent,
+		handleSaveLlm,
+		handleSaveMcp,
+		handleSaveOcr,
+		handleSaveQuestionAnswerConfig,
+		handleSaveRag,
+		handleSaveTranslationConfig,
+		saveAppSettings,
+		saveNotificationSettings,
+		savingAgent,
+		savingLlm,
+		savingMcp,
+		savingOcr,
+		savingQuestionAnswerConfig,
+		savingRag,
+		savingSettings,
+		savingTranslationConfig,
+	} = useSettingsPersistence({
+		acpAgents,
+		acpValidationIssueCount: acpValidation.totalIssues,
+		appearanceSettings,
+		applyAgentDrafts,
+		applyMcpServerDrafts,
+		builtinMcpConfig,
+		defaultAgentId,
+		generalSettings,
+		llmSettings,
+		llmValidationIssueCount: llmValidation.totalIssues,
+		locateFirstAcpIssue,
+		locateFirstLlmIssue,
+		locateFirstMcpIssue,
+		locateFirstRagIssue,
+		mcpServers,
+		mcpValidationIssueCount: mcpValidation.totalIssues,
+		ocrSettings,
+		persistedAppSettings,
+		promptsSettings,
+		ragSettings,
+		ragValidationIssueCount: ragValidation.totalIssues,
+		savedAcpSnapshot,
+		savedAcpState,
+		savedLlmSnapshot,
+		savedMcpSnapshot,
+		savedMcpState,
+		selectedAgentId,
+		selectedLlmProviderId,
+		selectedMcpServerId,
+		setAcpNotice,
+		setAppearanceSettings,
+		setBuiltinMcpConfig,
+		setDefaultAgentId,
+		setGeneralSettings,
+		setLlmModelErrors,
+		setLlmModelOptions,
+		setLlmSettings,
+		setLoadingLlmModelProviderId,
+		setMcpNotice,
+		setMcpPanelMode,
+		setNotificationSettings,
+		setOcrSettings,
+		setOpenLlmModelPickerId,
+		setPersistedAppSettings,
+		setPromptsSettings,
+		setRagSettings,
+		setSavedAcpSnapshot,
+		setSavedAcpState,
+		setSavedLlmSnapshot,
+		setSavedLlmState,
+		setSavedMcpSnapshot,
+		setSavedMcpState,
+		setSavedRagSnapshot,
+		setSavedRagState,
+		setSelectedLlmProviderId,
+		setSettingsError,
+		syncAppearanceState,
+	});
 	const savingAiTaskConfig = savingTranslationConfig || savingQuestionAnswerConfig;
 	const llmDraftSnapshot = buildLlmDraftSnapshot(llmSettings);
 	const llmHasUnsavedChanges = llmDraftSnapshot !== savedLlmSnapshot;
@@ -1347,449 +1280,6 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 			ragValidation.fieldIssues[nextField] ?? ragValidation.issues[0] ?? "RAG 配置不合法",
 		);
 		focusRagField(nextField);
-	}
-
-	async function handleSaveAgent() {
-		if (acpValidation.totalIssues > 0) {
-			locateFirstAcpIssue();
-			return;
-		}
-
-		setSavingAgent(true);
-		setSettingsError(null);
-		setAcpNotice(null);
-		try {
-			const preservedDefaultAgentId =
-				defaultAgentId && acpAgents.some((agent) => agent.id === defaultAgentId)
-					? defaultAgentId
-					: null;
-			const normalizedAgents = acpAgents.map((agent) => ({
-				id: agent.id,
-				name: agent.name.trim(),
-				program: deriveProgramFromCommand(agent.command),
-				args: [],
-				shellCommand: agent.command.trim() || null,
-				launchMode: agent.launchMode,
-			}));
-			const nextCatalog = await setAcpAgents(normalizedAgents, preservedDefaultAgentId);
-			const nextDraftAgents = nextCatalog.agents.map((agent) => ({
-				id: agent.id,
-				name: agent.name,
-				command: buildAgentCommand(agent),
-				launchMode: agent.launchMode,
-			}));
-			const nextDefaultAgentId = nextCatalog.defaultAgentId ?? nextCatalog.agents[0]?.id ?? null;
-			setDefaultAgentId(nextDefaultAgentId);
-			applyAgentDrafts(
-				nextDraftAgents,
-				nextDraftAgents.some((agent) => agent.id === selectedAgentId)
-					? selectedAgentId
-					: (nextDraftAgents[0]?.id ?? null),
-			);
-			setSavedAcpSnapshot(buildAcpDraftSnapshot(nextDraftAgents));
-			setSavedAcpState(buildSavedAcpDraftState(nextDraftAgents, nextDefaultAgentId));
-		} catch (error: unknown) {
-			setSettingsError(getErrorMessage(error, "ACP 配置保存失败"));
-		} finally {
-			setSavingAgent(false);
-		}
-	}
-
-	async function handleSaveMcp() {
-		if (mcpValidation.totalIssues > 0) {
-			locateFirstMcpIssue();
-			return;
-		}
-
-		setSavingMcp(true);
-		setSettingsError(null);
-		setMcpNotice(null);
-		try {
-			const nextCatalog = await setAcpMcpServers(
-				mcpServers.map(serializeMcpServerDraft),
-				builtinMcpConfig,
-			);
-			const nextDraftServers = nextCatalog.servers.map(createMcpServerDraftFromConfig);
-			const nextSelectedServerId = nextDraftServers.some(
-				(server) => server.id === selectedMcpServerId,
-			)
-				? selectedMcpServerId
-				: (nextDraftServers[0]?.id ?? null);
-			applyMcpServerDrafts(nextDraftServers, nextSelectedServerId);
-			setMcpPanelMode(nextSelectedServerId ? "edit" : "create");
-			setBuiltinMcpConfig(nextCatalog.builtin);
-			setSavedMcpSnapshot(buildMcpDraftSnapshot(nextDraftServers, nextCatalog.builtin));
-			setSavedMcpState(buildSavedMcpDraftState(nextDraftServers, nextCatalog.builtin));
-		} catch (error: unknown) {
-			setSettingsError(getErrorMessage(error, "MCP 配置保存失败"));
-		} finally {
-			setSavingMcp(false);
-		}
-	}
-
-	function handleDiscardTranslationDraft() {
-		setPromptsSettings((current) => ({
-			...current,
-			translationPrompt: persistedAppSettings.prompts.translationPrompt,
-		}));
-		setLlmSettings((current) =>
-			reconcileLlmSettings({
-				...current,
-				translationProviderId: persistedAppSettings.llm.translationProviderId,
-			}),
-		);
-		setSettingsError(null);
-	}
-
-	function handleDiscardQuestionAnswerDraft() {
-		setPromptsSettings((current) => ({
-			...current,
-			ragAnswerSystemPrompt: persistedAppSettings.prompts.ragAnswerSystemPrompt,
-		}));
-		setLlmSettings((current) =>
-			reconcileLlmSettings({
-				...current,
-				questionAnswerProviderId: persistedAppSettings.llm.questionAnswerProviderId,
-			}),
-		);
-		setSettingsError(null);
-	}
-
-	function handleDiscardLlmDraft() {
-		setLlmSettings((current) =>
-			reconcileLlmSettings({
-				...current,
-				providers: persistedAppSettings.llm.providers.map(cloneLlmProviderDraft),
-			}),
-		);
-		setSelectedLlmProviderId(
-			persistedAppSettings.llm.providers.some((provider) => provider.id === selectedLlmProviderId)
-				? selectedLlmProviderId
-				: (persistedAppSettings.llm.providers[0]?.id ?? null),
-		);
-		setLlmModelOptions({});
-		setLlmModelErrors({});
-		setLoadingLlmModelProviderId(null);
-		setOpenLlmModelPickerId(null);
-		setSettingsError(null);
-	}
-
-	function handleDiscardRagDraft() {
-		setRagSettings(
-			reconcileRagSettings(
-				{
-					sourceDirectories: [...persistedAppSettings.rag.sourceDirectories],
-					ignoreGlobs: [...persistedAppSettings.rag.ignoreGlobs],
-					embeddingProviderId: persistedAppSettings.rag.embeddingProviderId,
-				},
-				llmSettings.providers,
-			),
-		);
-		setSettingsError(null);
-	}
-
-	function handleDiscardAcpDraft() {
-		const restored = cloneSavedAcpDraftState(savedAcpState);
-		setAcpNotice(null);
-		setDefaultAgentId(restored.defaultAgentId);
-		applyAgentDrafts(
-			restored.agents,
-			restored.agents.some((agent) => agent.id === selectedAgentId)
-				? selectedAgentId
-				: (restored.agents[0]?.id ?? null),
-		);
-		setSettingsError(null);
-	}
-
-	function handleDiscardMcpDraft() {
-		const restored = cloneSavedMcpDraftState(savedMcpState);
-		setMcpNotice(null);
-		setBuiltinMcpConfig(restored.builtin);
-		const nextSelectedServerId = restored.servers.some(
-			(server) => server.id === selectedMcpServerId,
-		)
-			? selectedMcpServerId
-			: (restored.servers[0]?.id ?? null);
-		applyMcpServerDrafts(restored.servers, nextSelectedServerId);
-		setMcpPanelMode(nextSelectedServerId ? "edit" : "create");
-		setSettingsError(null);
-	}
-
-	async function saveAppSettings(
-		nextGeneral: GeneralSettings,
-		nextNotification: NotificationSettings,
-		nextAppearance: AppearanceSettings,
-	) {
-		await persistAppSettings(
-			{
-				general: nextGeneral,
-				notification: nextNotification,
-				appearance: nextAppearance,
-				prompts: persistedAppSettings.prompts,
-				llm: persistedAppSettings.llm,
-				ocr: persistedAppSettings.ocr,
-				rag: persistedAppSettings.rag,
-			},
-			setSavingSettings,
-			"设置保存失败",
-			{
-				adoptPromptKeys: [],
-				adoptLlmProviders: false,
-				adoptLlmRouteKeys: [],
-				adoptProviderDependencies: false,
-				adoptOcr: false,
-				adoptRag: false,
-			},
-		);
-	}
-
-	async function saveNotificationSettings(nextNotification: NotificationSettings) {
-		await saveAppSettings(generalSettings, nextNotification, appearanceSettings);
-	}
-
-	async function handleSaveTranslationConfig() {
-		await persistAppSettings(
-			{
-				general: persistedAppSettings.general,
-				notification: persistedAppSettings.notification,
-				appearance: persistedAppSettings.appearance,
-				prompts: {
-					translationPrompt: promptsSettings.translationPrompt,
-					ragAnswerSystemPrompt: persistedAppSettings.prompts.ragAnswerSystemPrompt,
-				},
-				llm: {
-					...persistedAppSettings.llm,
-					translationProviderId: llmSettings.translationProviderId,
-				},
-				ocr: persistedAppSettings.ocr,
-				rag: persistedAppSettings.rag,
-			},
-			setSavingTranslationConfig,
-			"翻译配置保存失败",
-			{
-				adoptPromptKeys: ["translationPrompt"],
-				adoptLlmProviders: false,
-				adoptLlmRouteKeys: ["translationProviderId"],
-				adoptProviderDependencies: false,
-				adoptOcr: false,
-				adoptRag: false,
-			},
-		);
-	}
-
-	async function handleSaveQuestionAnswerConfig() {
-		await persistAppSettings(
-			{
-				general: persistedAppSettings.general,
-				notification: persistedAppSettings.notification,
-				appearance: persistedAppSettings.appearance,
-				prompts: {
-					translationPrompt: persistedAppSettings.prompts.translationPrompt,
-					ragAnswerSystemPrompt: promptsSettings.ragAnswerSystemPrompt,
-				},
-				llm: {
-					...persistedAppSettings.llm,
-					questionAnswerProviderId: llmSettings.questionAnswerProviderId,
-				},
-				ocr: persistedAppSettings.ocr,
-				rag: persistedAppSettings.rag,
-			},
-			setSavingQuestionAnswerConfig,
-			"文档问答配置保存失败",
-			{
-				adoptPromptKeys: ["ragAnswerSystemPrompt"],
-				adoptLlmProviders: false,
-				adoptLlmRouteKeys: ["questionAnswerProviderId"],
-				adoptProviderDependencies: false,
-				adoptOcr: false,
-				adoptRag: false,
-			},
-		);
-	}
-
-	async function handleSaveLlm() {
-		if (llmValidation.totalIssues > 0) {
-			locateFirstLlmIssue();
-			return;
-		}
-
-		await persistAppSettings(
-			{
-				general: persistedAppSettings.general,
-				notification: persistedAppSettings.notification,
-				appearance: persistedAppSettings.appearance,
-				prompts: persistedAppSettings.prompts,
-				llm: {
-					providers: llmSettings.providers,
-					translationProviderId: persistedAppSettings.llm.translationProviderId,
-					questionAnswerProviderId: persistedAppSettings.llm.questionAnswerProviderId,
-				},
-				ocr: persistedAppSettings.ocr,
-				rag: persistedAppSettings.rag,
-			},
-			setSavingLlm,
-			"模型接入配置保存失败",
-			{
-				adoptPromptKeys: [],
-				adoptLlmProviders: true,
-				adoptLlmRouteKeys: [],
-				adoptProviderDependencies: true,
-				adoptOcr: false,
-				adoptRag: false,
-			},
-		);
-	}
-
-	async function handleSaveOcr() {
-		await persistAppSettings(
-			{
-				general: persistedAppSettings.general,
-				notification: persistedAppSettings.notification,
-				appearance: persistedAppSettings.appearance,
-				prompts: persistedAppSettings.prompts,
-				llm: persistedAppSettings.llm,
-				ocr: ocrSettings,
-				rag: persistedAppSettings.rag,
-			},
-			setSavingOcr,
-			"OCR 配置保存失败",
-			{
-				adoptPromptKeys: [],
-				adoptLlmProviders: false,
-				adoptLlmRouteKeys: [],
-				adoptProviderDependencies: false,
-				adoptOcr: true,
-				adoptRag: false,
-			},
-		);
-	}
-
-	async function handleSaveRag() {
-		if (ragValidation.totalIssues > 0) {
-			locateFirstRagIssue();
-			return;
-		}
-
-		await persistAppSettings(
-			{
-				general: persistedAppSettings.general,
-				notification: persistedAppSettings.notification,
-				appearance: persistedAppSettings.appearance,
-				prompts: persistedAppSettings.prompts,
-				llm: persistedAppSettings.llm,
-				ocr: persistedAppSettings.ocr,
-				rag: ragSettings,
-			},
-			setSavingRag,
-			"RAG 配置保存失败",
-			{
-				adoptPromptKeys: [],
-				adoptLlmProviders: false,
-				adoptLlmRouteKeys: [],
-				adoptProviderDependencies: false,
-				adoptOcr: false,
-				adoptRag: true,
-			},
-		);
-	}
-
-	async function persistAppSettings(
-		nextSettings: AppSettings,
-		setSaving: (value: boolean) => void,
-		fallbackMessage: string,
-		options: {
-			adoptPromptKeys: Array<keyof PromptsSettings>;
-			adoptLlmProviders: boolean;
-			adoptLlmRouteKeys: Array<"translationProviderId" | "questionAnswerProviderId">;
-			adoptProviderDependencies: boolean;
-			adoptOcr: boolean;
-			adoptRag: boolean;
-		},
-	) {
-		setSaving(true);
-		setSettingsError(null);
-		try {
-			const saved = await setAppSettings(nextSettings);
-			const nextSavedLlmSettings = reconcileLlmSettings(saved.llm);
-			setGeneralSettings(saved.general);
-			setNotificationSettings(saved.notification);
-			syncAppearanceState(saved.appearance);
-			if (options.adoptPromptKeys.length > 0) {
-				setPromptsSettings((current) => ({
-					...current,
-					...Object.fromEntries(options.adoptPromptKeys.map((key) => [key, saved.prompts[key]])),
-				}));
-			}
-			if (
-				options.adoptLlmProviders ||
-				options.adoptLlmRouteKeys.length > 0 ||
-				options.adoptProviderDependencies
-			) {
-				setLlmSettings((current) =>
-					reconcileLlmSettings({
-						providers: options.adoptLlmProviders
-							? nextSavedLlmSettings.providers
-							: current.providers,
-						translationProviderId:
-							options.adoptProviderDependencies ||
-							options.adoptLlmRouteKeys.includes("translationProviderId")
-								? nextSavedLlmSettings.translationProviderId
-								: current.translationProviderId,
-						questionAnswerProviderId:
-							options.adoptProviderDependencies ||
-							options.adoptLlmRouteKeys.includes("questionAnswerProviderId")
-								? nextSavedLlmSettings.questionAnswerProviderId
-								: current.questionAnswerProviderId,
-					}),
-				);
-			}
-			if (options.adoptProviderDependencies) {
-				setOcrSettings((current) =>
-					reconcileOcrSettings(
-						{
-							...current,
-							llmProviderId: saved.ocr.llmProviderId,
-						},
-						saved.llm.providers,
-					),
-				);
-				setRagSettings((current) =>
-					reconcileRagSettings(
-						{
-							...current,
-							embeddingProviderId: saved.rag.embeddingProviderId,
-						},
-						saved.llm.providers,
-					),
-				);
-			}
-			if (options.adoptLlmProviders) {
-				setSelectedLlmProviderId(
-					nextSavedLlmSettings.providers.some((provider) => provider.id === selectedLlmProviderId)
-						? selectedLlmProviderId
-						: (nextSavedLlmSettings.providers[0]?.id ?? null),
-				);
-				setSavedLlmSnapshot(buildLlmDraftSnapshot(nextSavedLlmSettings));
-				setSavedLlmState(buildSavedLlmDraftState(nextSavedLlmSettings.providers));
-			}
-			if (options.adoptOcr) {
-				setOcrSettings(saved.ocr);
-			}
-			if (options.adoptRag) {
-				const nextRagSettings = reconcileRagSettings(saved.rag, nextSavedLlmSettings.providers);
-				setRagSettings(nextRagSettings);
-				setSavedRagSnapshot(buildRagDraftSnapshot(nextRagSettings));
-				setSavedRagState(buildSavedRagDraftState(nextRagSettings));
-			}
-			setPersistedAppSettings({
-				...saved,
-				llm: nextSavedLlmSettings,
-			});
-		} catch (error: unknown) {
-			setSettingsError(getErrorMessage(error, fallbackMessage));
-		} finally {
-			setSaving(false);
-		}
 	}
 
 	function handleHeaderDragStart(event: ReactMouseEvent<HTMLDivElement>) {

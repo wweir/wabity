@@ -10,6 +10,8 @@
 - `settingsShared.tsx` 负责跨分组复用的元数据、共享辅助组件和展示 helper
 - `settingsState.ts` 负责默认状态、草稿快照、配置校验和纯函数状态转换，避免继续把这些逻辑堆在页面组件顶部
 - `settingsTypes.ts` 负责 settings feature 内部类型、草稿校验类型和本地默认值
+- `useSettingsSectionNavigation.ts` 负责一级分组 tab 键盘流、块级 jump 和主内容滚动观测，避免页面组件继续内联导航状态机
+- `useSettingsPersistence.ts` 负责分组保存、草稿恢复和落盘后的本地状态对齐，逐步把保存管线从 `SettingsPage.tsx` 顶部剥离
 - `settings.css` 只保留设置页特有布局、表单状态和卡片变体；基础 token、frame/panel/button/input 外观统一由 `src/app/global.css` 提供
 - 透明窗口策略下，设置页只保留极小透明安全边；frame 背景和 overlay 必须跟随全局 surface token，不能继续写死浅色 frosted glass，否则暗色主题会失真
 - 设置页内部的编辑卡片、空态、安装指引、内联代码和按钮同样必须跟随全局 surface / text token；不能只修外层 frame，留下暗色主题里的浅底内卡和深色文字

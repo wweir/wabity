@@ -358,7 +358,7 @@ const mcpTransportOptionsInternal = [
 	},
 ] as const;
 
-export const acpAgentLaunchModeOptions: ReadonlyArray<{
+const acpAgentLaunchModeOptionsInternal: ReadonlyArray<{
 	value: AcpAgentLaunchMode;
 	label: string;
 	description: string;
@@ -382,6 +382,14 @@ export const acpAgentLaunchModeOptions: ReadonlyArray<{
 	},
 ] as const;
 
+function isWindowsPlatform() {
+	return typeof navigator !== "undefined" && /Windows/iu.test(navigator.userAgent);
+}
+
+export const acpAgentLaunchModeOptions = isWindowsPlatform()
+	? acpAgentLaunchModeOptionsInternal.filter((option) => option.value !== "interactive_shell")
+	: acpAgentLaunchModeOptionsInternal;
+
 export const mcpTransportOptions = mcpTransportOptionsInternal;
 
 export function getMcpTransportMeta(transport: McpTransport) {
@@ -396,9 +404,19 @@ export function formatAcpAgentOptionLabel(option: AcpAgentOption, alreadyAdded: 
 }
 
 export function getAcpAgentLaunchModeMeta(launchMode: AcpAgentLaunchMode) {
+	if (isWindowsPlatform() && launchMode === "interactive_shell") {
+		return {
+			value: "login_shell" as const,
+			label: "Login Shell",
+			description:
+				"Windows 默认命令处理器不区分 login / interactive shell，当前会按 Login Shell 执行。",
+		};
+	}
+
 	return (
 		acpAgentLaunchModeOptions.find((option) => option.value === launchMode) ??
-		acpAgentLaunchModeOptions[1]
+		acpAgentLaunchModeOptions[1] ??
+		acpAgentLaunchModeOptionsInternal[0]
 	);
 }
 
