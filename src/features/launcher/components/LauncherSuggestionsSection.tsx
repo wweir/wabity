@@ -6,6 +6,7 @@ import type {
 	FileSearchMatch,
 	FloatingPanelOffset,
 	InstalledAppMatch,
+	RunningProcessMatch,
 } from "../types";
 import type { SuggestionMode } from "../query";
 import { CompletionPopup } from "./CompletionPopup";
@@ -21,8 +22,10 @@ interface LauncherSuggestionsSectionProps {
 	visibleFileMatches: FileSearchMatch[];
 	visibleActionMatches: ActionMatch[];
 	visibleAppMatches: InstalledAppMatch[];
+	visibleKillMatches: RunningProcessMatch[];
 	onSelectIndex: (index: number) => void;
 	onSelectFile: (index: number) => void;
+	onSelectKill: (index: number) => void;
 	onRunSelectedAction: (index: number) => void;
 	onRunSelectedApp: (index: number) => void;
 }
@@ -38,8 +41,10 @@ export const LauncherSuggestionsSection = memo(function LauncherSuggestionsSecti
 	visibleFileMatches,
 	visibleActionMatches,
 	visibleAppMatches,
+	visibleKillMatches,
 	onSelectIndex,
 	onSelectFile,
+	onSelectKill,
 	onRunSelectedAction,
 	onRunSelectedApp,
 }: LauncherSuggestionsSectionProps) {
@@ -55,8 +60,10 @@ export const LauncherSuggestionsSection = memo(function LauncherSuggestionsSecti
 			visibleFileMatches={visibleFileMatches}
 			visibleActionMatches={visibleActionMatches}
 			visibleAppMatches={visibleAppMatches}
+			visibleKillMatches={visibleKillMatches}
 			onSelectIndex={onSelectIndex}
 			onSelectFile={onSelectFile}
+			onSelectKill={onSelectKill}
 			onRunSelectedAction={onRunSelectedAction}
 			onRunSelectedApp={onRunSelectedApp}
 		/>

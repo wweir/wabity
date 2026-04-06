@@ -25,12 +25,12 @@
 `Wabity` 是一个基于 `Tauri v2 + React + TypeScript + Rust` 的桌面 launcher。它当前不是“通用桌面平台”，而是围绕下面几条主链路组织：
 
 1. 全局快捷键唤起 launcher
-2. 在当前 workspace 中输入并执行本地动作、文件补全或应用启动
+2. 在当前 workspace 中输入并执行本地动作、文件补全、应用启动或运行中进程终止
 3. 在 launcher 内执行轻量 RAG 问答
 4. 创建并管理本地 `stdio` ACP agent session
 5. 通过快捷翻译当前选中文本，或在未选中时回退到截图 OCR 后再翻译，并把结果回填到 launcher
 6. 在 launcher 里查看最近文本剪贴板历史、固定少量常用项，并把选中的历史项重新粘贴回外部应用
-7. 通过设置页维护快捷键、通知、外观、AI 功能、模型接入、RAG、ACP agent 和全局 MCP 配置
+7. 通过设置页维护快捷键、通知、外观、AI 功能、模型接入、RAG、ACP agent 和全局 MCP 配置；ACP session 自身的 mode / model selector / 运行时 config option 则在 launcher 的当前会话面板里按 session 级状态管理
 
 明确非目标：
 
@@ -77,11 +77,13 @@
 | `src/features/settings` | 设置页 UI 与分组草稿态                         | 不直接处理配置落盘细节         |
 | `src/lib/tauri`         | IPC client、事件订阅、浏览器 fallback          | 前端与 Rust 的唯一通信边界     |
 
+其中 `src/lib/tauri/client.ts` 现在只保留稳定导出面；运行时 `invoke/listen/channel` 封装、浏览器默认值、内置模板目录和按 feature 划分的 IPC client 已下沉到 `src/lib/tauri/client/` 子模块，避免继续把桌面调用包装、fallback 和大段只读模板堆在同一个入口文件里。
+
 前端当前只有两个真正的产品视图：`launcher` 和 `settings`。`src/app/App.tsx` 只负责这两个视图的装配与切换。
 
-`launcher` 内部虽然同时承载本地执行结果、轻量 RAG 问答和 ACP session 时间线，但这些输出面都遵守同一个前端展示原则：主答案或主结果永远优先于调试性辅助信息。这个“优先”主要靠排版、字号、前景和留白建立，而不是靠篡改时间线顺序。像 action trail、tool detail、thought 这类过程信息只能作为消息内部的次级 disclosure，不能和主答案并列成独立主面板；但对于 ACP session 这类显式暴露执行过程的 transcript，同一条 assistant message 内的 `content / actions / thought` block 仍必须忠实保留真实输出顺序，不能再为了摘要化强行重排成固定的 `answer-first` 结构。浅色/深色主题都必须复用同一套稳定 token 语义，feature CSS 不应继续保留只适用于单一主题的私有颜料。对于 `chat/completions` 返回的 reasoning，后端必须先把最终答案和 reasoning 分离；如果兼容层把 thinking 混进 `message.content`，后端也必须在归一化阶段拆出 `reasoning`。前端只能把 reasoning 当次级 thought 展示，不能再把它无差别塞进主答案文本。
+`launcher` 内部虽然同时承载本地执行结果、轻量 RAG 问答和 ACP session 时间线，但这些输出面都遵守同一个前端展示原则：主答案或主结果永远优先于调试性辅助信息。这个“优先”主要靠排版、字号、前景和留白建立，而不是靠篡改时间线顺序。像 action trail、tool detail、thought 这类过程信息只能作为消息内部的次级 disclosure，不能和主答案并列成独立主面板；但对于 ACP session 这类显式暴露执行过程的 transcript，同一条 assistant message 内的 `content / actions / thought` block 仍必须忠实保留真实输出顺序，不能再为了摘要化强行重排成固定的 `answer-first` 结构。ACP agent 暴露的 session mode、模型 selector 和其他 runtime config option 也属于这块输出面的一部分：它们跟随当前 session detail 一起下发，在 launcher 当前会话里即时切换，不回写到全局 `AI 功能 / 模型接入 / RAG` 设置。浅色/深色主题都必须复用同一套稳定 token 语义，feature CSS 不应继续保留只适用于单一主题的私有颜料。对于 `chat/completions` 返回的 reasoning，后端必须先把最终答案和 reasoning 分离；如果兼容层把 thinking 混进 `message.content`，后端也必须在归一化阶段拆出 `reasoning`。前端只能把 reasoning 当次级 thought 展示，不能再把它无差别塞进主答案文本。
 
-`launcher` 的页面层继续只保留输入状态编排、命令调用和窗口级 effect；suggestions、session 浮层、clipboard 面板和 QA / result 展示必须作为独立 section 或 layer 组件装配，避免把所有高频 UI 区块继续挂在一个超大 `LauncherPage` 里跟随每次输入一起重渲染。
+`launcher` 的页面层继续只保留输入状态编排、命令调用和窗口级 effect；suggestions、session 浮层、clipboard 面板和 QA / result 展示必须作为独立 section 或 layer 组件装配，避免把所有高频 UI 区块继续挂在一个超大 `LauncherPage` 里跟随每次输入一起重渲染。当前补全请求状态机已经下沉到 `src/features/launcher/useLauncherSuggestions.ts`，把 `file / action / app / kill` 四条候选链路从页面壳层里剥离出来。
 
 历史剪贴板不再挂在 launcher 的 slash 动作里，而是通过独立全局快捷键进入单独的面板态。它只维护少量文本历史和少量 pinned 常用项，不做全文搜索、分类索引或富媒体预览；后端返回的结构化快照已经按 `pinnedEntries / recentEntries` 分组，前端只负责渲染、选中态和安全键盘流。面板视觉上保持紧凑浮层：`pinnedEntries` 显示 `Alt+A...`，`recentEntries` 显示 `Alt+1...0`，条目维护动作收敛为 icon-only 次级工具按钮，默认弱显著，只在 hover / active / focus-within 时抬升；这些条目热键只能在面板已打开时通过前端局部监听生效，面板关闭后必须立即卸载，不能变成 launcher 常驻键盘协议或系统级全局快捷键。`Alt+V` 命中时如果 launcher 已经在前台，选中条目只会把文本插入 launcher 输入框；如果 launcher 不在前台，才走“写系统剪贴板 -> 记住呼出前前台应用 -> 隐藏 launcher -> 重新激活原应用 -> 等待目标应用重新成为前台 -> 发送粘贴快捷键”的跨应用回贴链路。跨应用回贴仍由 Rust 侧调度，前端不能直接接管。
 
@@ -201,9 +203,11 @@ macOS 下 launcher 不是普通文档窗口，而是服务于全屏覆盖场景�
 
 `AppState` 是 Rust 侧的运行时总装配点，不是领域模型。
 
+ACP session snapshot 的持久化与恢复合并逻辑已经从 `state/mod.rs` 下沉到独立子模块；同时 LLM/OCR/RAG 设置校验与 OCR provider 构建、ACP/MCP 目录归一化也分别拆到 `state/settings.rs` 与 `state/acp_catalog.rs`。`AppState` 入口只保留调用和装配，不再直接承载整段 session 快照写回细节、设置校验细节或 MCP 目录清洗逻辑。
+
 它负责：
 
-- 持有 matcher、executor、application、file search、ACP、RAG、OCR 等服务实例
+- 持有 matcher、executor、application、process、file search、ACP、RAG、OCR 等服务实例
 - 持有配置存储与当前 workspace 运行时状态
 - 在需要时把配置投影成运行时依赖
 - 对外提供统一的查询、执行、设置更新和会话管理入口
@@ -216,7 +220,7 @@ macOS 下 launcher 不是普通文档窗口，而是服务于全屏覆盖场景�
 
 `file_search` 运行时不再只保留单个 workspace 的一次性全量索引。服务需要维护少量最近使用 workspace 的 LRU 快照，并在 workspace 首次命中后安装目录 watcher，以增量删改原子替换快照；输入链路优先读取当前快照，不把“切换 workspace 后再整仓重扫一次”当成常态路径。
 
-观测也属于运行时边界的一部分。`search_files`、`search_apps`、RAG 检索、embedding 批次、索引落盘、翻译与远程 OCR 请求现在统一通过 `tracing` 打点耗时；前端建议请求则只做轻量 `performance.now()` 观测，不在浏览器侧再复制一套复杂 tracing 基建。
+观测也属于运行时边界的一部分。`search_files`、`search_apps`、`search_processes`、RAG 检索、embedding 批次、索引落盘、翻译与远程 OCR 请求现在统一通过 `tracing` 打点耗时；前端建议请求则只做轻量 `performance.now()` 观测，不在浏览器侧再复制一套复杂 tracing 基建。
 
 ### 5.3 IPC 边界
 
@@ -383,7 +387,7 @@ launcher 轻量问答虽然不是 ACP session，但“流式”标准不能更�
 - 当前只支持本地 `stdio`
 - session 创建时绑定 workspace
 - 全局 MCP server 清单在建会话时透传给 agent
-- ACP Agent 启动模式显式分成 `direct`、`login_shell`、`interactive_shell` 三类：`direct` 走确定性的 `program + args`，`login_shell` 只读取 login profile，`interactive_shell` 允许读取 `.zshrc` / `.bashrc` 一类 interactive 配置，但任何 stdout 噪音都可能破坏 ACP `stdio` 协议，因此只能作为显式风险模式
+- ACP Agent 启动模式显式分成 `direct`、`login_shell`、`interactive_shell` 三类：`direct` 走确定性的 `program + args`；Unix 上的 shell 模式优先解析账户登记的默认 shell，再回退到 `SHELL` / `/bin/sh`；`interactive_shell` 允许读取 `.zshrc` / `.bashrc` 一类 interactive 配置，但任何 stdout 噪音都可能破坏 ACP `stdio` 协议，因此只能作为显式风险模式；Windows 默认命令处理器不区分 login / interactive shell，因此会把 `interactive_shell` 归并成 `login_shell`
 - ACP session 的恢复依赖 agent 自己的 `session/load` 能力，不伪装恢复成功
 
 为什么 ACP 不和 launcher 问答复用一套模型：
@@ -395,6 +399,8 @@ launcher 轻量问答虽然不是 ACP session，但“流式”标准不能更�
 ### 6.6 浏览器 fallback
 
 前端 `src/lib/tauri/client.ts` 内置了浏览器 fallback，用于非桌面端预览和基础 UI 开发。
+
+随着 client 拆分，浏览器 fallback 本身也不再集中放在单一大文件里，而是按 launcher / settings / clipboard 与共享 defaults/runtime 子模块分布；但对上层 feature 来说，`src/lib/tauri/client.ts` 仍然是唯一稳定导出入口。
 
 它的作用只是：
 

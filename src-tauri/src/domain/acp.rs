@@ -187,11 +187,68 @@ pub struct AcpSessionSummary {
     pub last_updated_at_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpSessionRuntimeState {
+    pub current_mode_id: Option<String>,
+    #[serde(default)]
+    pub available_modes: Vec<AcpModeOption>,
+    #[serde(default)]
+    pub config_options: Vec<AcpConfigOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpModeOption {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpConfigOption {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub category: Option<String>,
+    pub kind: AcpConfigOptionKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum AcpConfigOptionKind {
+    Select {
+        current_value_id: String,
+        #[serde(default)]
+        options: Vec<AcpConfigValueOption>,
+        #[serde(default)]
+        groups: Vec<AcpConfigOptionGroup>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpConfigValueOption {
+    pub value_id: String,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpConfigOptionGroup {
+    pub id: String,
+    pub name: String,
+    pub options: Vec<AcpConfigValueOption>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpSessionDetail {
     pub session: AcpSessionSummary,
     pub messages: Vec<AcpSessionMessage>,
+    pub runtime: AcpSessionRuntimeState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

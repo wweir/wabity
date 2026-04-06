@@ -29,7 +29,6 @@ import {
 	onRagRuntimeStatus,
 	onRevealLauncherMainPanel,
 	listAcpSessions,
-	matchActions,
 	onOcrError,
 	onOcrTranslationStream,
 	onOcrTranslationStarted,
@@ -38,14 +37,14 @@ import {
 	subscribeAcpSessionUpdates,
 	openDocumentReference,
 	onWorkspaceUpdated,
-	searchApps,
-	searchFiles,
 	sendAcpPrompt,
 	setLauncherBlurAutoHideEnabled,
 	setWorkspace,
 	toggleClipboardHistoryEntryPin,
 	takeAcpRestoreNotices,
 	pasteClipboardHistoryEntry,
+	setAcpSessionConfigOption,
+	setAcpSessionMode,
 } from "../../lib/tauri/client";
 import { useAutoResizeWindow } from "../../lib/tauri/useAutoResizeWindow";
 import type {
@@ -62,22 +61,23 @@ import type {
 	WorkspaceState,
 } from "../../lib/tauri/types";
 import type {
-	ActionMatch,
 	ActionDescriptor,
 	ExecutionConversationState,
 	ExecutionConversationTurn,
 	ExecutionResult,
-	FileSearchMatch,
 	FloatingPanelOffset,
 	InputMode,
-	InstalledAppMatch,
 	RagAnswerStructuredPayload,
 	RagCitation,
 	RagRetrievalSummary,
+	RunningProcessMatch,
 } from "./types";
-import { ragAnswerActionDescriptor, translateActionDescriptor } from "./actionCatalog";
 import {
-	appSearchDebounceMs,
+	killProcessActionDescriptor,
+	ragAnswerActionDescriptor,
+	translateActionDescriptor,
+} from "./actionCatalog";
+import {
 	buildQuery,
 	deriveActionCompletion,
 	deriveJsonPrettyPreview,
@@ -86,12 +86,12 @@ import {
 	deriveFileCompletion,
 	findSlashCommandPrefixRange,
 	findSlashCommandTokenRange,
-	fileSearchDebounceMs,
 	findActiveFileToken,
 	getErrorMessage,
 	isActionQuery,
 	isAppSearchReady,
 	isFileSearchReady,
+	isKillSearchReady,
 	parseSlashActionInput,
 	type SuggestionMode,
 	replaceTextRange,
@@ -119,6 +119,7 @@ import {
 } from "./sessions";
 import { buildWorkspaceBreadcrumbs, formatWorkspacePath } from "./workspace";
 import { useDismissOnPointerDownOutside, useFloatingPanelOffset } from "./useFloatingPanel";
+import { useLauncherSuggestions } from "./useLauncherSuggestions";
 import { LauncherHeader } from "./components/LauncherHeader";
 import { LauncherComposer } from "./components/LauncherComposer";
 import { LauncherFeedback } from "./components/LauncherFeedback";
@@ -169,6 +170,7 @@ type PrimaryActionState =
 	  }
 	| { kind: "rag_answer"; label: string; tone: PrimaryActionTone; enabled: true }
 	| { kind: "launch_app"; label: string; tone: PrimaryActionTone; enabled: boolean }
+	| { kind: "run_kill"; label: string; tone: PrimaryActionTone; enabled: boolean }
 	| { kind: "idle"; label: string; tone: PrimaryActionTone; enabled: false };
 
 async function applyClientEffect(result: ExecutionResult) {
@@ -227,6 +229,14 @@ function describePrimaryActionDescriptor(descriptor: ActionDescriptor): {
 				tone: "execute",
 			};
 	}
+}
+
+function deriveKillCompletion(match: RunningProcessMatch | undefined) {
+	if (!match) {
+		return null;
+	}
+
+	return `pid:${match.pid}`;
 }
 
 function buildQaAssistantMessageBlocks(
@@ -312,9 +322,6 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 		displayHomeAsTilde: false,
 	});
 	const [rawText, setRawText] = useState("");
-	const [actionMatches, setActionMatches] = useState<ActionMatch[]>([]);
-	const [fileMatches, setFileMatches] = useState<FileSearchMatch[]>([]);
-	const [appMatches, setAppMatches] = useState<InstalledAppMatch[]>([]);
 	const [sessionSummaries, setSessionSummaries] = useState<AcpSessionSummary[]>([]);
 	const [sessionDetails, setSessionDetails] = useState<Record<string, AcpSessionDetail>>({});
 	const [agentCatalog, setAgentCatalog] = useState<AcpAgentCatalog>({
@@ -324,7 +331,6 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 	const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
 	const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
 	const [activeSlashAction, setActiveSlashAction] = useState<ActionDescriptor | null>(null);
-	const [selectedIndex, setSelectedIndex] = useState(0);
 	const [result, setResult] = useState<ExecutionResult | null>(null);
 	const [qaMessages, setQaMessages] = useState<AcpSessionMessage[]>([]);
 	const [qaAutoResizeFrozen, setQaAutoResizeFrozen] = useState(false);
@@ -334,19 +340,18 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 	const [ragConversation, setRagConversation] = useState<ExecutionConversationTurn[]>([]);
 	const [qaRetrieval, setQaRetrieval] = useState<RagRetrievalSummary | null>(null);
 	const [error, setError] = useState<string | null>(null);
-	const [suggestionLoading, setSuggestionLoading] = useState(false);
 	const [operationPending, setOperationPending] = useState(false);
 	const [agentActionPending, setAgentActionPending] = useState(false);
 	const [shortcutTranslationPending, setShortcutTranslationPending] = useState(false);
 	const [frameWidth, setFrameWidth] = useState(launcherFrameMaxWidth);
 	const [caretIndex, setCaretIndex] = useState(0);
-	const [suggestionsHidden, setSuggestionsHidden] = useState(false);
 	const [completionOffset, setCompletionOffset] = useState<FloatingPanelOffset>({
 		x: 0,
 		y: 0,
 		width: completionPanelMaxWidth,
 	});
 	const [creatingSession, setCreatingSession] = useState(false);
+	const [runtimeControlPendingKey, setRuntimeControlPendingKey] = useState<string | null>(null);
 	const [sessionPanelOpen, setSessionPanelOpen] = useState(false);
 	const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
 	const [agentPickerOpen, setAgentPickerOpen] = useState(false);
@@ -420,6 +425,31 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 	const textStartsWithSlash = textBeforeCaret.trimStart().startsWith("/");
 	const pendingSlashAction =
 		launcherMode && activeSlashAction && !textStartsWithSlash ? activeSlashAction : null;
+	const killSlashInputMatch = useMemo(
+		() =>
+			launcherMode
+				? parseSlashActionInput(textBeforeCaret, killProcessActionDescriptor.aliases)
+				: null,
+		[launcherMode, textBeforeCaret],
+	);
+	const killSlashCommandCommitted = Boolean(
+		killSlashInputMatch &&
+		(killSlashInputMatch.commandToken === killSlashInputMatch.alias.toLowerCase() ||
+			killSlashInputMatch.content.length > 0),
+	);
+	const killSlashPayload = useMemo(
+		() =>
+			launcherMode
+				? deriveSelectedSlashActionPayload(
+						rawText,
+						boundedCaretIndex,
+						killProcessActionDescriptor.aliases,
+					)
+				: null,
+		[boundedCaretIndex, launcherMode, rawText],
+	);
+	const killSearchQuery =
+		pendingSlashAction?.id === "kill_process" ? textBeforeCaret : (killSlashPayload?.value ?? "");
 	const markdownPreview = useMemo(() => {
 		if (activeSessionId || pendingSlashAction?.id !== "markdown_render") {
 			return null;
@@ -435,12 +465,36 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 			: !launcherMode
 				? "none"
 				: pendingSlashAction
-					? "none"
-					: isActionQuery(textBeforeCaret)
-						? "action"
-						: isAppSearchReady(textBeforeCaret)
-							? "app"
-							: "none";
+					? pendingSlashAction.id === "kill_process"
+						? "kill"
+						: "none"
+					: killSlashCommandCommitted
+						? "kill"
+						: isActionQuery(textBeforeCaret)
+							? "action"
+							: isAppSearchReady(textBeforeCaret)
+								? "app"
+								: "none";
+	const {
+		actionMatches,
+		appMatches,
+		fileMatches,
+		killMatches,
+		resetSuggestions,
+		selectedIndex,
+		setSelectedIndex,
+		suggestionLoading,
+		suggestionsHidden,
+		setSuggestionsHidden,
+	} = useLauncherSuggestions({
+		currentFileNeedle,
+		killSearchQuery,
+		launcherMode,
+		setError,
+		suggestionMode,
+		suggestionQuery,
+		textBeforeCaret,
+	});
 	const visibleActionMatches = useMemo(
 		() => (launcherMode ? actionMatches : []),
 		[actionMatches, launcherMode],
@@ -450,6 +504,10 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 		() => (suggestionMode === "app" ? appMatches : []),
 		[appMatches, suggestionMode],
 	);
+	const visibleKillMatches = useMemo(
+		() => (suggestionMode === "kill" ? killMatches : []),
+		[killMatches, suggestionMode],
+	);
 	const suggestionCount =
 		suggestionMode === "file"
 			? visibleFileMatches.length
@@ -457,9 +515,15 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 				? visibleActionMatches.length
 				: suggestionMode === "app"
 					? visibleAppMatches.length
-					: 0;
+					: suggestionMode === "kill"
+						? visibleKillMatches.length
+						: 0;
 	const canTextMatchCompletions =
-		suggestionMode === "file" ? isFileSearchReady(currentFileNeedle) : suggestionMode !== "none";
+		suggestionMode === "file"
+			? isFileSearchReady(currentFileNeedle)
+			: suggestionMode === "kill"
+				? isKillSearchReady(killSearchQuery)
+				: suggestionMode !== "none";
 	const hasSuggestions = !suggestionsHidden && suggestionCount > 0 && canTextMatchCompletions;
 	const activeCompletionOptionId = hasSuggestions
 		? `${launcherCompletionOptionIdPrefix}-${suggestionMode}-${selectedIndex}`
@@ -468,12 +532,15 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 	const selectedActionMatch = visibleActionMatches[selectedIndex];
 	const selectedFileMatch = visibleFileMatches[selectedIndex];
 	const selectedAppMatch = visibleAppMatches[selectedIndex];
+	const selectedKillMatch = visibleKillMatches[selectedIndex];
 	const completionText =
 		suggestionMode === "file"
 			? deriveFileCompletion(textBeforeCaret, selectedFileMatch)
 			: suggestionMode === "action"
 				? deriveActionCompletion(textBeforeCaret, selectedActionMatch)
-				: null;
+				: suggestionMode === "kill"
+					? deriveKillCompletion(selectedKillMatch)
+					: null;
 	const hasCompletion = completionText !== null && completionText !== textBeforeCaret;
 	const activeSession = activeSessionId ? (sessionDetails[activeSessionId] ?? null) : null;
 	const activeSessionStatus = activeSession?.session.status ?? null;
@@ -597,6 +664,15 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 			};
 		}
 
+		if (suggestionMode === "kill") {
+			return {
+				kind: "run_kill",
+				label: "终止进程",
+				tone: "execute",
+				enabled: killSearchQuery.trim().length > 0,
+			};
+		}
+
 		if (shouldFallbackToRagAnswer) {
 			return {
 				kind: "rag_answer",
@@ -634,12 +710,14 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 		activeSessionId,
 		appSearchActive,
 		fileMode,
+		killSearchQuery,
 		pendingSlashAction,
 		rawText,
 		selectedActionMatch,
 		selectedAppMatch,
 		selectedFileMatch,
 		sessionCanSend,
+		suggestionMode,
 		shouldFallbackToRagAnswer,
 	]);
 	const ragRuntimeBar = useMemo(
@@ -966,15 +1044,6 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 		setRagConversation([]);
 		setQaRetrieval(null);
 	}, [restoreLauncherBlurAutoHide]);
-
-	const resetSuggestions = useCallback((resetSelectedIndex: boolean = false) => {
-		setActionMatches([]);
-		setFileMatches([]);
-		setAppMatches([]);
-		if (resetSelectedIndex) {
-			setSelectedIndex(0);
-		}
-	}, []);
 
 	const resetLauncherStateForExplicitDismiss = useCallback(() => {
 		const resetEpoch = launcherResetEpochRef.current + 1;
@@ -1331,7 +1400,14 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 			selectedElement.offsetTop - listElement.clientHeight / 2 + selectedElement.offsetHeight / 2;
 		const maxScrollTop = Math.max(0, listElement.scrollHeight - listElement.clientHeight);
 		listElement.scrollTop = clamp(nextScrollTop, 0, maxScrollTop);
-	}, [hasSuggestions, selectedIndex, visibleActionMatches, visibleFileMatches, visibleAppMatches]);
+	}, [
+		hasSuggestions,
+		selectedIndex,
+		visibleActionMatches,
+		visibleAppMatches,
+		visibleFileMatches,
+		visibleKillMatches,
+	]);
 
 	const handleQaResultResizeSettled = useCallback(() => {
 		if (!qaAutoResizeFrozen || launcherBlurAutoHideEnabledRef.current) {
@@ -1358,153 +1434,6 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 		() => () => clearScheduledQaBlurAutoHideRestore(),
 		[clearScheduledQaBlurAutoHideRestore],
 	);
-
-	useEffect(() => {
-		let cancelled = false;
-		let debounceTimer: number | null = null;
-
-		async function loadSuggestions() {
-			const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
-			if (suggestionMode === "file") {
-				setSuggestionLoading(true);
-				try {
-					const nextMatches = await searchFiles(currentFileNeedle, 8);
-					console.debug("[launcher] file suggestions completed", {
-						elapsedMs:
-							(typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt,
-						queryLength: currentFileNeedle.trim().length,
-						resultCount: nextMatches.length,
-					});
-					if (!cancelled) {
-						showSuggestions({ fileMatches: nextMatches });
-					}
-				} catch (loadError) {
-					if (!cancelled) {
-						resetSuggestions();
-						setError(getErrorMessage(loadError, "文件搜索失败"));
-					}
-				} finally {
-					if (!cancelled) {
-						setSuggestionLoading(false);
-					}
-				}
-
-				return;
-			}
-
-			if (suggestionMode === "action") {
-				setSuggestionLoading(true);
-				try {
-					const nextMatches = await matchActions(suggestionQuery);
-					console.debug("[launcher] action suggestions completed", {
-						elapsedMs:
-							(typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt,
-						queryLength: suggestionQuery.rawText.trim().length,
-						resultCount: nextMatches.length,
-					});
-					if (!cancelled) {
-						showSuggestions({
-							actionMatches: suggestionQuery.rawText.trim().startsWith("/")
-								? nextMatches
-								: nextMatches.slice(0, 8),
-						});
-					}
-				} catch (loadError) {
-					if (!cancelled) {
-						resetSuggestions();
-						setError(getErrorMessage(loadError, "动作匹配失败"));
-					}
-				} finally {
-					if (!cancelled) {
-						setSuggestionLoading(false);
-					}
-				}
-
-				return;
-			}
-
-			if (suggestionMode === "app") {
-				setSuggestionLoading(true);
-				try {
-					const nextMatches = await searchApps(textBeforeCaret, 8);
-					console.debug("[launcher] app suggestions completed", {
-						elapsedMs:
-							(typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt,
-						queryLength: textBeforeCaret.trim().length,
-						resultCount: nextMatches.length,
-					});
-					if (!cancelled) {
-						showSuggestions({ appMatches: nextMatches });
-					}
-				} catch (loadError) {
-					if (!cancelled) {
-						resetSuggestions();
-						setError(getErrorMessage(loadError, "应用搜索失败"));
-					}
-				} finally {
-					if (!cancelled) {
-						setSuggestionLoading(false);
-					}
-				}
-
-				return;
-			}
-
-			if (!launcherMode) {
-				resetSuggestions();
-				setSuggestionLoading(false);
-				return;
-			}
-
-			resetSuggestions();
-			setSuggestionLoading(false);
-		}
-
-		if (suggestionMode === "file") {
-			if (!isFileSearchReady(currentFileNeedle)) {
-				resetSuggestions(true);
-				setSuggestionLoading(false);
-				return () => {
-					cancelled = true;
-				};
-			}
-
-			debounceTimer = window.setTimeout(() => {
-				void loadSuggestions();
-			}, fileSearchDebounceMs);
-		} else if (suggestionMode === "app") {
-			if (!isAppSearchReady(textBeforeCaret)) {
-				resetSuggestions(true);
-				setSuggestionLoading(false);
-				return () => {
-					cancelled = true;
-				};
-			}
-
-			debounceTimer = window.setTimeout(() => {
-				void loadSuggestions();
-			}, appSearchDebounceMs);
-		} else if (suggestionMode === "action") {
-			void loadSuggestions();
-		} else {
-			resetSuggestions();
-			setSuggestionLoading(false);
-		}
-
-		return () => {
-			cancelled = true;
-			if (debounceTimer !== null) {
-				window.clearTimeout(debounceTimer);
-			}
-		};
-	}, [
-		currentFileNeedle,
-		launcherMode,
-		resetSuggestions,
-		suggestionMode,
-		suggestionQuery,
-		textBeforeCaret,
-	]);
 
 	useEffect(() => {
 		let active = true;
@@ -1895,19 +1824,6 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 
 		logElement.scrollTop = 0;
 	}, [activeSessionScrollAnchor]);
-
-	function showSuggestions(nextSuggestions: {
-		actionMatches?: ActionMatch[];
-		fileMatches?: FileSearchMatch[];
-		appMatches?: InstalledAppMatch[];
-	}) {
-		setActionMatches(nextSuggestions.actionMatches ?? []);
-		setFileMatches(nextSuggestions.fileMatches ?? []);
-		setAppMatches(nextSuggestions.appMatches ?? []);
-		setSuggestionsHidden(false);
-		setSelectedIndex(0);
-		setError(null);
-	}
 
 	function applySessionDetail(detail: AcpSessionDetail) {
 		setSessionDetails((current) => upsertSessionDetailRecord(current, detail));
@@ -2373,6 +2289,20 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 		await executeLauncherAction(ragAnswerActionDescriptor, fullQuery);
 	}
 
+	const runExplicitKillAction = useCallback(async () => {
+		const payload = killSearchQuery.trim();
+		if (!payload) {
+			return;
+		}
+
+		await executeLauncherAction(killProcessActionDescriptor, buildQuery(inputMode, payload), {
+			onSuccess: () => {
+				pendingSelectionRef.current = payload.length;
+				updateRawText(payload, payload.length);
+			},
+		});
+	}, [executeLauncherAction, inputMode, killSearchQuery, updateRawText]);
+
 	async function handleTranslateAction() {
 		if (!canRunTranslateAction) {
 			return;
@@ -2412,6 +2342,58 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 		});
 	}
 
+	const replaceKillPayload = useCallback(
+		(value: string) => {
+			if (pendingSlashAction?.id === "kill_process") {
+				return replaceTextRange(rawText, 0, rawText.length, value);
+			}
+
+			const slashInputMatch = parseSlashActionInput(rawText, killProcessActionDescriptor.aliases);
+			if (!slashInputMatch) {
+				return replaceTextRange(rawText, 0, boundedCaretIndex, value);
+			}
+
+			const leadingWhitespaceLength = rawText.match(/^\s*/u)?.[0].length ?? 0;
+			return replaceTextRange(
+				rawText,
+				leadingWhitespaceLength + slashInputMatch.contentStart,
+				rawText.length,
+				value,
+			);
+		},
+		[boundedCaretIndex, pendingSlashAction, rawText],
+	);
+
+	const selectKill = useCallback(
+		(index: number) => {
+			const selected = visibleKillMatches[index];
+			if (!selected) {
+				return;
+			}
+
+			const nextValue = deriveKillCompletion(selected);
+			if (!nextValue) {
+				return;
+			}
+
+			const nextRawText = replaceKillPayload(nextValue);
+			pendingSelectionRef.current = nextRawText.caretIndex;
+			updateRawText(nextRawText.value, nextRawText.caretIndex);
+			resetSuggestions();
+			setSelectedIndex(0);
+			setError(null);
+			setResult({
+				status: "success",
+				primaryText: nextValue,
+				secondaryText: `已选择 ${selected.displayName} (pid ${selected.pid})。`,
+				structuredPayload: null,
+				nextActions: [],
+				shouldCloseLauncher: false,
+			});
+		},
+		[replaceKillPayload, resetSuggestions, updateRawText, visibleKillMatches],
+	);
+
 	function acceptCompletion() {
 		if (!completionText) {
 			return;
@@ -2420,7 +2402,9 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 		const nextRawText =
 			suggestionMode === "file" && activeFileToken
 				? replaceTextRange(rawText, activeFileToken.start, activeFileToken.end, completionText)
-				: replaceTextRange(rawText, 0, boundedCaretIndex, completionText);
+				: suggestionMode === "kill"
+					? replaceKillPayload(completionText)
+					: replaceTextRange(rawText, 0, boundedCaretIndex, completionText);
 		pendingSelectionRef.current = nextRawText.caretIndex;
 		updateRawText(nextRawText.value, nextRawText.caretIndex);
 
@@ -2433,12 +2417,29 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 				nextActions: [],
 				shouldCloseLauncher: false,
 			});
+			return;
+		}
+
+		if (suggestionMode === "kill" && selectedKillMatch) {
+			setResult({
+				status: "success",
+				primaryText: completionText,
+				secondaryText: `已填入 ${selectedKillMatch.displayName} 的 pid。`,
+				structuredPayload: null,
+				nextActions: [],
+				shouldCloseLauncher: false,
+			});
 		}
 	}
 
 	function acceptSelectedSuggestion(index: number = selectedIndex) {
 		if (suggestionMode === "file") {
 			selectFile(index);
+			return;
+		}
+
+		if (suggestionMode === "kill") {
+			selectKill(index);
 			return;
 		}
 
@@ -2711,6 +2712,9 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 			case "launch_app":
 				await runSelectedApp(index);
 				return;
+			case "run_kill":
+				await runExplicitKillAction();
+				return;
 			case "pending_action":
 				await runPendingSlashAction();
 				return;
@@ -2826,6 +2830,10 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 
 		if (usesInlineInputControl(inputMode) && !event.shiftKey) {
 			event.preventDefault();
+			if (hasSuggestions && suggestionMode === "kill") {
+				acceptSelectedSuggestion();
+				return;
+			}
 			await runPrimaryAction();
 			return;
 		}
@@ -2839,6 +2847,11 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 				}
 
 				if (suggestionMode === "file") {
+					acceptSelectedSuggestion();
+					return;
+				}
+
+				if (suggestionMode === "kill") {
 					acceptSelectedSuggestion();
 					return;
 				}
@@ -3013,6 +3026,40 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 		}
 	}
 
+	async function handleSetActiveSessionMode(modeId: string) {
+		if (!activeSessionId) {
+			return;
+		}
+
+		setRuntimeControlPendingKey("mode");
+		try {
+			const detail = await setAcpSessionMode(activeSessionId, modeId);
+			applySessionDetail(detail);
+			setError(null);
+		} catch (sessionError) {
+			setError(getErrorMessage(sessionError, "切换 ACP session 模式失败"));
+		} finally {
+			setRuntimeControlPendingKey(null);
+		}
+	}
+
+	async function handleSetActiveSessionConfigOption(configId: string, valueId: string) {
+		if (!activeSessionId) {
+			return;
+		}
+
+		setRuntimeControlPendingKey(`config:${configId}`);
+		try {
+			const detail = await setAcpSessionConfigOption(activeSessionId, configId, valueId);
+			applySessionDetail(detail);
+			setError(null);
+		} catch (sessionError) {
+			setError(getErrorMessage(sessionError, "更新 ACP session 配置失败"));
+		} finally {
+			setRuntimeControlPendingKey(null);
+		}
+	}
+
 	function handleWorkspaceDragStart(event: ReactMouseEvent<HTMLDivElement>) {
 		if (event.button !== 0) {
 			return;
@@ -3081,6 +3128,13 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 			void runSelectedApp(index);
 		},
 		[runSelectedApp],
+	);
+
+	const handleSelectKillFromPopup = useCallback(
+		(index: number) => {
+			selectKill(index);
+		},
+		[selectKill],
 	);
 
 	const handleSelectSessionFromPanel = useCallback(
@@ -3210,6 +3264,7 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 
 					<LauncherFeedback
 						activeSession={activeSession}
+						runtimeControlPendingKey={runtimeControlPendingKey}
 						qaCitations={qaConversationState?.citations ?? []}
 						qaRetrieval={qaRetrieval}
 						qaMessages={qaMessages}
@@ -3218,6 +3273,10 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 						resultPending={operationPending || shortcutTranslationPending}
 						jsonPreview={jsonPreview}
 						markdownPreview={markdownPreview}
+						onSetAcpSessionConfigOption={(configId, valueId) =>
+							void handleSetActiveSessionConfigOption(configId, valueId)
+						}
+						onSetAcpSessionMode={(modeId) => void handleSetActiveSessionMode(modeId)}
 						onOpenRagCitation={(citation) => void handleOpenRagCitation(citation)}
 					/>
 				</section>
@@ -3236,8 +3295,10 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 						visibleFileMatches={visibleFileMatches}
 						visibleActionMatches={visibleActionMatches}
 						visibleAppMatches={visibleAppMatches}
+						visibleKillMatches={visibleKillMatches}
 						onSelectIndex={setSelectedIndex}
 						onSelectFile={selectFile}
+						onSelectKill={handleSelectKillFromPopup}
 						onRunSelectedAction={handleRunSelectedActionFromPopup}
 						onRunSelectedApp={handleRunSelectedAppFromPopup}
 					/>

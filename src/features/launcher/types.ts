@@ -44,6 +44,18 @@ export interface InstalledAppMatch {
 	score: number;
 }
 
+export type RunningProcessKind = "app" | "process";
+
+export interface RunningProcessMatch {
+	pid: number;
+	displayName: string;
+	processName: string;
+	executablePath: string | null;
+	appBundlePath: string | null;
+	kind: RunningProcessKind;
+	score: number;
+}
+
 export interface ExecutionRequest {
 	actionId: string;
 	query: QueryPayload;

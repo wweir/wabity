@@ -13,6 +13,7 @@ const BASE64_COMMAND_ALIASES: [&str; 1] = ["/base64"];
 const MARKDOWN_RENDER_COMMAND_ALIASES: [&str; 2] = ["/md", "/markdown"];
 const TRANSLATE_COMMAND_ALIASES: [&str; 3] = ["/translate", "/fy", "/tr"];
 const RAG_ANSWER_COMMAND_ALIASES: [&str; 3] = ["/ask", "/qa", "/docs"];
+const KILL_PROCESS_COMMAND_ALIASES: [&str; 1] = ["/kill"];
 
 #[derive(Debug, Clone)]
 pub struct MatcherService {
@@ -124,6 +125,11 @@ fn score_action(
         matched = true;
     }
 
+    if action.id == "kill_process" && extract_kill_process_payload(&query.raw_text).is_some() {
+        score += 44;
+        matched = true;
+    }
+
     if !matched {
         return None;
     }
@@ -159,6 +165,22 @@ fn builtin_actions() -> Vec<ActionDescriptor> {
             supported_input_modes: vec![Inline, Clipboard, Selection],
             category: "system".to_string(),
             priority: 120,
+        },
+        ActionDescriptor {
+            id: "kill_process".to_string(),
+            title: "终止进程".to_string(),
+            summary: "按应用名称、进程名称或 pid 终止运行中的目标".to_string(),
+            aliases: vec!["/kill".to_string()],
+            keywords: vec![
+                "kill".to_string(),
+                "terminate".to_string(),
+                "process".to_string(),
+                "app".to_string(),
+                "pid".to_string(),
+            ],
+            supported_input_modes: vec![Inline, Clipboard, Selection],
+            category: "system".to_string(),
+            priority: 118,
         },
         ActionDescriptor {
             id: "clipboard_history".to_string(),
@@ -436,6 +458,10 @@ fn extract_rag_answer_payload(raw_text: &str) -> Option<&str> {
     extract_prefixed_payload(raw_text, &RAG_ANSWER_COMMAND_ALIASES)
 }
 
+fn extract_kill_process_payload(raw_text: &str) -> Option<&str> {
+    extract_prefixed_payload(raw_text, &KILL_PROCESS_COMMAND_ALIASES)
+}
+
 #[cfg(test)]
 mod tests {
     use super::MatcherService;
@@ -488,7 +514,7 @@ mod tests {
             .match_actions(&query(InputMode::Inline, "/"))
             .unwrap();
 
-        assert_eq!(matches.len(), 16);
+        assert_eq!(matches.len(), 17);
         assert!(matches
             .iter()
             .any(|item| item.descriptor.id.as_str() == "clipboard_history"));

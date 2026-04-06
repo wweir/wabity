@@ -1,10 +1,14 @@
 use std::{
     collections::HashMap,
-    process::Stdio,
+    future::Future,
+    pin::Pin,
     rc::Rc,
     sync::{Arc, Mutex as StdMutex},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+mod command_builder;
+mod mapping;
 
 use agent_client_protocol::{
     self as acp, Agent as _, ClientCapabilities, FileSystemCapabilities, RequestId,
@@ -14,19 +18,33 @@ use agent_client_protocol::{
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use tauri::ipc::Channel;
-use tokio::{
-    process::Command,
-    sync::{mpsc, oneshot, RwLock},
-};
+use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
+use self::{
+    command_builder::build_agent_command,
+    mapping::{
+        build_mcp_servers, config_option_contains_value, map_config_options,
+        runtime_state_from_parts, validate_mcp_server_capabilities,
+    },
+};
 use crate::domain::acp::{
-    AcpActionEvent, AcpAgentConfig, AcpAgentLaunchMode, AcpMcpServerConfig, AcpMessageBlock,
-    AcpMessageRole, AcpRestoreNotice, AcpSessionDetail, AcpSessionErrorLevel, AcpSessionMessage,
-    AcpSessionStatus, AcpSessionSummary,
+    AcpActionEvent, AcpAgentConfig, AcpAgentLaunchMode, AcpConfigOption, AcpMcpServerConfig,
+    AcpMessageBlock, AcpMessageRole, AcpRestoreNotice, AcpSessionDetail, AcpSessionErrorLevel,
+    AcpSessionMessage, AcpSessionRuntimeState, AcpSessionStatus, AcpSessionSummary,
 };
 use crate::infrastructure::config::SavedAcpSession;
 use crate::services::notification::NotificationService;
+
+pub type SessionPersistHook = Arc<
+    dyn Fn(
+            AcpSessionSummary,
+            AcpAgentConfig,
+            Vec<AcpMcpServerConfig>,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send>>
+        + Send
+        + Sync,
+>;
 
 #[derive(Clone)]
 pub struct AcpService {
@@ -37,6 +55,7 @@ pub struct AcpService {
     runtime_event_rx: Arc<StdMutex<Option<mpsc::UnboundedReceiver<RuntimeEvent>>>>,
     session_update_channels: Arc<RwLock<Vec<Channel<AcpSessionDetail>>>>,
     session_removal_channels: Arc<RwLock<Vec<Channel<String>>>>,
+    session_persist_hook: Option<SessionPersistHook>,
     notification: NotificationService,
 }
 
@@ -44,9 +63,12 @@ struct SessionRecord {
     agent: AcpAgentConfig,
     mcp_servers: Vec<AcpMcpServerConfig>,
     summary: AcpSessionSummary,
+    runtime: AcpSessionRuntimeState,
     messages: Vec<AcpSessionMessage>,
     next_message_id: u64,
     prompt_notification_pending: bool,
+    mode_revision: u64,
+    config_revision: u64,
     command_tx: mpsc::UnboundedSender<SessionCommand>,
 }
 
@@ -64,6 +86,15 @@ enum SessionCommand {
     },
     Cancel {
         respond_to: oneshot::Sender<Result<()>>,
+    },
+    SetMode {
+        mode_id: String,
+        respond_to: oneshot::Sender<Result<()>>,
+    },
+    SetConfigOption {
+        config_id: String,
+        value_id: String,
+        respond_to: oneshot::Sender<Result<Vec<AcpConfigOption>>>,
     },
     Shutdown {
         respond_to: oneshot::Sender<()>,
@@ -87,6 +118,20 @@ enum RuntimeEvent {
         correlation_id: Option<String>,
         detail: Option<String>,
     },
+    CurrentModeUpdated {
+        session_id: String,
+        current_mode_id: String,
+        emit_action: bool,
+    },
+    ConfigOptionsUpdated {
+        session_id: String,
+        config_options: Vec<AcpConfigOption>,
+        emit_action: bool,
+    },
+    SessionInfoUpdated {
+        session_id: String,
+        title: Option<Option<String>>,
+    },
     SystemMessage {
         session_id: String,
         content: String,
@@ -104,9 +149,21 @@ enum RuntimeEvent {
     },
 }
 
+impl RuntimeEvent {
+    fn should_persist_snapshot(&self) -> bool {
+        matches!(
+            self,
+            Self::CurrentModeUpdated { .. }
+                | Self::ConfigOptionsUpdated { .. }
+                | Self::SessionInfoUpdated { .. }
+        )
+    }
+}
+
 struct StartedSession {
     session_id: String,
     agent_title: String,
+    runtime: AcpSessionRuntimeState,
 }
 
 enum SessionBootstrap {
@@ -164,7 +221,10 @@ impl acp::Client for AcpRuntimeClient {
 }
 
 impl AcpService {
-    pub fn new(notification: NotificationService) -> Self {
+    pub fn new(
+        notification: NotificationService,
+        session_persist_hook: Option<SessionPersistHook>,
+    ) -> Self {
         let (runtime_event_tx, runtime_event_rx) = mpsc::unbounded_channel();
 
         Self {
@@ -175,6 +235,7 @@ impl AcpService {
             runtime_event_rx: Arc::new(StdMutex::new(Some(runtime_event_rx))),
             session_update_channels: Arc::new(RwLock::new(Vec::new())),
             session_removal_channels: Arc::new(RwLock::new(Vec::new())),
+            session_persist_hook,
             notification,
         }
     }
@@ -217,6 +278,47 @@ impl AcpService {
         channels.retain(|channel| channel.send(session_id.clone()).is_ok());
     }
 
+    async fn persist_session_snapshot(
+        &self,
+        summary: AcpSessionSummary,
+        agent: AcpAgentConfig,
+        mcp_servers: Vec<AcpMcpServerConfig>,
+    ) {
+        if let Some(hook) = self.session_persist_hook.as_ref() {
+            hook(summary, agent, mcp_servers).await;
+        }
+    }
+
+    async fn finish_runtime_control_update<F>(
+        &self,
+        session_id: &str,
+        apply_update: F,
+    ) -> Result<AcpSessionDetail>
+    where
+        F: FnOnce(&mut SessionRecord) -> bool,
+    {
+        let active_session_id = self.active_session_id.read().await.clone();
+        let (detail, should_broadcast) = {
+            let mut sessions = self.sessions.write().await;
+            let record = sessions
+                .get_mut(session_id)
+                .with_context(|| format!("unknown ACP session: {session_id}"))?;
+            let should_broadcast = apply_update(record);
+            if should_broadcast {
+                record.summary.last_updated_at_ms = now_ms();
+                if active_session_id.as_deref() == Some(&record.summary.session_id) {
+                    record.summary.attention = false;
+                }
+            }
+            (record.detail(), should_broadcast)
+        };
+
+        if should_broadcast {
+            self.broadcast_session_update(detail.clone()).await;
+        }
+        Ok(detail)
+    }
+
     pub fn start_event_loop(&self) {
         let Some(mut receiver) = self.runtime_event_rx.lock().unwrap().take() else {
             return;
@@ -248,16 +350,20 @@ impl AcpService {
     }
 
     pub async fn session_detail(&self, session_id: &str) -> Option<AcpSessionDetail> {
+        let session_id = normalize_lookup_argument(session_id)?;
         let sessions = self.sessions.read().await;
-        sessions.get(session_id).map(SessionRecord::detail)
+        sessions.get(&session_id).map(SessionRecord::detail)
     }
 
     pub async fn session_runtime_config(&self, session_id: &str) -> Option<SessionRuntimeConfig> {
+        let session_id = normalize_lookup_argument(session_id)?;
         let sessions = self.sessions.read().await;
-        sessions.get(session_id).map(|record| SessionRuntimeConfig {
-            agent: record.agent.clone(),
-            mcp_servers: record.mcp_servers.clone(),
-        })
+        sessions
+            .get(&session_id)
+            .map(|record| SessionRuntimeConfig {
+                agent: record.agent.clone(),
+                mcp_servers: record.mcp_servers.clone(),
+            })
     }
 
     pub async fn take_restore_notices(&self) -> Vec<AcpRestoreNotice> {
@@ -321,9 +427,12 @@ impl AcpService {
                 last_error: None,
                 last_updated_at_ms: now,
             },
+            runtime: started.runtime,
             messages: Vec::new(),
             next_message_id: 0,
             prompt_notification_pending: false,
+            mode_revision: 0,
+            config_revision: 0,
             command_tx,
         };
         record.push_system_message(format!(
@@ -369,7 +478,7 @@ impl AcpService {
             snapshot.agent_name.clone()
         };
 
-        let snapshot_agent_id = snapshot.agent_id.clone();
+        let snapshot_agent_id = normalize_agent_id(snapshot.agent_id.as_deref());
         let agent = AcpAgentConfig {
             id: snapshot_agent_id
                 .clone()
@@ -445,7 +554,7 @@ impl AcpService {
             summary: AcpSessionSummary {
                 session_id: started.session_id.clone(),
                 workspace_root: workspace_root.to_string_lossy().into_owned(),
-                title: snapshot.title,
+                title: normalize_session_title(&snapshot.title, &snapshot.workspace_root),
                 agent_id: snapshot_agent_id,
                 agent_name: agent.name.clone(),
                 status: AcpSessionStatus::Idle,
@@ -455,9 +564,12 @@ impl AcpService {
                 last_error: None,
                 last_updated_at_ms: snapshot.last_updated_at_ms.max(now_ms()),
             },
+            runtime: started.runtime,
             messages: Vec::new(),
             next_message_id: 0,
             prompt_notification_pending: false,
+            mode_revision: 0,
+            config_revision: 0,
             command_tx,
         };
         record.push_system_message(format!(
@@ -510,11 +622,12 @@ impl AcpService {
     }
 
     pub async fn send_prompt(&self, session_id: &str, prompt: String) -> Result<AcpSessionDetail> {
+        let session_id = normalize_required_argument("ACP session id", session_id)?;
         let (respond_to, response) = oneshot::channel();
         let detail = {
             let mut sessions = self.sessions.write().await;
             let record = sessions
-                .get_mut(session_id)
+                .get_mut(&session_id)
                 .with_context(|| format!("unknown ACP session: {session_id}"))?;
             record.summary.status = AcpSessionStatus::Running;
             record.summary.error_level = None;
@@ -537,11 +650,103 @@ impl AcpService {
         Ok(detail)
     }
 
+    pub async fn set_session_mode(
+        &self,
+        session_id: &str,
+        mode_id: String,
+    ) -> Result<AcpSessionDetail> {
+        let session_id = normalize_required_argument("ACP session id", session_id)?;
+        let mode_id = normalize_required_argument("ACP session mode", &mode_id)?;
+        let (respond_to, response) = oneshot::channel();
+        let expected_mode_revision = {
+            let mut sessions = self.sessions.write().await;
+            let record = sessions
+                .get_mut(&session_id)
+                .with_context(|| format!("unknown ACP session: {session_id}"))?;
+            ensure_runtime_control_allowed(&record.summary.status, "切换 ACP session mode")?;
+            if !record
+                .runtime
+                .available_modes
+                .iter()
+                .any(|mode| mode.id == mode_id)
+            {
+                anyhow::bail!("unknown ACP session mode: {mode_id}");
+            }
+            record
+                .command_tx
+                .send(SessionCommand::SetMode {
+                    mode_id: mode_id.clone(),
+                    respond_to,
+                })
+                .map_err(|_| anyhow::anyhow!("ACP session runtime is unavailable"))?;
+            record.reserve_mode_update_request()
+        };
+
+        response
+            .await
+            .context("ACP set session mode response channel closed")??;
+
+        self.finish_runtime_control_update(&session_id, |record| {
+            record.apply_mode_response_if_fresh(expected_mode_revision, mode_id)
+        })
+        .await
+    }
+
+    pub async fn set_session_config_option(
+        &self,
+        session_id: &str,
+        config_id: String,
+        value_id: String,
+    ) -> Result<AcpSessionDetail> {
+        let session_id = normalize_required_argument("ACP session id", session_id)?;
+        let config_id = normalize_required_argument("ACP config option", &config_id)?;
+        let value_id = normalize_required_argument("ACP config option value", &value_id)?;
+        let (respond_to, response) = oneshot::channel();
+        let expected_config_revision = {
+            let mut sessions = self.sessions.write().await;
+            let record = sessions
+                .get_mut(&session_id)
+                .with_context(|| format!("unknown ACP session: {session_id}"))?;
+            ensure_runtime_control_allowed(
+                &record.summary.status,
+                "切换 ACP session config option",
+            )?;
+            let option = record
+                .runtime
+                .config_options
+                .iter()
+                .find(|option| option.id == config_id)
+                .with_context(|| format!("unknown ACP config option: {config_id}"))?;
+            if !config_option_contains_value(option, &value_id) {
+                anyhow::bail!("unknown ACP config option value: {config_id}={value_id}");
+            }
+            record
+                .command_tx
+                .send(SessionCommand::SetConfigOption {
+                    config_id,
+                    value_id,
+                    respond_to,
+                })
+                .map_err(|_| anyhow::anyhow!("ACP session runtime is unavailable"))?;
+            record.reserve_config_update_request()
+        };
+
+        let config_options = response
+            .await
+            .context("ACP set session config option response channel closed")??;
+
+        self.finish_runtime_control_update(&session_id, |record| {
+            record.apply_config_response_if_fresh(expected_config_revision, config_options)
+        })
+        .await
+    }
+
     pub async fn cancel_session(&self, session_id: &str) -> Result<()> {
+        let session_id = normalize_required_argument("ACP session id", session_id)?;
         let (respond_to, response) = oneshot::channel();
         let sessions = self.sessions.read().await;
         let record = sessions
-            .get(session_id)
+            .get(&session_id)
             .with_context(|| format!("unknown ACP session: {session_id}"))?;
         record
             .command_tx
@@ -556,9 +761,10 @@ impl AcpService {
     }
 
     pub async fn close_session(&self, session_id: &str) -> Result<()> {
+        let session_id = normalize_required_argument("ACP session id", session_id)?;
         let record = {
             let mut sessions = self.sessions.write().await;
-            sessions.remove(session_id)
+            sessions.remove(&session_id)
         };
 
         let Some(record) = record else {
@@ -573,21 +779,25 @@ impl AcpService {
 
         {
             let mut active = self.active_session_id.write().await;
-            if active.as_deref() == Some(session_id) {
+            if active.as_deref() == Some(session_id.as_str()) {
                 *active = None;
             }
         }
 
-        self.broadcast_session_removal(session_id.to_string()).await;
+        self.broadcast_session_removal(session_id).await;
         Ok(())
     }
 
     async fn apply_runtime_event(&self, event: RuntimeEvent) -> Result<()> {
         let active_session_id = self.active_session_id.read().await.clone();
+        let should_persist_snapshot = event.should_persist_snapshot();
         let session_id = match &event {
             RuntimeEvent::AssistantChunk { session_id, .. }
             | RuntimeEvent::ThoughtChunk { session_id, .. }
             | RuntimeEvent::ActionEvent { session_id, .. }
+            | RuntimeEvent::CurrentModeUpdated { session_id, .. }
+            | RuntimeEvent::ConfigOptionsUpdated { session_id, .. }
+            | RuntimeEvent::SessionInfoUpdated { session_id, .. }
             | RuntimeEvent::SystemMessage { session_id, .. }
             | RuntimeEvent::PromptFinished { session_id }
             | RuntimeEvent::PromptFailed { session_id, .. }
@@ -597,7 +807,7 @@ impl AcpService {
         tracing::info!(?event, %session_id, "applying runtime event");
 
         let mut completion_notification: Option<CompletionNotificationRequest> = None;
-        let detail = {
+        let (detail, snapshot_to_persist) = {
             let mut sessions = self.sessions.write().await;
             let Some(record) = sessions.get_mut(&session_id) else {
                 return Ok(());
@@ -625,17 +835,53 @@ impl AcpService {
                     detail,
                     ..
                 } => {
-                    record.summary.last_updated_at_ms = now_ms();
-                    if active_session_id.as_deref() != Some(&record.summary.session_id) {
-                        record.summary.attention = true;
-                    }
+                    record.mark_runtime_event(active_session_id.as_deref());
                     record.append_action_event(kind, title, correlation_id, detail);
                 }
-                RuntimeEvent::SystemMessage { content, .. } => {
-                    record.summary.last_updated_at_ms = now_ms();
-                    if active_session_id.as_deref() != Some(&record.summary.session_id) {
-                        record.summary.attention = true;
+                RuntimeEvent::CurrentModeUpdated {
+                    current_mode_id,
+                    emit_action,
+                    ..
+                } => {
+                    record.mark_runtime_event(active_session_id.as_deref());
+                    record.apply_current_mode_update(current_mode_id.clone());
+                    if emit_action {
+                        let title = record
+                            .runtime
+                            .available_modes
+                            .iter()
+                            .find(|mode| mode.id == current_mode_id)
+                            .map(|mode| format!("切换到 {}", mode.name))
+                            .unwrap_or_else(|| format!("切换到 {}", current_mode_id));
+                        record.append_action_event("mode".to_string(), title, None, None);
                     }
+                }
+                RuntimeEvent::ConfigOptionsUpdated {
+                    config_options,
+                    emit_action,
+                    ..
+                } => {
+                    record.mark_runtime_event(active_session_id.as_deref());
+                    record.apply_config_options_update(config_options);
+                    if emit_action {
+                        record.append_action_event(
+                            "config".to_string(),
+                            "更新配置".to_string(),
+                            None,
+                            None,
+                        );
+                    }
+                }
+                RuntimeEvent::SessionInfoUpdated { title, .. } => {
+                    record.mark_runtime_event(active_session_id.as_deref());
+                    if let Some(title) = title {
+                        record.summary.title = title.unwrap_or_else(|| {
+                            fallback_session_title(&record.summary.workspace_root)
+                        });
+                    }
+                }
+                RuntimeEvent::SystemMessage { content, .. } => {
+                    record.mark_runtime_event(active_session_id.as_deref());
                     record.push_system_message(content);
                 }
                 RuntimeEvent::PromptFinished { .. } => {
@@ -658,10 +904,7 @@ impl AcpService {
                     record.summary.status = AcpSessionStatus::Error;
                     record.summary.error_level = Some(AcpSessionErrorLevel::Recoverable);
                     record.summary.last_error = Some(error.clone());
-                    record.summary.last_updated_at_ms = now_ms();
-                    if active_session_id.as_deref() != Some(&record.summary.session_id) {
-                        record.summary.attention = true;
-                    }
+                    record.mark_runtime_event(active_session_id.as_deref());
                     record.finish_assistant_message();
                     record.push_system_message(format!("prompt 失败：{error}"));
                     if record.prompt_notification_pending {
@@ -684,10 +927,7 @@ impl AcpService {
                     record.summary.error_level =
                         error.as_ref().map(|_| AcpSessionErrorLevel::Fatal);
                     record.summary.last_error = error.clone();
-                    record.summary.last_updated_at_ms = now_ms();
-                    if active_session_id.as_deref() != Some(&record.summary.session_id) {
-                        record.summary.attention = true;
-                    }
+                    record.mark_runtime_event(active_session_id.as_deref());
                     if let Some(error) = error {
                         record.push_system_message(format!("agent 已退出：{error}"));
                     } else {
@@ -713,10 +953,22 @@ impl AcpService {
                 record.summary.is_active = false;
             }
 
-            record.detail()
+            let snapshot_to_persist = should_persist_snapshot.then(|| {
+                (
+                    record.summary.clone(),
+                    record.agent.clone(),
+                    record.mcp_servers.clone(),
+                )
+            });
+
+            (record.detail(), snapshot_to_persist)
         };
 
         self.broadcast_session_update(detail).await;
+        if let Some((summary, agent, mcp_servers)) = snapshot_to_persist {
+            self.persist_session_snapshot(summary, agent, mcp_servers)
+                .await;
+        }
         if let Some(notification) = completion_notification {
             if notification.succeeded {
                 self.notification
@@ -747,7 +999,59 @@ impl SessionRecord {
         AcpSessionDetail {
             session: self.summary.clone(),
             messages: self.messages.clone(),
+            runtime: self.runtime.clone(),
         }
+    }
+
+    fn mark_runtime_event(&mut self, active_session_id: Option<&str>) {
+        self.summary.last_updated_at_ms = now_ms();
+        if active_session_id != Some(self.summary.session_id.as_str()) {
+            self.summary.attention = true;
+        }
+    }
+
+    fn reserve_mode_update_request(&mut self) -> u64 {
+        self.mode_revision = self.mode_revision.saturating_add(1);
+        self.mode_revision
+    }
+
+    fn apply_current_mode_update(&mut self, current_mode_id: String) {
+        self.mode_revision = self.mode_revision.saturating_add(1);
+        self.runtime.current_mode_id = Some(current_mode_id);
+    }
+
+    fn apply_mode_response_if_fresh(
+        &mut self,
+        expected_revision: u64,
+        current_mode_id: String,
+    ) -> bool {
+        if self.mode_revision != expected_revision {
+            return false;
+        }
+        self.apply_current_mode_update(current_mode_id);
+        true
+    }
+
+    fn reserve_config_update_request(&mut self) -> u64 {
+        self.config_revision = self.config_revision.saturating_add(1);
+        self.config_revision
+    }
+
+    fn apply_config_options_update(&mut self, config_options: Vec<AcpConfigOption>) {
+        self.config_revision = self.config_revision.saturating_add(1);
+        self.runtime.config_options = config_options;
+    }
+
+    fn apply_config_response_if_fresh(
+        &mut self,
+        expected_revision: u64,
+        config_options: Vec<AcpConfigOption>,
+    ) -> bool {
+        if self.config_revision != expected_revision {
+            return false;
+        }
+        self.apply_config_options_update(config_options);
+        true
     }
 
     fn push_message(&mut self, role: AcpMessageRole, content: String, pending: bool) {
@@ -1043,26 +1347,33 @@ async fn run_session_runtime(
     )?;
     let mcp_servers = build_mcp_servers(&mcp_servers);
 
-    let session_id = match bootstrap {
-        SessionBootstrap::New => connection
-            .new_session(acp::NewSessionRequest::new(&workspace_root).mcp_servers(mcp_servers))
-            .await
-            .context("failed to create ACP session")?
-            .session_id
-            .to_string(),
+    let (session_id, runtime) = match bootstrap {
+        SessionBootstrap::New => {
+            let response = connection
+                .new_session(acp::NewSessionRequest::new(&workspace_root).mcp_servers(mcp_servers))
+                .await
+                .context("failed to create ACP session")?;
+            (
+                response.session_id.to_string(),
+                runtime_state_from_parts(response.modes, response.config_options),
+            )
+        }
         SessionBootstrap::Load { session_id } => {
             if !initialize_response.agent_capabilities.load_session {
                 anyhow::bail!("agent 不支持 session/load，无法恢复之前的 session");
             }
 
-            connection
+            let response = connection
                 .load_session(
                     acp::LoadSessionRequest::new(session_id.clone(), &workspace_root)
                         .mcp_servers(mcp_servers),
                 )
                 .await
                 .context("agent 拒绝恢复 session/load")?;
-            session_id
+            (
+                session_id,
+                runtime_state_from_parts(response.modes, response.config_options),
+            )
         }
     };
     let agent_title = initialize_response
@@ -1073,6 +1384,7 @@ async fn run_session_runtime(
         let _ = started_tx.send(Ok(StartedSession {
             session_id: session_id.clone(),
             agent_title,
+            runtime,
         }));
     }
 
@@ -1134,6 +1446,36 @@ async fn run_session_runtime(
                             .cancel(acp::CancelNotification::new(session_id.clone()))
                             .await
                             .map_err(|error| anyhow::Error::new(error).context("failed to cancel ACP session"));
+                        let _ = respond_to.send(result);
+                    }
+                    SessionCommand::SetMode { mode_id, respond_to } => {
+                        let result = connection
+                            .set_session_mode(acp::SetSessionModeRequest::new(
+                                session_id.clone(),
+                                mode_id,
+                            ))
+                            .await
+                            .map(|_| ())
+                            .map_err(|error| anyhow::Error::new(error).context("failed to set ACP session mode"));
+                        let _ = respond_to.send(result);
+                    }
+                    SessionCommand::SetConfigOption {
+                        config_id,
+                        value_id,
+                        respond_to,
+                    } => {
+                        let result = connection
+                            .set_session_config_option(acp::SetSessionConfigOptionRequest::new(
+                                session_id.clone(),
+                                config_id,
+                                value_id,
+                            ))
+                            .await
+                            .map(|response| map_config_options(&response.config_options))
+                            .map_err(|error| {
+                                anyhow::Error::new(error)
+                                    .context("failed to set ACP session config option")
+                            });
                         let _ = respond_to.send(result);
                     }
                     SessionCommand::Shutdown { respond_to } => {
@@ -1313,157 +1655,41 @@ fn session_update_events(notification: acp::SessionNotification) -> Vec<RuntimeE
             correlation_id: None,
             detail: None,
         }],
-        SessionUpdate::CurrentModeUpdate(update) => vec![RuntimeEvent::ActionEvent {
+        SessionUpdate::CurrentModeUpdate(update) => vec![RuntimeEvent::CurrentModeUpdated {
             session_id: notification.session_id.to_string(),
-            kind: "mode".to_string(),
-            title: format!("切换到 {}", update.current_mode_id),
-            correlation_id: None,
-            detail: None,
+            current_mode_id: update.current_mode_id.to_string(),
+            emit_action: true,
         }],
-        SessionUpdate::ConfigOptionUpdate(_) => vec![RuntimeEvent::ActionEvent {
+        SessionUpdate::ConfigOptionUpdate(update) => vec![RuntimeEvent::ConfigOptionsUpdated {
             session_id: notification.session_id.to_string(),
-            kind: "config".to_string(),
-            title: "更新配置".to_string(),
-            correlation_id: None,
-            detail: None,
+            config_options: map_config_options(&update.config_options),
+            emit_action: true,
         }],
-        SessionUpdate::SessionInfoUpdate(_) => vec![RuntimeEvent::ActionEvent {
+        SessionUpdate::SessionInfoUpdate(update) => vec![RuntimeEvent::SessionInfoUpdated {
             session_id: notification.session_id.to_string(),
-            kind: "info".to_string(),
-            title: "更新会话信息".to_string(),
-            correlation_id: None,
-            detail: None,
+            title: update.title.as_opt_ref().map(|value| value.cloned()),
         }],
         SessionUpdate::UserMessageChunk(_) => Vec::new(),
         _ => Vec::new(),
     }
 }
 
-fn build_agent_command(
-    agent: &AcpAgentConfig,
-    workspace_root: &std::path::Path,
-) -> Result<Command> {
-    let mut command = match agent.launch_mode {
-        AcpAgentLaunchMode::Direct => {
-            if agent.program.trim().is_empty() {
-                anyhow::bail!("ACP agent program is empty");
-            }
-
-            let mut command = Command::new(&agent.program);
-            command.args(&agent.args);
-            command
-        }
-        AcpAgentLaunchMode::LoginShell | AcpAgentLaunchMode::InteractiveShell => {
-            let shell_command = agent
-                .shell_command
-                .as_ref()
-                .map(|value| value.trim())
-                .filter(|value| !value.is_empty())
-                .context("ACP agent shell command is empty")?;
-            shell_command_command(shell_command, agent.launch_mode)
-        }
-    };
-
-    command
-        .current_dir(workspace_root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true);
-    Ok(command)
+fn fallback_session_title(workspace_root: &str) -> String {
+    std::path::Path::new(workspace_root)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("workspace")
+        .to_string()
 }
 
-fn validate_mcp_server_capabilities(
-    servers: &[AcpMcpServerConfig],
-    capabilities: &acp::McpCapabilities,
-) -> Result<()> {
-    for server in servers {
-        match server {
-            AcpMcpServerConfig::Stdio(_) => {}
-            AcpMcpServerConfig::Http(server) => {
-                if !capabilities.http {
-                    anyhow::bail!(
-                        "agent 不支持 MCP HTTP transport，但 session 配置了 HTTP server：{}",
-                        server.name
-                    );
-                }
-            }
-            AcpMcpServerConfig::Sse(server) => {
-                if !capabilities.sse {
-                    anyhow::bail!(
-                        "agent 不支持 MCP SSE transport，但 session 配置了 SSE server：{}",
-                        server.name
-                    );
-                }
-            }
-        }
+fn normalize_session_title(title: &str, workspace_root: &str) -> String {
+    let trimmed = title.trim();
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
     }
 
-    Ok(())
-}
-
-fn build_mcp_servers(servers: &[AcpMcpServerConfig]) -> Vec<acp::McpServer> {
-    servers
-        .iter()
-        .map(|server| match server {
-            AcpMcpServerConfig::Stdio(server) => acp::McpServer::Stdio(
-                acp::McpServerStdio::new(&server.name, &server.command)
-                    .args(server.args.clone())
-                    .env(
-                        server
-                            .env
-                            .iter()
-                            .map(|pair| acp::EnvVariable::new(&pair.name, &pair.value))
-                            .collect(),
-                    ),
-            ),
-            AcpMcpServerConfig::Http(server) => acp::McpServer::Http(
-                acp::McpServerHttp::new(&server.name, &server.url).headers(
-                    server
-                        .headers
-                        .iter()
-                        .map(|pair| acp::HttpHeader::new(&pair.name, &pair.value))
-                        .collect(),
-                ),
-            ),
-            AcpMcpServerConfig::Sse(server) => acp::McpServer::Sse(
-                acp::McpServerSse::new(&server.name, &server.url).headers(
-                    server
-                        .headers
-                        .iter()
-                        .map(|pair| acp::HttpHeader::new(&pair.name, &pair.value))
-                        .collect(),
-                ),
-            ),
-        })
-        .collect()
-}
-
-#[cfg(target_os = "windows")]
-fn shell_command_command(shell_command: &str, launch_mode: AcpAgentLaunchMode) -> Command {
-    let mut command = Command::new("cmd");
-    let shell_flag = match launch_mode {
-        AcpAgentLaunchMode::LoginShell => "/C",
-        AcpAgentLaunchMode::InteractiveShell => "/C",
-        AcpAgentLaunchMode::Direct => "/C",
-    };
-    command.args([shell_flag, shell_command]);
-    command
-}
-
-#[cfg(not(target_os = "windows"))]
-fn shell_command_command(shell_command: &str, launch_mode: AcpAgentLaunchMode) -> Command {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-    let mut command = Command::new(shell);
-    match launch_mode {
-        AcpAgentLaunchMode::Direct | AcpAgentLaunchMode::LoginShell => {
-            command.args(["-l", "-c", shell_command]);
-        }
-        AcpAgentLaunchMode::InteractiveShell => {
-            command.args(["-i", "-l", "-c", shell_command]);
-        }
-    }
-    command
+    fallback_session_title(workspace_root)
 }
 
 fn summarize_tool_call(update: &acp::ToolCallUpdate) -> String {
@@ -1492,6 +1718,26 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn normalize_agent_id(agent_id: Option<&str>) -> Option<String> {
+    agent_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn normalize_lookup_argument(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn normalize_required_argument(label: &str, value: &str) -> Result<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("{label} 不能为空");
+    }
+    Ok(trimmed.to_string())
+}
+
 fn started_agent_name(shell_command: Option<&str>, program: &str, session_id: &str) -> String {
     shell_command
         .map(str::trim)
@@ -1513,9 +1759,24 @@ fn is_load_not_supported(error: &anyhow::Error) -> bool {
     message.contains("session/load") && message.contains("不支持")
 }
 
+fn ensure_runtime_control_allowed(status: &AcpSessionStatus, action: &str) -> Result<()> {
+    if *status == AcpSessionStatus::Idle {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "{action} 前 session 必须处于 idle 状态，当前状态为 {:?}",
+        status
+    );
+}
+
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+
     use super::*;
+    use crate::domain::acp::{AcpConfigOptionKind, AcpConfigValueOption};
+    use crate::services::acp::command_builder::choose_user_shell;
 
     fn make_session_record() -> SessionRecord {
         SessionRecord {
@@ -1542,9 +1803,12 @@ mod tests {
                 last_error: None,
                 last_updated_at_ms: 0,
             },
+            runtime: AcpSessionRuntimeState::default(),
             messages: Vec::new(),
             next_message_id: 0,
             prompt_notification_pending: false,
+            mode_revision: 0,
+            config_revision: 0,
             command_tx: mpsc::unbounded_channel().0,
         }
     }
@@ -1726,5 +1990,189 @@ mod tests {
                 AcpMessageBlock::Thought { content: second }
             ] if first == "think-1" && items.len() == 1 && second == "think-2"
         ));
+    }
+
+    #[test]
+    fn stale_mode_response_does_not_override_newer_runtime_update() {
+        let mut record = make_session_record();
+        let expected_revision = record.reserve_mode_update_request();
+
+        record.apply_current_mode_update("review".to_string());
+
+        assert!(!record.apply_mode_response_if_fresh(expected_revision, "plan".to_string()));
+        assert_eq!(record.runtime.current_mode_id.as_deref(), Some("review"));
+        assert_eq!(record.mode_revision, 2);
+    }
+
+    #[test]
+    fn stale_config_response_does_not_override_newer_runtime_update() {
+        let mut record = make_session_record();
+        let expected_revision = record.reserve_config_update_request();
+        let updated_options = vec![AcpConfigOption {
+            id: "model".to_string(),
+            name: "Model".to_string(),
+            description: None,
+            category: Some("model".to_string()),
+            kind: AcpConfigOptionKind::Select {
+                current_value_id: "gpt-5".to_string(),
+                options: vec![AcpConfigValueOption {
+                    value_id: "gpt-5".to_string(),
+                    name: "GPT-5".to_string(),
+                    description: None,
+                }],
+                groups: Vec::new(),
+            },
+        }];
+
+        record.apply_config_options_update(updated_options.clone());
+
+        assert!(!record.apply_config_response_if_fresh(expected_revision, Vec::new()));
+        assert_eq!(record.runtime.config_options, updated_options);
+        assert_eq!(record.config_revision, 2);
+    }
+
+    #[test]
+    fn newer_local_mode_response_wins_over_older_local_response() {
+        let mut record = make_session_record();
+        let first_revision = record.reserve_mode_update_request();
+        let second_revision = record.reserve_mode_update_request();
+
+        assert!(!record.apply_mode_response_if_fresh(first_revision, "plan".to_string()));
+        assert!(record.apply_mode_response_if_fresh(second_revision, "review".to_string()));
+        assert_eq!(record.runtime.current_mode_id.as_deref(), Some("review"));
+    }
+
+    #[test]
+    fn newer_local_config_response_wins_over_older_local_response() {
+        let mut record = make_session_record();
+        let first_revision = record.reserve_config_update_request();
+        let second_revision = record.reserve_config_update_request();
+        let review_options = vec![AcpConfigOption {
+            id: "model".to_string(),
+            name: "Model".to_string(),
+            description: None,
+            category: Some("model".to_string()),
+            kind: AcpConfigOptionKind::Select {
+                current_value_id: "gpt-5".to_string(),
+                options: vec![AcpConfigValueOption {
+                    value_id: "gpt-5".to_string(),
+                    name: "GPT-5".to_string(),
+                    description: None,
+                }],
+                groups: Vec::new(),
+            },
+        }];
+
+        assert!(!record.apply_config_response_if_fresh(first_revision, Vec::new()));
+        assert!(record.apply_config_response_if_fresh(second_revision, review_options.clone()));
+        assert_eq!(record.runtime.config_options, review_options);
+    }
+
+    #[test]
+    fn session_info_updates_request_snapshot_persistence() {
+        assert!(RuntimeEvent::SessionInfoUpdated {
+            session_id: "session-1".to_string(),
+            title: Some(Some("next".to_string())),
+        }
+        .should_persist_snapshot());
+        assert!(!RuntimeEvent::AssistantChunk {
+            session_id: "session-1".to_string(),
+            content: "hello".to_string(),
+        }
+        .should_persist_snapshot());
+    }
+
+    #[test]
+    fn runtime_control_requires_idle_session() {
+        assert!(ensure_runtime_control_allowed(&AcpSessionStatus::Idle, "切换模式").is_ok());
+
+        let error = ensure_runtime_control_allowed(&AcpSessionStatus::Running, "切换模式")
+            .expect_err("running session should reject runtime control");
+
+        assert!(error.to_string().contains("idle"));
+        assert!(error.to_string().contains("Running"));
+    }
+
+    #[test]
+    fn normalize_agent_id_treats_blank_value_as_missing() {
+        assert_eq!(
+            normalize_agent_id(Some(" agent-1 ")).as_deref(),
+            Some("agent-1")
+        );
+        assert_eq!(normalize_agent_id(Some("   ")), None);
+        assert_eq!(normalize_agent_id(None), None);
+    }
+
+    #[test]
+    fn normalize_lookup_argument_treats_blank_value_as_missing() {
+        assert_eq!(
+            normalize_lookup_argument(" session-1 ").as_deref(),
+            Some("session-1")
+        );
+        assert_eq!(normalize_lookup_argument("   "), None);
+    }
+
+    #[test]
+    fn normalize_required_argument_rejects_blank_value() {
+        assert_eq!(
+            normalize_required_argument("mode", " review ")
+                .expect("trimmed mode should be accepted"),
+            "review"
+        );
+        assert!(normalize_required_argument("mode", "   ").is_err());
+    }
+
+    #[test]
+    fn normalize_required_argument_trims_session_id() {
+        assert_eq!(
+            normalize_required_argument("ACP session id", " session-1 ")
+                .expect("trimmed session id should be accepted"),
+            "session-1"
+        );
+    }
+
+    #[test]
+    fn normalize_session_title_falls_back_to_workspace_name_when_blank() {
+        assert_eq!(
+            normalize_session_title("  ", "/tmp/demo-workspace"),
+            "demo-workspace"
+        );
+        assert_eq!(
+            normalize_session_title(" custom title ", "/tmp/demo-workspace"),
+            "custom title"
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn choose_user_shell_prefers_account_shell_over_env() {
+        let resolved = choose_user_shell(
+            Some(OsString::from("/bin/zsh")),
+            Some(OsString::from("/bin/bash")),
+        );
+
+        assert_eq!(resolved, OsString::from("/bin/zsh"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn choose_user_shell_falls_back_to_env_when_account_shell_is_not_supported() {
+        let resolved = choose_user_shell(
+            Some(OsString::from("/opt/homebrew/bin/nu")),
+            Some(OsString::from("/bin/bash")),
+        );
+
+        assert_eq!(resolved, OsString::from("/bin/bash"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn choose_user_shell_falls_back_to_bin_sh_when_no_supported_shell_exists() {
+        let resolved = choose_user_shell(
+            Some(OsString::from("/opt/homebrew/bin/nu")),
+            Some(OsString::from("/opt/homebrew/bin/fish")),
+        );
+
+        assert_eq!(resolved, OsString::from("/bin/sh"));
     }
 }

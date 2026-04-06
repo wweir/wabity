@@ -2,7 +2,12 @@ import hljs from "highlight.js/lib/core";
 import jsonLanguage from "highlight.js/lib/languages/json";
 import { lazy, memo, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode, RefObject } from "react";
-import type { AcpSessionDetail, AcpSessionMessage } from "../../../lib/tauri/types";
+import type {
+	AcpConfigOption,
+	AcpConfigOptionGroup,
+	AcpSessionDetail,
+	AcpSessionMessage,
+} from "../../../lib/tauri/types";
 import type {
 	ExecutionResult,
 	RagAnswerStructuredPayload,
@@ -122,6 +127,7 @@ const MemoizedResultCard = memo(ResultCard);
 
 interface LauncherFeedbackProps {
 	activeSession: AcpSessionDetail | null;
+	runtimeControlPendingKey: string | null;
 	qaCitations: RagCitation[];
 	qaMessages: AcpSessionMessage[];
 	qaRetrieval: RagRetrievalSummary | null;
@@ -130,6 +136,8 @@ interface LauncherFeedbackProps {
 	resultPending?: boolean;
 	jsonPreview: string | null;
 	markdownPreview: string | null;
+	onSetAcpSessionConfigOption: (configId: string, valueId: string) => void | Promise<void>;
+	onSetAcpSessionMode: (modeId: string) => void | Promise<void>;
 	onOpenRagCitation: (citation: RagCitation) => void | Promise<void>;
 }
 
@@ -193,6 +201,7 @@ function scrollPendingMessageIntoView(container: HTMLDivElement) {
 
 export function LauncherFeedback({
 	activeSession,
+	runtimeControlPendingKey,
 	qaCitations,
 	qaMessages,
 	qaRetrieval,
@@ -201,6 +210,8 @@ export function LauncherFeedback({
 	resultPending = false,
 	jsonPreview,
 	markdownPreview,
+	onSetAcpSessionConfigOption,
+	onSetAcpSessionMode,
 	onOpenRagCitation,
 }: LauncherFeedbackProps) {
 	const ragPayload = resolveRagPayload(result);
@@ -213,7 +224,15 @@ export function LauncherFeedback({
 	let content: ReactNode = null;
 
 	if (activeSession) {
-		content = <SessionFeedback activeSession={activeSession} sessionLogRef={sessionLogRef} />;
+		content = (
+			<SessionFeedback
+				activeSession={activeSession}
+				runtimeControlPendingKey={runtimeControlPendingKey}
+				sessionLogRef={sessionLogRef}
+				onSetAcpSessionConfigOption={onSetAcpSessionConfigOption}
+				onSetAcpSessionMode={onSetAcpSessionMode}
+			/>
+		);
 	} else if (jsonPreview) {
 		content = <MemoizedResultCard label="JSON Preview" content={jsonPreview} render="json" />;
 	} else if (markdownPreview) {
@@ -248,13 +267,32 @@ export function LauncherFeedback({
 
 const SessionFeedback = memo(function SessionFeedback({
 	activeSession,
+	runtimeControlPendingKey,
 	sessionLogRef,
+	onSetAcpSessionConfigOption,
+	onSetAcpSessionMode,
 }: {
 	activeSession: AcpSessionDetail;
+	runtimeControlPendingKey: string | null;
 	sessionLogRef: RefObject<HTMLDivElement | null>;
+	onSetAcpSessionConfigOption: (configId: string, valueId: string) => void | Promise<void>;
+	onSetAcpSessionMode: (modeId: string) => void | Promise<void>;
 }) {
 	const shouldFollowPendingRef = useRef(true);
 	const trackedSessionIdRef = useRef<string | null>(null);
+	const currentMode = useMemo(
+		() =>
+			activeSession.runtime.availableModes.find(
+				(mode) => mode.id === activeSession.runtime.currentModeId,
+			) ?? null,
+		[
+			activeSession.runtime.availableModes,
+			activeSession.runtime.currentModeId,
+		],
+	);
+	const hasRuntimeControls =
+		activeSession.runtime.availableModes.length > 0 ||
+		activeSession.runtime.configOptions.length > 0;
 	const visibleMessages = useMemo(
 		() => activeSession.messages.filter((message) => message.role !== "system"),
 		[activeSession.messages],
@@ -297,12 +335,119 @@ const SessionFeedback = memo(function SessionFeedback({
 
 	return (
 		<div className="session-log" ref={sessionLogRef}>
+			{hasRuntimeControls ? (
+				<section className="session-runtime-panel" aria-label="ACP 运行时配置">
+					<header className="session-runtime-header">
+						<div className="session-runtime-heading">
+							<span className="session-runtime-kicker">ACP Runtime</span>
+							<strong className="session-runtime-title">当前会话运行时</strong>
+						</div>
+						<span className="session-runtime-summary">
+							{activeSession.session.status === "idle" ? "可切换" : "运行中时只读"}
+						</span>
+					</header>
+					<div className="session-runtime-grid">
+						{activeSession.runtime.availableModes.length > 0 ? (
+							<label className="session-runtime-field">
+								<span className="session-runtime-label">运行模式</span>
+								<select
+									className="session-runtime-select"
+									value={activeSession.runtime.currentModeId ?? ""}
+									disabled={
+										activeSession.session.status !== "idle" ||
+										runtimeControlPendingKey === "mode"
+									}
+									onChange={(event) => {
+										if (event.target.value) {
+											void onSetAcpSessionMode(event.target.value);
+										}
+									}}
+								>
+									{activeSession.runtime.availableModes.map((mode) => (
+										<option key={mode.id} value={mode.id}>
+											{mode.name}
+										</option>
+									))}
+								</select>
+								{currentMode?.description ? (
+									<span className="session-runtime-help">{currentMode.description}</span>
+								) : null}
+							</label>
+						) : null}
+						{activeSession.runtime.configOptions.map((option) => (
+							<label className="session-runtime-field" key={option.id}>
+								<span className="session-runtime-label-row">
+									<span className="session-runtime-label">{option.name}</span>
+									{option.category ? (
+										<span className="session-runtime-badge">
+											{formatConfigCategory(option.category)}
+										</span>
+									) : null}
+								</span>
+								<select
+									className="session-runtime-select"
+									value={option.kind.currentValueId}
+									disabled={
+										activeSession.session.status !== "idle" ||
+										runtimeControlPendingKey === `config:${option.id}`
+									}
+									onChange={(event) => {
+										void onSetAcpSessionConfigOption(option.id, event.target.value);
+									}}
+								>
+									{renderConfigOptions(option)}
+								</select>
+								{option.description ? (
+									<span className="session-runtime-help">{option.description}</span>
+								) : null}
+							</label>
+						))}
+					</div>
+				</section>
+			) : null}
 			<Suspense fallback={<p className="status-line">加载会话内容...</p>}>
 				<SessionTimeline messages={visibleMessages} />
 			</Suspense>
 		</div>
 	);
 });
+
+function formatConfigCategory(category: string) {
+	switch (category) {
+		case "model":
+			return "模型";
+		case "mode":
+			return "模式";
+		case "thought_level":
+			return "思考级别";
+		default:
+			return category;
+	}
+}
+
+function renderConfigOptions(option: AcpConfigOption) {
+	if (option.kind.groups.length > 0) {
+		return option.kind.groups.map((group) => renderConfigOptionGroup(group));
+	}
+
+	return option.kind.options.map((entry) => (
+		<option key={entry.valueId} value={entry.valueId}>
+			{entry.name}
+		</option>
+	));
+}
+
+function renderConfigOptionGroup(group: AcpConfigOptionGroup) {
+	return (
+		<optgroup key={group.id} label={group.name}>
+			{group.options.map((entry) => (
+				<option key={entry.valueId} value={entry.valueId}>
+					{entry.name}
+				</option>
+			))}
+		</optgroup>
+	);
+}
 
 const ResultFeedback = memo(function ResultFeedback({
 	onOpenRagCitation,

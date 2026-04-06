@@ -2,11 +2,12 @@ import type { ActionMatch, FileSearchMatch, InputMode, QueryPayload } from "./ty
 
 export const fileSearchDebounceMs = 50;
 export const appSearchDebounceMs = 80;
+export const killSearchDebounceMs = 80;
 export const jsonFormatCommandAliases = ["/format", "/fmt", "/json"] as const;
 export const markdownCommandAliases = ["/md", "/markdown"] as const;
 export const base64CommandAliases = ["/base64"] as const;
 
-export type SuggestionMode = "none" | "file" | "action" | "app";
+export type SuggestionMode = "none" | "file" | "action" | "app" | "kill";
 
 export interface FileTokenMatch {
 	start: number;
@@ -345,6 +346,29 @@ export function isAppSearchReady(query: string) {
 	}
 
 	return false;
+}
+
+export function isKillSearchReady(query: string) {
+	const normalized = query.trim();
+	if (!normalized || normalized.startsWith("pid:")) {
+		return false;
+	}
+
+	const nonEnglishLetterCount = Array.from(normalized).reduce(
+		(count, character) => count + (isNonEnglishLetter(character) ? 1 : 0),
+		0,
+	);
+	if (nonEnglishLetterCount >= 1) {
+		return true;
+	}
+
+	const latinCount = countMatchingCharacters(normalized, /[A-Za-z]/u);
+	if (latinCount >= 2) {
+		return true;
+	}
+
+	const digitCount = countMatchingCharacters(normalized, /\d/u);
+	return digitCount >= 2;
 }
 
 export function deriveActionCompletion(rawText: string, match: ActionMatch | undefined) {

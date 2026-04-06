@@ -1576,6 +1576,106 @@
 	scrollbar-gutter: stable;
 }
 
+.session-runtime-panel {
+	display: grid;
+	gap: 10px;
+	padding: 12px 14px;
+	border: 1px solid var(--border-regular);
+	border-radius: 16px;
+	background: color-mix(in srgb, var(--surface-card-subtle) 72%, var(--surface-raised));
+}
+
+.session-runtime-header,
+.session-runtime-heading,
+.session-runtime-grid,
+.session-runtime-field {
+	display: grid;
+}
+
+.session-runtime-header {
+	grid-template-columns: minmax(0, 1fr) auto;
+	gap: 8px;
+	align-items: start;
+}
+
+.session-runtime-heading {
+	gap: 3px;
+}
+
+.session-runtime-kicker {
+	color: var(--text-muted);
+	font-size: var(--text-2xs);
+	font-weight: 700;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+}
+
+.session-runtime-title {
+	color: var(--text-primary);
+	font-size: var(--text-sm);
+	font-weight: 700;
+}
+
+.session-runtime-summary {
+	color: var(--text-muted);
+	font-size: var(--text-xs);
+	line-height: 1.4;
+}
+
+.session-runtime-grid {
+	gap: 10px;
+}
+
+.session-runtime-field {
+	gap: 6px;
+}
+
+.session-runtime-label-row {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+}
+
+.session-runtime-label {
+	color: var(--text-secondary);
+	font-size: var(--text-xs);
+	font-weight: 600;
+	line-height: 1.35;
+}
+
+.session-runtime-badge {
+	padding: 2px 7px;
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--surface-control-soft) 88%, transparent);
+	color: var(--text-muted);
+	font-size: var(--text-2xs);
+	font-weight: 600;
+	line-height: 1.2;
+}
+
+.session-runtime-select {
+	min-height: 36px;
+	padding: 0 12px;
+	border: 1px solid var(--border-regular);
+	border-radius: 10px;
+	background: var(--surface-base);
+	color: var(--text-primary);
+	font: inherit;
+}
+
+.session-runtime-select:disabled {
+	background: color-mix(in srgb, var(--surface-card-subtle) 88%, transparent);
+	color: var(--text-muted);
+	cursor: not-allowed;
+}
+
+.session-runtime-help {
+	color: var(--text-muted);
+	font-size: var(--text-xs);
+	line-height: 1.5;
+}
+
 .session-message {
 	--session-message-background: var(--surface-raised);
 	--session-message-border: var(--border-regular);

@@ -11,7 +11,7 @@ use crate::{
     domain::{
         actions::ActionMatch, application::InstalledAppMatch, execution::ExecutionProgressEvent,
         execution::ExecutionRequest, execution::ExecutionResult, file_search::FileSearchMatch,
-        query::QueryPayload,
+        process::RunningProcessMatch, query::QueryPayload,
     },
     infrastructure::{
         config::{normalize_workspace_root, ShortcutKey},
@@ -80,6 +80,20 @@ pub fn search_apps(
         .search(&query, limit)
         .map_err(|error| error.to_string());
     log_launcher_search_completion("search_apps", &query, limit, started_at, &result);
+    result
+}
+
+pub fn search_processes(
+    state: State<'_, AppState>,
+    query: String,
+    limit: usize,
+) -> Result<Vec<RunningProcessMatch>, String> {
+    let started_at = Instant::now();
+    let result = state
+        .process()
+        .search_running(&query, limit)
+        .map_err(|error| error.to_string());
+    log_launcher_search_completion("search_processes", &query, limit, started_at, &result);
     result
 }
 
@@ -297,6 +311,26 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
             super::respond_sync(
                 resolver,
                 search_apps(state, query, limit).map_err(InvokeError::from),
+            )
+        }
+        "search_processes" => {
+            let resolver = invoke.resolver.clone();
+            let Some(state) = super::parse_or_invoke_error(&invoke, "search_processes", "state")
+            else {
+                return true;
+            };
+            let Some(query) = super::parse_or_invoke_error(&invoke, "search_processes", "query")
+            else {
+                return true;
+            };
+            let Some(limit) = super::parse_or_invoke_error(&invoke, "search_processes", "limit")
+            else {
+                return true;
+            };
+
+            super::respond_sync(
+                resolver,
+                search_processes(state, query, limit).map_err(InvokeError::from),
             )
         }
         "execute_action" => super::respond_async(invoke.resolver.clone(), async move {

@@ -320,9 +320,50 @@ export interface AcpSessionSummary {
 	lastUpdatedAtMs: number;
 }
 
+export interface AcpModeOption {
+	id: string;
+	name: string;
+	description: string | null;
+}
+
+export interface AcpConfigValueOption {
+	valueId: string;
+	name: string;
+	description: string | null;
+}
+
+export interface AcpConfigOptionGroup {
+	id: string;
+	name: string;
+	options: AcpConfigValueOption[];
+}
+
+export type AcpConfigOptionKind =
+	{
+		type: "select";
+		currentValueId: string;
+		options: AcpConfigValueOption[];
+		groups: AcpConfigOptionGroup[];
+	};
+
+export interface AcpConfigOption {
+	id: string;
+	name: string;
+	description: string | null;
+	category: string | null;
+	kind: AcpConfigOptionKind;
+}
+
+export interface AcpSessionRuntimeState {
+	currentModeId: string | null;
+	availableModes: AcpModeOption[];
+	configOptions: AcpConfigOption[];
+}
+
 export interface AcpSessionDetail {
 	session: AcpSessionSummary;
 	messages: AcpSessionMessage[];
+	runtime: AcpSessionRuntimeState;
 }
 
 export interface AcpRestoreNotice {

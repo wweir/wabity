@@ -5,6 +5,7 @@ pub mod clipboard;
 pub mod execution;
 pub mod file_search;
 pub mod notification;
+pub mod process;
 pub mod query;
 pub mod rag;
 pub mod settings;

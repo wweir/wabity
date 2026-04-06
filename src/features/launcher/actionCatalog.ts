@@ -25,6 +25,7 @@ function action(
 
 export const translateCommandAliases = ["/translate", "/fy", "/tr"] as const;
 export const ragAnswerCommandAliases = ["/ask", "/qa", "/docs"] as const;
+export const killCommandAliases = ["/kill"] as const;
 
 export const translateActionDescriptor = action(
 	"translate_text",
@@ -48,6 +49,17 @@ export const ragAnswerActionDescriptor = action(
 	94,
 );
 
+export const killProcessActionDescriptor = action(
+	"kill_process",
+	"终止进程",
+	"按应用名称、进程名称或 pid 终止运行中的目标",
+	[...killCommandAliases],
+	["kill", "terminate", "process", "app", "pid"],
+	["inline", "clipboard", "selection"],
+	"system",
+	118,
+);
+
 export const actionCatalog: ActionDescriptor[] = [
 	action(
 		"open_target",
@@ -59,6 +71,7 @@ export const actionCatalog: ActionDescriptor[] = [
 		"system",
 		120,
 	),
+	killProcessActionDescriptor,
 	action(
 		"uppercase_text",
 		"转大写",

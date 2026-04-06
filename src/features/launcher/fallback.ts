@@ -7,6 +7,7 @@ import type {
 	InstalledAppMatch,
 	InputMode,
 	QueryPayload,
+	RunningProcessMatch,
 } from "./types";
 import {
 	actionAliasesById,
@@ -156,6 +157,20 @@ export function executeActionFallback(request: ExecutionRequest): ExecutionResul
 				[],
 			);
 		}
+		case "kill_process": {
+			const payload = text.trim();
+			if (!payload) {
+				return fallbackResult("error", null, "请输入要终止的应用名称、进程名称或 pid。", null, []);
+			}
+
+			return fallbackResult(
+				"warning",
+				payload,
+				"当前处于浏览器模式，不能终止本机进程。",
+				{ effect: "noop" },
+				[],
+			);
+		}
 		case "copy_text":
 			return fallbackResult(
 				"success",
@@ -299,6 +314,10 @@ function stripActionCommandPrefix(actionId: string, rawText: string) {
 }
 
 export function searchAppsFallback(_query: string): InstalledAppMatch[] {
+	return [];
+}
+
+export function searchProcessesFallback(_query: string): RunningProcessMatch[] {
 	return [];
 }
 

@@ -4,7 +4,14 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::warn;
 
+pub(crate) mod acp_agent;
+
+use self::acp_agent::{
+    derive_agent_name, make_agent_id, normalize_acp_agent_command, normalize_agent_launch_mode,
+    normalize_agent_name,
+};
 use crate::domain::acp::{
     AcpAgentConfig, AcpAgentLaunchMode, AcpMcpServerConfig, AcpMcpServerHttpConfig,
     AcpMcpServerSseConfig, AcpMcpServerStdioConfig, AcpNameValuePair, BuiltinMcpConfig,
@@ -196,7 +203,7 @@ pub struct SavedAcpSession {
 }
 
 impl AcpConfig {
-    fn normalize(&mut self) {
+    fn normalize(&mut self) -> Result<()> {
         if self.agents.is_empty() {
             let legacy_shell_command = self
                 .legacy_shell_command
@@ -230,32 +237,13 @@ impl AcpConfig {
 
         let mut used_ids = HashSet::new();
         for (index, agent) in self.agents.iter_mut().enumerate() {
-            agent.program = agent.program.trim().to_string();
-            agent.args = agent
-                .args
-                .iter()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-                .collect();
-            agent.shell_command = agent
-                .shell_command
-                .as_ref()
-                .map(|value| value.trim())
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned);
-            agent.launch_mode = normalize_agent_launch_mode(
-                agent.launch_mode,
-                &agent.program,
-                &agent.shell_command,
-            );
-            if agent.launch_mode == AcpAgentLaunchMode::Direct {
-                if let Some((program, args)) =
-                    parse_direct_agent_command(agent.shell_command.as_deref())
-                {
-                    agent.program = program;
-                    agent.args = args;
-                }
-            }
+            normalize_acp_agent_command(
+                &mut agent.program,
+                &mut agent.args,
+                &mut agent.shell_command,
+                &mut agent.launch_mode,
+                &format!("第 {} 个 ACP agent", index + 1),
+            )?;
             agent.name =
                 normalize_agent_name(&agent.name, &agent.program, agent.shell_command.as_deref());
             agent.mcp_servers.clear();
@@ -267,16 +255,28 @@ impl AcpConfig {
         self.mcp_servers = sanitize_mcp_servers(&self.mcp_servers);
         self.builtin_mcp = normalize_builtin_mcp_config(&self.builtin_mcp);
 
-        if !self
+        self.default_agent_id = self
             .default_agent_id
             .as_ref()
-            .map(|id| self.agents.iter().any(|agent| &agent.id == id))
-            .unwrap_or(false)
-        {
-            self.default_agent_id = self.agents.first().map(|agent| agent.id.clone());
-        }
+            .map(|id| id.trim())
+            .filter(|id| !id.is_empty())
+            .filter(|id| self.agents.iter().any(|agent| agent.id == *id))
+            .map(ToOwned::to_owned)
+            .or_else(|| self.agents.first().map(|agent| agent.id.clone()));
+        self.active_session_id = self
+            .active_session_id
+            .as_ref()
+            .map(|id| id.trim())
+            .filter(|id| !id.is_empty())
+            .map(ToOwned::to_owned);
 
-        for snapshot in &mut self.saved_sessions {
+        let mut normalized_snapshots = Vec::with_capacity(self.saved_sessions.len());
+        for (index, mut snapshot) in std::mem::take(&mut self.saved_sessions)
+            .into_iter()
+            .enumerate()
+        {
+            snapshot.title =
+                Self::normalize_saved_session_title(&snapshot.title, &snapshot.workspace_root);
             snapshot.agent_program = snapshot.agent_program.trim().to_string();
             snapshot.agent_args = snapshot
                 .agent_args
@@ -290,18 +290,35 @@ impl AcpConfig {
                 .map(|value| value.trim())
                 .filter(|value| !value.is_empty())
                 .map(ToOwned::to_owned);
-            snapshot.agent_launch_mode = normalize_agent_launch_mode(
-                snapshot.agent_launch_mode,
-                &snapshot.agent_program,
-                &snapshot.agent_shell_command,
-            );
-            if snapshot.agent_launch_mode == AcpAgentLaunchMode::Direct {
-                if let Some((program, args)) =
-                    parse_direct_agent_command(snapshot.agent_shell_command.as_deref())
-                {
-                    snapshot.agent_program = program;
-                    snapshot.agent_args = args;
-                }
+            snapshot.agent_id = snapshot
+                .agent_id
+                .as_ref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+            let snapshot_subject = format!("第 {} 个 ACP session 快照", index + 1);
+            let mut normalized_program = snapshot.agent_program.clone();
+            let mut normalized_args = snapshot.agent_args.clone();
+            let mut normalized_shell_command = snapshot.agent_shell_command.clone();
+            let mut normalized_launch_mode = snapshot.agent_launch_mode;
+            if let Err(error) = normalize_acp_agent_command(
+                &mut normalized_program,
+                &mut normalized_args,
+                &mut normalized_shell_command,
+                &mut normalized_launch_mode,
+                &snapshot_subject,
+            ) {
+                warn!(
+                    session_id = snapshot.session_id,
+                    title = snapshot.title,
+                    error = %error,
+                    "keeping invalid ACP saved session snapshot so restore flow can surface the failure"
+                );
+            } else {
+                snapshot.agent_program = normalized_program;
+                snapshot.agent_args = normalized_args;
+                snapshot.agent_shell_command = normalized_shell_command;
+                snapshot.agent_launch_mode = normalized_launch_mode;
             }
             if snapshot.agent_name.trim().is_empty() {
                 snapshot.agent_name = derive_agent_name(
@@ -309,7 +326,25 @@ impl AcpConfig {
                     &snapshot.agent_program,
                 );
             }
+            normalized_snapshots.push(snapshot);
         }
+        self.saved_sessions = normalized_snapshots;
+
+        Ok(())
+    }
+
+    fn normalize_saved_session_title(title: &str, workspace_root: &str) -> String {
+        let trimmed = title.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+
+        std::path::Path::new(workspace_root)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("workspace")
+            .to_string()
     }
 
     fn migrate_legacy_builtin_mcp_server_entries(&mut self) {
@@ -334,7 +369,7 @@ impl AcpConfig {
 }
 
 impl AppConfig {
-    pub(crate) fn normalize(&mut self) {
+    pub(crate) fn normalize(&mut self) -> Result<()> {
         let legacy_translation_prompt = self.general.take_legacy_translation_prompt();
         self.general.normalize();
         self.prompts
@@ -343,7 +378,8 @@ impl AppConfig {
         let llm_provider_id_mapping = self.llm.normalize();
         self.ocr.normalize(&self.llm, &llm_provider_id_mapping);
         self.rag.normalize(&self.llm, &llm_provider_id_mapping);
-        self.acp.normalize();
+        self.acp.normalize()?;
+        Ok(())
     }
 }
 
@@ -456,37 +492,6 @@ impl ConfigStore {
         let data_dir = dirs::data_dir().context("failed to determine data directory")?;
         Ok(data_dir.join("wabity"))
     }
-}
-
-fn normalize_agent_name(name: &str, program: &str, shell_command: Option<&str>) -> String {
-    let trimmed = name.trim();
-    if !trimmed.is_empty() {
-        return trimmed.to_string();
-    }
-
-    derive_agent_name(shell_command, program)
-}
-
-fn normalize_agent_launch_mode(
-    launch_mode: AcpAgentLaunchMode,
-    program: &str,
-    shell_command: &Option<String>,
-) -> AcpAgentLaunchMode {
-    if shell_command.is_none() && !program.trim().is_empty() {
-        return AcpAgentLaunchMode::Direct;
-    }
-
-    launch_mode
-}
-
-fn parse_direct_agent_command(shell_command: Option<&str>) -> Option<(String, Vec<String>)> {
-    let parsed = shlex::split(shell_command?.trim())?;
-    let program = parsed.first()?.trim();
-    if program.is_empty() {
-        return None;
-    }
-
-    Some((program.to_string(), parsed[1..].to_vec()))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -979,60 +984,6 @@ fn normalize_mcp_server_name(name: &str, command: Option<&str>, url: Option<&str
     "MCP Server".to_string()
 }
 
-fn derive_agent_name(shell_command: Option<&str>, program: &str) -> String {
-    let command = shell_command
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(program.trim());
-    let first_token = command.split_whitespace().next().unwrap_or_default();
-    let normalized = first_token
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(first_token);
-    let lowercase = normalized.to_ascii_lowercase();
-
-    if lowercase.contains("opencode") {
-        return "OpenCode".to_string();
-    }
-    if lowercase.contains("claude-agent") {
-        return "Claude Agent".to_string();
-    }
-    if lowercase.contains("codex") {
-        return "Codex".to_string();
-    }
-    if normalized.is_empty() {
-        return "ACP Agent".to_string();
-    }
-
-    normalized.to_string()
-}
-
-fn make_agent_id(seed: &str, index: usize, used_ids: &HashSet<String>) -> String {
-    let mut base = seed
-        .trim()
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    base = base.trim_matches('-').to_string();
-    if base.is_empty() {
-        base = format!("agent-{}", index + 1);
-    }
-
-    let mut candidate = base.clone();
-    let mut suffix = 2_u32;
-    while used_ids.contains(&candidate) {
-        candidate = format!("{base}-{suffix}");
-        suffix = suffix.saturating_add(1);
-    }
-    candidate
-}
-
 fn make_llm_provider_id(
     current_id: &str,
     name: &str,
@@ -1073,7 +1024,7 @@ fn make_llm_provider_id(
 fn parse_config_content(content: &str) -> Result<AppConfig> {
     let mut config: AppConfig =
         toml::from_str(content).with_context(|| "failed to parse config file")?;
-    config.normalize();
+    config.normalize()?;
     Ok(config)
 }
 
@@ -1182,6 +1133,7 @@ pub fn display_home_as_tilde() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::infrastructure::config::acp_agent::parse_windows_command_line;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -1298,7 +1250,7 @@ mod tests {
                 }],
             }),
         ];
-        config.normalize();
+        config.normalize().expect("config should normalize");
         let content = serialize_config_content(&config).expect("toml serialization should succeed");
         let parsed = parse_config_content(&content).expect("toml parsing should succeed");
 
@@ -1457,6 +1409,171 @@ launch_mode = "direct"
                 "--stdio".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn parse_config_content_rejects_invalid_direct_agent_shell_command() {
+        let content = r#"
+[acp]
+saved_sessions = []
+
+[[acp.agents]]
+id = "agent-1"
+name = "Broken Direct Agent"
+shell_command = "\"unterminated"
+launch_mode = "direct"
+"#;
+
+        let error =
+            parse_config_content(content).expect_err("invalid direct agent command should fail");
+
+        assert!(error.to_string().contains("直连命令解析失败"));
+    }
+
+    #[test]
+    fn parse_config_content_preserves_invalid_saved_session_snapshot() {
+        let content = r#"
+[acp]
+
+[[acp.saved_sessions]]
+session_id = "session-1"
+workspace_root = "/tmp"
+title = "Broken Session"
+agent_name = "Broken Agent"
+agent_program = ""
+agent_shell_command = "\"unterminated"
+agent_launch_mode = "direct"
+"#;
+
+        let parsed =
+            parse_config_content(content).expect("invalid saved session should not break config");
+
+        assert_eq!(parsed.acp.saved_sessions.len(), 1);
+        assert_eq!(parsed.acp.saved_sessions[0].session_id, "session-1");
+        assert_eq!(parsed.acp.saved_sessions[0].agent_program, "");
+        assert_eq!(
+            parsed.acp.saved_sessions[0].agent_shell_command.as_deref(),
+            Some("\"unterminated")
+        );
+    }
+
+    #[test]
+    fn parse_config_content_normalizes_blank_saved_session_agent_id_to_none() {
+        let content = r#"
+[acp]
+
+[[acp.saved_sessions]]
+session_id = "session-1"
+workspace_root = "/tmp"
+title = "Session"
+agent_id = "   "
+agent_name = "Agent"
+agent_program = "codex-acp"
+agent_args = []
+agent_launch_mode = "direct"
+"#;
+
+        let parsed =
+            parse_config_content(content).expect("blank saved session agent id should normalize");
+
+        assert_eq!(parsed.acp.saved_sessions.len(), 1);
+        assert_eq!(parsed.acp.saved_sessions[0].agent_id, None);
+    }
+
+    #[test]
+    fn parse_config_content_normalizes_blank_saved_session_title() {
+        let content = r#"
+[acp]
+
+[[acp.saved_sessions]]
+session_id = "session-1"
+workspace_root = "/tmp/demo-workspace"
+title = "   "
+agent_name = "Agent"
+agent_program = "codex-acp"
+agent_args = []
+agent_launch_mode = "direct"
+"#;
+
+        let parsed =
+            parse_config_content(content).expect("blank saved session title should normalize");
+
+        assert_eq!(parsed.acp.saved_sessions.len(), 1);
+        assert_eq!(parsed.acp.saved_sessions[0].title, "demo-workspace");
+    }
+
+    #[test]
+    fn parse_config_content_trims_default_acp_agent_id() {
+        let content = r#"
+[acp]
+default_agent_id = " codex "
+
+[[acp.agents]]
+id = "codex"
+name = "Codex"
+program = "codex-acp"
+args = []
+launch_mode = "direct"
+"#;
+
+        let parsed = parse_config_content(content).expect("default ACP agent id should normalize");
+
+        assert_eq!(parsed.acp.default_agent_id.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn parse_config_content_trims_active_acp_session_id() {
+        let content = r#"
+[acp]
+active_session_id = " session-1 "
+
+[[acp.saved_sessions]]
+session_id = "session-1"
+workspace_root = "/tmp/demo-workspace"
+title = "Demo"
+agent_name = "Agent"
+agent_program = "codex-acp"
+agent_args = []
+agent_launch_mode = "direct"
+"#;
+
+        let parsed = parse_config_content(content).expect("active ACP session id should normalize");
+
+        assert_eq!(parsed.acp.active_session_id.as_deref(), Some("session-1"));
+    }
+
+    #[test]
+    fn parse_windows_command_line_supports_quoted_program_path() {
+        let parsed = parse_windows_command_line(r#""C:\Program Files\Agent\agent.exe" --stdio"#)
+            .expect("windows command line should parse");
+
+        assert_eq!(
+            parsed,
+            vec![
+                r#"C:\Program Files\Agent\agent.exe"#.to_string(),
+                "--stdio".to_string()
+            ]
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn normalize_acp_agent_command_downgrades_interactive_shell_on_windows() {
+        let mut program = String::new();
+        let mut args = Vec::new();
+        let mut shell_command = Some("agent --stdio".to_string());
+        let mut launch_mode = AcpAgentLaunchMode::InteractiveShell;
+
+        normalize_acp_agent_command(
+            &mut program,
+            &mut args,
+            &mut shell_command,
+            &mut launch_mode,
+            "ACP agent",
+        )
+        .expect("windows interactive shell should normalize");
+
+        assert_eq!(launch_mode, AcpAgentLaunchMode::LoginShell);
     }
 
     #[test]
@@ -1639,7 +1756,7 @@ embeddingProviderId = "combo"
         ];
         config.rag.embedding_provider_id = Some("missing".to_string());
 
-        config.normalize();
+        config.normalize().expect("config should normalize");
 
         assert_eq!(
             config.rag.source_directories,
@@ -1678,7 +1795,7 @@ sourceDirectories = ["/tmp/docs"]
         let mut config = AppConfig::default();
         config.rag.ignore_globs = vec!["**/*.png".to_string()];
 
-        config.normalize();
+        config.normalize().expect("config should normalize");
 
         assert_eq!(
             config.rag.ignore_globs,

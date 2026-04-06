@@ -5,6 +5,7 @@ import type {
 	FileSearchMatch,
 	FloatingPanelOffset,
 	InstalledAppMatch,
+	RunningProcessMatch,
 } from "../types";
 import { primaryActionLabel, type SuggestionMode } from "../query";
 
@@ -19,8 +20,10 @@ interface CompletionPopupProps {
 	visibleFileMatches: FileSearchMatch[];
 	visibleActionMatches: ActionMatch[];
 	visibleAppMatches: InstalledAppMatch[];
+	visibleKillMatches: RunningProcessMatch[];
 	onSelectIndex: (index: number) => void;
 	onSelectFile: (index: number) => void;
+	onSelectKill: (index: number) => void;
 	onRunSelectedAction: (index: number) => void;
 	onRunSelectedApp: (index: number) => void;
 }
@@ -36,8 +39,10 @@ export function CompletionPopup({
 	visibleFileMatches,
 	visibleActionMatches,
 	visibleAppMatches,
+	visibleKillMatches,
 	onSelectIndex,
 	onSelectFile,
+	onSelectKill,
 	onRunSelectedAction,
 	onRunSelectedApp,
 }: CompletionPopupProps) {
@@ -69,6 +74,8 @@ export function CompletionPopup({
 						? "文件补全候选"
 						: suggestionMode === "action"
 							? "动作补全候选"
+							: suggestionMode === "kill"
+								? "进程补全候选"
 							: "应用候选"
 				}
 				className="suggestion-list completion-list"
@@ -116,7 +123,33 @@ export function CompletionPopup({
 									</div>
 								</li>
 							))
-						: visibleAppMatches.map((match, index) => (
+						: suggestionMode === "kill"
+							? visibleKillMatches.map((match, index) => (
+									<li
+										key={`${match.pid}:${match.processName}`}
+										aria-selected={index === selectedIndex}
+										className={
+											index === selectedIndex ? "suggestion-item selected" : "suggestion-item"
+										}
+										data-suggestion-index={index}
+										id={buildOptionId(index)}
+										onMouseDown={preventFocusSteal}
+										onClick={() => onSelectKill(index)}
+										onMouseEnter={() => onSelectIndex(index)}
+										role="option"
+									>
+										<div className="suggestion-line">
+											<strong>
+												{match.displayName}
+												{match.kind === "app" ? " · App" : " · Process"}
+											</strong>
+											<span className="suggestion-meta">
+												pid:{match.pid} · {match.processName}
+											</span>
+										</div>
+									</li>
+								))
+							: visibleAppMatches.map((match, index) => (
 								<li
 									key={match.path}
 									aria-selected={index === selectedIndex}

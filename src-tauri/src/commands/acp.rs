@@ -71,7 +71,10 @@ pub async fn get_acp_session_detail(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<Option<AcpSessionDetail>, String> {
-    Ok(state.acp().session_detail(&session_id).await)
+    state
+        .acp_session_detail(&session_id)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 pub async fn create_acp_session(
@@ -101,6 +104,29 @@ pub async fn send_acp_prompt(
 ) -> Result<AcpSessionDetail, String> {
     state
         .send_acp_prompt(&session_id, prompt)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn set_acp_session_mode(
+    state: State<'_, AppState>,
+    session_id: String,
+    mode_id: String,
+) -> Result<AcpSessionDetail, String> {
+    state
+        .set_acp_session_mode(&session_id, mode_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn set_acp_session_config_option(
+    state: State<'_, AppState>,
+    session_id: String,
+    config_id: String,
+    value_id: String,
+) -> Result<AcpSessionDetail, String> {
+    state
+        .set_acp_session_config_option(&session_id, config_id, value_id)
         .await
         .map_err(|error| error.to_string())
 }
@@ -231,6 +257,28 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
                 .await
                 .map_err(InvokeError::from)
         }),
+        "set_acp_session_mode" => super::respond_async(invoke.resolver.clone(), async move {
+            let state = super::parse_arg(&invoke, "set_acp_session_mode", "state")?;
+            let session_id = super::parse_arg(&invoke, "set_acp_session_mode", "sessionId")?;
+            let mode_id = super::parse_arg(&invoke, "set_acp_session_mode", "modeId")?;
+            set_acp_session_mode(state, session_id, mode_id)
+                .await
+                .map_err(InvokeError::from)
+        }),
+        "set_acp_session_config_option" => {
+            super::respond_async(invoke.resolver.clone(), async move {
+                let state = super::parse_arg(&invoke, "set_acp_session_config_option", "state")?;
+                let session_id =
+                    super::parse_arg(&invoke, "set_acp_session_config_option", "sessionId")?;
+                let config_id =
+                    super::parse_arg(&invoke, "set_acp_session_config_option", "configId")?;
+                let value_id =
+                    super::parse_arg(&invoke, "set_acp_session_config_option", "valueId")?;
+                set_acp_session_config_option(state, session_id, config_id, value_id)
+                    .await
+                    .map_err(InvokeError::from)
+            })
+        }
         "cancel_acp_session" => super::respond_async(invoke.resolver.clone(), async move {
             let state = super::parse_arg(&invoke, "cancel_acp_session", "state")?;
             let session_id = super::parse_arg(&invoke, "cancel_acp_session", "sessionId")?;

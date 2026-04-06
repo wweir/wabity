@@ -11,7 +11,7 @@
 当前代码组织：
 
 - `LauncherPage.tsx`：页面级状态、effect、键盘流和 Tauri 命令编排；顶部栏、输入区、反馈区都只负责装配组件，不再内联大段 JSX
-- `LauncherPage.tsx` 里的建议请求只保留最小前端观测：按 `file / action / app` 输出请求耗时和命中数，便于和 Rust 侧 `tracing` 对齐；不要在页面层再铺一层自定义埋点系统
+- `LauncherPage.tsx` 里的建议请求只保留最小前端观测：按 `file / action / app / kill` 输出请求耗时和命中数，便于和 Rust 侧 `tracing` 对齐；不要在页面层再铺一层自定义埋点系统
 - `launcher.css`：只保留 launcher 特有布局、状态和消息流样式；按钮、输入框、浮层和冷静中性色 design tokens 等共享外观基线统一回收到 `src/app/global.css`
 - ACP 会话时间线里的 `user / assistant / system` 消息卡片底色必须基于全局 token 组合，禁止在 `launcher.css` 里直接写死只适合浅色主题的消息背景
 - `MarkdownRenderer` 衍生出来的 Mermaid 状态文本、错误文案和 highlight.js 语法色同样必须走全局 code token；浅色和深色都不能继续保留私有 code palette 或只适合浅底块的 hex 色
@@ -28,11 +28,12 @@
 - `layout.ts`：输入测量、宽度约束和补全浮层定位基础工具
 - `workspace.ts`：workspace 路径格式化和面包屑构建
 - `sessions.ts`：session 摘要合并、状态文案和 dot class 计算
+- `useLauncherSuggestions.ts`：集中管理 `file / action / app / kill` 四类补全状态、异步请求和前端错误回写，避免 `LauncherPage.tsx` 同时持有候选状态机和页面级窗口编排
 - `useFloatingPanel.ts`：浮层附着定位和外部点击关闭的共享 hook，避免 `LauncherPage` 重复堆叠近似 effect
 - `components/SessionTimeline.tsx`：ACP 消息流与按真实顺序展开的 action trail
 - `components/LauncherHeader.tsx`：顶部 workspace bar、agent 选择器、session 摘要按钮和 session dot 带；不再承担历史剪贴板入口
 - `components/LauncherComposer.tsx`：主输入区和底部操作条
-- `components/RestoreNoticeList.tsx` / `components/LauncherFeedback.tsx`：恢复提示、内联结果卡片、JSON / Markdown 预览，以及按 `session / result / QA` 拆开的反馈区
+- `components/RestoreNoticeList.tsx` / `components/LauncherFeedback.tsx`：恢复提示、内联结果卡片、JSON / Markdown 预览，以及按 `session / result / QA` 拆开的反馈区；ACP 激活时同一块反馈区顶部还会展示当前 session 的 runtime mode / config option 控件
 - `components/LauncherSuggestionsSection.tsx` / `components/LauncherSessionSection.tsx` / `components/LauncherClipboardSection.tsx`：suggestions、session、clipboard 三块独立 layer，作为输入热路径的稳定渲染边界
 - `components/MarkdownRenderer.tsx`：共享 markdown 渲染管线，统一处理 GFM、Mermaid、MDX 安全兼容和 Obsidian 风格扩展
 - `MarkdownRenderer.tsx` 里的 `remark-mdx` / `rehype-highlight` 改为异步加载，避免把整套 MDX 和语法高亮依赖静态塞进同一个懒加载 chunk
@@ -72,7 +73,7 @@
 - 主输入区在“本地 launcher 模式”和“ACP session 模式”之间切换
 - 底部操作条在未激活 session 时固定保留 `ACP Agent` 入口：已配置 agent 时点击会自动创建或复用 ACP session，并在下方会话面板展示 agent 输出；未配置时按钮不再整颗消失，而是直接打开设置页；真正执行 agent 的快捷键仍是 `Alt+Enter`
 - 顶部支持为“下一次新建 session”选择当前 agent；同一时刻可以并存多个不同 agent 的 session
-- 结果改为内联反馈；ACP 激活时下方改为消息流面板
+- 结果改为内联反馈；ACP 激活时下方改为“session runtime 控件 + 消息流”复合面板，runtime 控件只作用于当前 session
 - 内联结果卡和 ACP 消息流都带固定高度上限与内部滚动，不允许单次长输出把 launcher 主窗口顶出屏幕
 - `/format`、`/fmt`、`/json` 的预览、`/md` / `/markdown` 的 markdown 预览，以及 `/base64` 等快捷命令执行结果统一落在内联结果卡片；结果卡片自带复制按钮，JSON 走语法高亮，Markdown 走共享渲染器
 - 文本处理 slash 命令当前内建 `/upper`、`/title`、`/lower`、`/camel`、`/snake`、`/trim`、`/unique`、`/sort`、`/words`、`/lines`，以及走默认 LLM provider 的 `/translate`、`/fy`、`/tr`；其中 `/title` 会把每个词的首字母转为大写，`/unique` 和 `/sort` 都按行处理，翻译默认在未指定目标语言时按“简中->英文、英文->简中、其他语言->简中”处理，并保留原文风格与格式
@@ -92,10 +93,11 @@
 - 启动时会读取后端恢复提示，并以内联提示块展示哪些 session 没能通过 agent 恢复
 - 候选项收敛为附着式建议列表
 - 本地 launcher 模式下，输入分三类：`@token` 走 workspace 文件搜索，显式 `/` 或 `http`/`{` 强信号走动作候选，其余文本只有在达到应用搜索阈值后才走应用搜索
+- `/kill` 进入独立的运行中目标补全链路：补全只面向当前正在运行的应用/进程，候选显式展示 `pid`，选中后输入框统一回写稳定 payload `pid:<id>`；执行期只支持 `pid:<id>` 精确命中或名称精确命中单个运行目标，不允许按模糊名称批量终止
 - `/open` 现在由 Rust 运行时统一执行：显式 URL、裸域名、绝对路径、`~` 路径和相对当前 workspace 的文件/目录都会先在后端解析，再交给系统默认 opener；浏览器 fallback 只保留 URL 打开，不伪装成本地文件能力
 - 应用搜索当前只面向已安装桌面应用；前端只负责展示候选和触发启动，不自己拼本地索引
 - 移除输入框下方的常驻 workspace 描述，只保留必要的错误或执行反馈
-- 补全提示改为跟随输入光标的浮动候选框，位置和内容都基于光标前文本实时刷新，默认高亮第一项；动作候选固定显示“主 `/` 命令 + 简短说明”，应用候选显示应用名和 bundle 路径；主动作按钮显式展示快捷键：单行和多行输入都用 `Enter`，多行模式换行改为 `Ctrl/Cmd+Enter`；候选框可见时 `Enter` 默认执行当前模式的主动作，`Esc` 默认隐藏整个补全框；slash 动作确认后不会再把完整命令文本留在输入框里，而是进入一次性的待执行状态：输入框只保留 payload，下一次 `Enter` 或主按钮直接执行；如果确认时已经带 payload，则该次确认直接执行，并在成功后仍只保留 payload；已选 slash 动作还会接受最短命令前缀和紧贴 payload 的写法，例如 `/uhello` 会按 `/upper hello` 处理；通过上下键显式选中某个 slash 动作后，执行也会以该动作为准，不会把前导 `/` 残留进 payload；slash 执行后会保留 payload 内原来的光标逻辑位置，不会强制跳到末尾；高亮项变化时列表会自动滚动，尽量保持高亮项居中
+- 补全提示改为跟随输入光标的浮动候选框，位置和内容都基于光标前文本实时刷新，默认高亮第一项；动作候选固定显示“主 `/` 命令 + 简短说明”，应用候选显示应用名和 bundle 路径，`/kill` 候选显示运行目标名称、类型和 `pid`；主动作按钮显式展示快捷键：单行和多行输入都用 `Enter`，多行模式换行改为 `Ctrl/Cmd+Enter`；候选框可见时 `Enter` 默认执行当前模式的主动作，`Esc` 默认隐藏整个补全框；slash 动作确认后不会再把完整命令文本留在输入框里，而是进入一次性的待执行状态：输入框只保留 payload，下一次 `Enter` 或主按钮直接执行；如果确认时已经带 payload，则该次确认直接执行，并在成功后仍只保留 payload；已选 slash 动作还会接受最短命令前缀和紧贴 payload 的写法，例如 `/uhello` 会按 `/upper hello` 处理；通过上下键显式选中某个 slash 动作后，执行也会以该动作为准，不会把前导 `/` 残留进 payload；slash 执行后会保留 payload 内原来的光标逻辑位置，不会强制跳到末尾；高亮项变化时列表会自动滚动，尽量保持高亮项居中；只有 `/kill` 例外：候选确认先回写 `pid:<id>`，再次 `Enter` 才真正发送终止请求，避免把选择候选误当成立即杀进程
 - `/` 候选列表只保留已可执行命令，不把未接通的占位能力混进来制造噪音
 - 使用透明窗口 + CSS 圆角伪异形，尽量模拟原生圆角窗口
 - 原生窗口尺寸直接由内部页面内容尺寸实时驱动；`setSize` 设置的是窗口内容区，不需要再额外补偿 macOS 圆角或外沿
