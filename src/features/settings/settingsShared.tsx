@@ -334,26 +334,26 @@ const mcpTransportOptionsInternal = [
 	{
 		transport: "stdio",
 		label: "本地进程",
-		description: "通过命令启动 MCP server",
+		description: "通过命令启动 MCP 服务",
 		summary:
-			"适合本机已有命令行 MCP server 的场景，Wabity 会把命令、参数和环境变量作为全局 MCP 条目保存。",
+			"适合本机已有命令行 MCP 服务的场景。Wabity 会把命令、参数和环境变量作为全局 MCP 条目保存。",
 		fieldsHint: "需要填写命令；可选填写参数和环境变量。",
 		example: "npx -y @modelcontextprotocol/server-filesystem ~/Desktop",
 	},
 	{
 		transport: "http",
 		label: "HTTP",
-		description: "通过 URL 连接远程 MCP server",
-		summary: "适合已经部署好的远程 MCP 服务，保存后会把 URL 和请求头随会话一起交给当前 Agent。",
-		fieldsHint: "需要填写 URL；可选填写请求头。",
+		description: "通过服务地址连接远程 MCP 服务",
+		summary: "适合已经部署好的远程 MCP 服务。保存后会把服务地址和请求头随会话一起交给当前 Agent。",
+		fieldsHint: "需要填写服务地址；可选填写请求头。",
 		example: "https://example.com/mcp",
 	},
 	{
 		transport: "sse",
 		label: "SSE",
-		description: "通过 SSE 流连接远程 MCP server",
-		summary: "适合使用服务端事件流暴露能力的远程 MCP 服务，字段和 HTTP 类似，但连接语义是 SSE。",
-		fieldsHint: "需要填写 URL；可选填写请求头。",
+		description: "通过 SSE 流连接远程 MCP 服务",
+		summary: "适合使用服务端事件流暴露能力的远程 MCP 服务，字段和 HTTP 类似，但连接方式是 SSE。",
+		fieldsHint: "需要填写服务地址；可选填写请求头。",
 		example: "https://example.com/sse",
 	},
 ] as const;
@@ -507,7 +507,7 @@ export function getMcpServerDraftTitle(server: AcpMcpServerDraft) {
 function summarizeMcpRemoteUrl(url: string): string {
 	const trimmed = url.trim();
 	if (!trimmed) {
-		return "等待填写 URL";
+		return "等待填写服务地址";
 	}
 
 	const parsed = parseMcpRemoteUrl(trimmed);

@@ -967,7 +967,7 @@
 
 .settings-mcp-layout {
 	display: grid;
-	gap: 16px;
+	gap: 18px;
 	margin-top: 14px;
 	grid-template-columns: 1fr;
 	align-items: start;
@@ -1116,7 +1116,7 @@
 
 .settings-mcp-detail {
 	gap: 14px;
-	padding: 8px clamp(8px, 1.2vw, 12px) 0;
+	padding: 0;
 }
 
 .settings-mcp-catalog-panel,
@@ -1137,36 +1137,80 @@
 	grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-.settings-mcp-catalog-grid {
-	align-items: stretch;
+.settings-mcp-catalog-group {
+	display: grid;
+	gap: 10px;
 	grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.settings-mcp-catalog-group {
-	display: contents;
-}
-
 .settings-mcp-builtin-card {
+	gap: 16px;
 	align-content: start;
 }
 
-.settings-mcp-builtin-card-header {
-	display: flex;
-	align-items: flex-start;
-	justify-content: space-between;
-	gap: 12px;
+.settings-mcp-builtin-card-enabled {
+	border-color: var(--accent-border);
+	background: color-mix(in srgb, var(--surface-card-selected) 76%, var(--surface-card));
 }
 
-.settings-mcp-builtin-toggle {
-	display: inline-flex;
+.settings-mcp-builtin-toggle-row {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
 	align-items: center;
-	justify-content: flex-end;
+	gap: 12px;
+	min-height: 44px;
+	padding: 12px 14px;
+	border: 1px solid var(--border-regular);
+	border-radius: 14px;
+	background: color-mix(in srgb, var(--surface-card) 84%, var(--surface-panel));
+	cursor: pointer;
+}
+
+.settings-mcp-builtin-toggle-copy {
+	display: grid;
+	gap: 4px;
+	min-width: 0;
+}
+
+.settings-mcp-builtin-meta {
+	display: grid;
+	gap: 10px;
+}
+
+.settings-mcp-endpoint-block {
+	display: grid;
+	gap: 6px;
+}
+
+.settings-mcp-endpoint-label {
+	color: var(--text-secondary);
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.03em;
+	text-transform: uppercase;
+}
+
+.settings-install-guide-command.settings-mcp-endpoint-code {
+	font-size: 12px;
+	line-height: 1.5;
+}
+
+.settings-mcp-builtin-modules-wrap {
+	display: grid;
+	gap: 10px;
+	padding-top: 12px;
+	border-top: 1px solid var(--border-soft);
+}
+
+.settings-mcp-builtin-modules-header {
+	display: grid;
+	gap: 4px;
 }
 
 .settings-mcp-builtin-modules {
 	display: grid;
 	gap: 10px;
-	margin-top: 10px;
+	grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
 }
 
 .settings-mcp-builtin-module {
@@ -1178,6 +1222,19 @@
 	border: 1px solid var(--border-soft);
 	border-radius: 12px;
 	background: color-mix(in srgb, var(--surface-card) 72%, var(--surface-panel));
+	min-height: 44px;
+}
+
+.settings-mcp-catalog-actions {
+	display: grid;
+	gap: 8px;
+	padding-top: 2px;
+	justify-items: start;
+}
+
+.settings-mcp-catalog-panel + .settings-mcp-detail {
+	padding-top: 2px;
+	border-top: 1px solid var(--border-soft);
 }
 
 .settings-mcp-builtin-module-copy {
@@ -1420,14 +1477,6 @@
 	border-radius: 12px;
 }
 
-.settings-mcp-list-item-create {
-	border-style: dashed;
-}
-
-.settings-mcp-create-trigger {
-	justify-content: center;
-}
-
 .settings-mcp-list-item-main:focus-visible {
 	outline-offset: 4px;
 }
@@ -1468,6 +1517,13 @@
 	color: var(--text-soft);
 	font-size: 11px;
 	overflow-wrap: anywhere;
+}
+
+.settings-mcp-service-summary {
+	color: var(--text-primary);
+	font-size: 12px;
+	line-height: 1.5;
+	font-family: var(--font-mono);
 }
 
 .settings-agent-meta {
@@ -3339,6 +3395,15 @@
 		grid-template-columns: repeat(2, minmax(0, 1fr));
 	}
 
+	.settings-mcp-builtin-toggle-row {
+		grid-template-columns: minmax(0, 1fr);
+		align-items: start;
+	}
+
+	.settings-mcp-builtin-modules {
+		grid-template-columns: minmax(0, 1fr);
+	}
+
 	.settings-acp-sidebar-header,
 	.settings-acp-detail-header,
 	.settings-editor-card-header,
@@ -3434,6 +3499,10 @@
 
 	.settings-nav-rail {
 		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.settings-mcp-catalog-actions > .settings-button {
+		width: 100%;
 	}
 }
 

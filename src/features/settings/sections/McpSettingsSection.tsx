@@ -99,13 +99,18 @@ export function McpSettingsSection({
 	onReturnToCurrentMcp,
 	onApplyMcpTransportSelection,
 }: McpSettingsSectionProps) {
-	const saveStatusLabel = mcpHasUnsavedChanges ? "草稿未保存" : "已写入配置";
+	const saveStatusLabel = mcpHasUnsavedChanges ? "草稿待保存" : "已同步配置";
 	const saveStatusDetail =
 		mcpValidation.totalIssues > 0
 			? `${mcpValidation.totalIssues} 个问题待修复`
 			: mcpHasUnsavedChanges
 				? "当前 MCP 草稿尚未写回配置。"
 				: "MCP 配置已与本地 config.toml 同步。";
+	const builtinStatusLabel = builtinMcpServerStatus?.running ? "运行中" : "未运行";
+	const builtinEndpoint =
+		builtinMcpServerStatus?.server.transport === "http"
+			? builtinMcpServerStatus.server.url
+			: "http://127.0.0.1:43189/internal/mcp";
 
 	return (
 		<section
@@ -121,6 +126,93 @@ export function McpSettingsSection({
 
 			<div className="settings-mcp-layout">
 				<div
+					className={`settings-editor-card settings-editor-card-subtle settings-mcp-builtin-card ${
+						builtinMcpConfig.enabled ? "settings-mcp-builtin-card-enabled" : ""
+					}`}
+					id="mcp-builtin"
+					ref={bindSectionBlockRef("mcp-builtin")}
+				>
+					<div className="settings-editor-card-header">
+						<div className="settings-acp-sidebar-copy">
+							<span className="settings-section-kicker">内置能力</span>
+							<h3 className="settings-subsection-title">Wabity 内置 MCP</h3>
+						</div>
+					</div>
+					<label className="settings-mcp-builtin-toggle-row">
+						<span className="settings-mcp-builtin-toggle-copy">
+							<strong className="settings-agent-name">向 Agent 暴露内置工具</strong>
+							<span className="settings-help-text settings-help-text-tight">
+								启用后，下面勾选的模块会通过同一个本地 MCP 服务暴露给所有 Agent。
+							</span>
+						</span>
+						<input
+							checked={builtinMcpConfig.enabled}
+							className="settings-toggle"
+							disabled={builtinMcpToggleDisabled}
+							onChange={(event) => onToggleBuiltinMcp(event.target.checked)}
+							type="checkbox"
+						/>
+					</label>
+					<div className="settings-mcp-builtin-meta">
+						<div className="settings-mcp-list-item-badges">
+							<span className="settings-status-chip">内置</span>
+							<span className="settings-mcp-badge">{builtinMcpTransportMeta.label}</span>
+							<span
+								className={`settings-status-chip ${
+									builtinMcpServerStatus?.running
+										? "settings-status-chip-success"
+										: "settings-status-chip-warn"
+								}`}
+							>
+								{builtinStatusLabel}
+							</span>
+							<span className="settings-agent-meta">
+								{builtinMcpConfig.enabledModules.length} 个模块已启用
+							</span>
+						</div>
+						<div className="settings-mcp-endpoint-block">
+							<span className="settings-mcp-endpoint-label">本地服务地址</span>
+							<code className="settings-install-guide-command settings-mcp-endpoint-code">
+								{builtinEndpoint}
+							</code>
+						</div>
+						<span className="settings-help-text settings-help-text-tight">
+							{builtinMcpConfig.enabled
+								? "保存后会把当前启用的内置模块统一暴露给 Agent。"
+								: builtinMcpServerStatus?.running
+									? "服务已经就绪；开启后会把下面勾选的模块挂到这个本地地址。"
+									: builtinMcpServerStatus?.lastError || "桌面端启动后会自动暴露这个本地地址。"}
+						</span>
+					</div>
+					<div className="settings-mcp-builtin-modules-wrap">
+						<div className="settings-mcp-builtin-modules-header">
+							<strong className="settings-agent-mcp-title">可暴露模块</strong>
+							<span className="settings-agent-meta">
+								按模块选择，不再把内置能力伪装成普通服务条目。
+							</span>
+						</div>
+						<div className="settings-mcp-builtin-modules">
+							{builtinMcpServerStatus?.availableModules.map((module) => (
+								<label className="settings-mcp-builtin-module" key={module.key}>
+									<input
+										checked={builtinMcpConfig.enabledModules.includes(module.key)}
+										className="settings-toggle"
+										onChange={() => onToggleBuiltinMcpModule(module.key)}
+										type="checkbox"
+									/>
+									<span className="settings-mcp-builtin-module-copy">
+										<strong>{module.title}</strong>
+										<span className="settings-help-text settings-help-text-tight">
+											{module.summary} · {module.toolCount} 个工具
+										</span>
+									</span>
+								</label>
+							))}
+						</div>
+					</div>
+				</div>
+
+				<div
 					className="settings-editor-card settings-editor-card-subtle settings-mcp-catalog-panel"
 					id="mcp-catalog"
 					ref={bindSectionBlockRef("mcp-catalog")}
@@ -128,89 +220,25 @@ export function McpSettingsSection({
 					<div className="settings-editor-card-header">
 						<div className="settings-acp-sidebar-copy">
 							<span className="settings-section-kicker">已配置</span>
-							<h3 className="settings-subsection-title">服务目录</h3>
+							<h3 className="settings-subsection-title">自定义服务目录</h3>
 						</div>
 					</div>
 					<p className="settings-help-text settings-help-text-tight">
-						所有 Agent 共用这一份 MCP 目录。先在上面选服务，下面只处理当前任务。
+						先在这里选当前要编辑的服务，下面的详情区会独占整行宽度，避免长字段被挤窄。
 					</p>
 					{regularMcpServers.length === 0 ? (
 						<div className="settings-empty-panel settings-empty-panel-subtle">
 							<strong className="settings-empty-title">还没有自定义服务</strong>
 							<span className="settings-help-text settings-help-text-tight">
-								内置 MCP 在上面单独配置；如果还要接第三方 server，再新建自定义服务。
+								只有接入第三方 MCP 服务时才需要新建；内置 MCP 在上面单独管理。
 							</span>
 						</div>
-					) : null}
-					<div className="settings-catalog-grid settings-catalog-grid-3 settings-mcp-catalog-grid">
-						<article
-							className={`settings-mcp-list-item settings-mcp-builtin-card ${
-								builtinMcpConfig.enabled ? "settings-mcp-list-item-selected" : ""
-							}`}
+					) : (
+						<div
+							aria-label="已配置 MCP 服务"
+							className="settings-mcp-catalog-group"
+							role="radiogroup"
 						>
-							<div className="settings-mcp-builtin-card-header">
-								<div className="settings-agent-title-row">
-									<strong className="settings-agent-name">内置 MCP</strong>
-								</div>
-								<label className="settings-mcp-builtin-toggle">
-									<span className="sr-only">启用内置 MCP</span>
-									<input
-										checked={builtinMcpConfig.enabled}
-										className="settings-toggle"
-										disabled={builtinMcpToggleDisabled}
-										onChange={(event) => onToggleBuiltinMcp(event.target.checked)}
-										type="checkbox"
-									/>
-								</label>
-							</div>
-							<div className="settings-mcp-list-item-badges">
-								<span className="settings-status-chip">内置</span>
-								<span className="settings-mcp-badge">{builtinMcpTransportMeta.label}</span>
-								<span
-									className={`settings-status-chip ${
-										builtinMcpServerStatus?.running
-											? "settings-status-chip-success"
-											: "settings-status-chip-warn"
-									}`}
-								>
-									{builtinMcpServerStatus?.running ? "运行中" : "未运行"}
-								</span>
-								<span className="settings-agent-meta">
-									{builtinMcpConfig.enabledModules.length} 个模块已启用
-								</span>
-							</div>
-							<span className="settings-agent-command-preview">
-								{builtinMcpServerStatus?.server.transport === "http"
-									? builtinMcpServerStatus.server.url
-									: "http://127.0.0.1:43189/internal/mcp"}
-							</span>
-							<span className="settings-help-text settings-help-text-tight">
-								{builtinMcpConfig.enabled
-									? "保存后会把当前启用的内置模块统一暴露给 Agent。"
-									: builtinMcpServerStatus?.running
-										? "开启后会把下面勾选的内置模块统一挂到同一个本地 MCP server。"
-										: builtinMcpServerStatus?.lastError || "桌面端启动后会自动暴露这个本地地址。"}
-							</span>
-							<div className="settings-mcp-builtin-modules">
-								{builtinMcpServerStatus?.availableModules.map((module) => (
-									<label className="settings-mcp-builtin-module" key={module.key}>
-										<input
-											checked={builtinMcpConfig.enabledModules.includes(module.key)}
-											className="settings-toggle"
-											onChange={() => onToggleBuiltinMcpModule(module.key)}
-											type="checkbox"
-										/>
-										<span className="settings-mcp-builtin-module-copy">
-											<strong>{module.title}</strong>
-											<span className="settings-help-text settings-help-text-tight">
-												{module.summary} · {module.toolCount} 个 tool
-											</span>
-										</span>
-									</label>
-								))}
-							</div>
-						</article>
-						<div aria-label="MCP 服务目录" className="settings-mcp-catalog-group" role="radiogroup">
 							{regularMcpServers.map((server) => {
 								const transportMeta = getMcpTransportMeta(server.transport);
 								const issueCount = mcpValidation.serverIssues[server.id]?.length ?? 0;
@@ -246,7 +274,7 @@ export function McpSettingsSection({
 													<span className="settings-agent-meta">{issueCount} 个问题</span>
 												) : null}
 											</div>
-											<span className="settings-agent-command-preview">
+											<span className="settings-agent-command-preview settings-mcp-service-summary">
 												{summarizeMcpServerDraft(server)}
 											</span>
 										</button>
@@ -254,27 +282,18 @@ export function McpSettingsSection({
 								);
 							})}
 						</div>
-						<article
-							className={`settings-mcp-list-item settings-mcp-list-item-create ${
-								isMcpCreateMode ? "settings-mcp-list-item-selected" : ""
-							}`}
+					)}
+					<div className="settings-mcp-catalog-actions">
+						<button
+							className="settings-button settings-button-compact"
+							onClick={onEnterMcpCreateMode}
+							type="button"
 						>
-							<button
-								className="settings-mcp-list-item-main settings-mcp-create-trigger"
-								onClick={onEnterMcpCreateMode}
-								type="button"
-							>
-								<div className="settings-agent-title-row">
-									<strong className="settings-agent-name">新建服务</strong>
-								</div>
-								<div className="settings-mcp-list-item-badges">
-									<span className="settings-mcp-badge">新建</span>
-								</div>
-								<span className="settings-agent-command-preview">
-									只在需要另一种 transport 时新增，创建后会直接切到当前服务。
-								</span>
-							</button>
-						</article>
+							新建服务
+						</button>
+						<span className="settings-help-text settings-help-text-tight">
+							只有在需要另一种连接方式时才新增。切换连接方式时，直接新建一条更清楚。
+						</span>
 					</div>
 				</div>
 
@@ -387,13 +406,13 @@ export function McpSettingsSection({
 											)}
 										</label>
 										<div className="settings-mcp-static-row">
-											<span className="settings-label">连接类型</span>
+											<span className="settings-label">连接方式</span>
 											<div className="settings-mcp-transport-summary">
 												<span className="settings-mcp-badge">
 													{getMcpTransportMeta(selectedMcpServer.transport).label}
 												</span>
 												<span className="settings-help-text settings-help-text-tight">
-													连接类型在创建时决定。需要换 transport 时，直接新建一条更清楚。
+													连接方式在创建时决定。需要更换时，直接新建一条服务更清楚。
 												</span>
 											</div>
 										</div>
@@ -484,7 +503,7 @@ export function McpSettingsSection({
 										) : (
 											<>
 												<label className="settings-label settings-label-stacked settings-mcp-form-row">
-													<span>URL</span>
+													<span>服务地址</span>
 													<input
 														aria-describedby={joinDescribedByIds(
 															selectedMcpFieldIssues.url
@@ -525,8 +544,11 @@ export function McpSettingsSection({
 															selectedMcpFieldIssues.headersText
 																? buildFieldIssueId("mcp", "headers-text", selectedMcpServer.id)
 																: undefined,
+															`settings-mcp-${selectedMcpServer.id}-headers-help`,
 														)}
 														aria-invalid={selectedMcpFieldIssues.headersText ? true : undefined}
+														autoCapitalize="off"
+														autoCorrect="off"
 														className="settings-textarea settings-input-mono"
 														onChange={(event) =>
 															onMcpServerFieldChange(
@@ -538,10 +560,19 @@ export function McpSettingsSection({
 														placeholder="每行一个 KEY=VALUE"
 														ref={bindAcpFieldRef("server", selectedMcpServer.id, "headersText")}
 														rows={3}
+														spellCheck={false}
 														value={selectedMcpServer.headersText}
 													/>
-													<span className="settings-help-text settings-help-text-tight">
-														需要鉴权时再填写。每行一个 `KEY=VALUE`。
+													<span
+														className="settings-help-text settings-help-text-tight"
+														id={`settings-mcp-${selectedMcpServer.id}-headers-help`}
+													>
+														只有服务要求额外鉴权或自定义 header 时才填写。每行一个{" "}
+														<code className="settings-inline-code">KEY=VALUE</code>，例如{" "}
+														<code className="settings-inline-code">
+															Authorization=Bearer &lt;token&gt;
+														</code>
+														。
 													</span>
 													{renderFieldError(
 														buildFieldIssueId("mcp", "headers-text", selectedMcpServer.id),
@@ -588,7 +619,7 @@ export function McpSettingsSection({
 									<strong className="settings-acp-preset-label">创建一个新服务</strong>
 								</div>
 								<label className="settings-label settings-label-stacked settings-mcp-form-row settings-mcp-create-field">
-									<span className="settings-acp-preset-label">连接类型</span>
+									<span className="settings-acp-preset-label">连接方式</span>
 									<select
 										className="settings-select"
 										onChange={(event) =>
@@ -611,7 +642,7 @@ export function McpSettingsSection({
 									onClick={onApplyMcpTransportSelection}
 									type="button"
 								>
-									新建 {getMcpTransportMeta(selectedMcpTransport).label}
+									创建 {getMcpTransportMeta(selectedMcpTransport).label} 服务
 								</button>
 							</div>
 						</div>
