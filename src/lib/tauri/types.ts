@@ -4,6 +4,16 @@ export interface ShortcutConfig {
 	open_clipboard_history: string;
 }
 
+export type ShortcutKey = keyof ShortcutConfig;
+
+export interface ShortcutRuntimeStatusEntry {
+	configuredShortcut: string;
+	registered: boolean;
+	message: string | null;
+}
+
+export type ShortcutRuntimeStatus = Record<ShortcutKey, ShortcutRuntimeStatusEntry>;
+
 export interface ClipboardHistoryEntry {
 	id: string;
 	text: string;
@@ -338,13 +348,12 @@ export interface AcpConfigOptionGroup {
 	options: AcpConfigValueOption[];
 }
 
-export type AcpConfigOptionKind =
-	{
-		type: "select";
-		currentValueId: string;
-		options: AcpConfigValueOption[];
-		groups: AcpConfigOptionGroup[];
-	};
+export type AcpConfigOptionKind = {
+	type: "select";
+	currentValueId: string;
+	options: AcpConfigValueOption[];
+	groups: AcpConfigOptionGroup[];
+};
 
 export interface AcpConfigOption {
 	id: string;

@@ -34,6 +34,7 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
         | "arm_launcher_blur_auto_hide_suppression"
         | "set_launcher_blur_auto_hide_enabled"
         | "get_shortcut"
+        | "get_shortcut_runtime_status"
         | "set_shortcut" => launcher::handle_invoke(invoke),
         "get_clipboard_history"
         | "toggle_clipboard_history_entry_pin"

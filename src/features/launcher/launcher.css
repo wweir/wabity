@@ -2638,6 +2638,32 @@
 	gap: 12px;
 }
 
+.launcher-inline-banner {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	margin-top: 12px;
+	padding: 10px 12px;
+	border-radius: 14px;
+	font-size: var(--text-xs);
+	line-height: 1.45;
+}
+
+.launcher-inline-banner-error {
+	border: 1px solid color-mix(in srgb, var(--error-strong) 24%, var(--border-soft));
+	background: color-mix(in srgb, var(--error-soft) 30%, var(--surface-card));
+	color: var(--error-strong);
+}
+
+.launcher-inline-banner-action {
+	appearance: none;
+	flex-shrink: 0;
+	color: inherit;
+	font-size: var(--text-xs);
+	font-weight: 700;
+}
+
 .launcher-status-bar {
 	padding-right: 0;
 }

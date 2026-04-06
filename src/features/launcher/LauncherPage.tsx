@@ -58,6 +58,7 @@ import type {
 	AcpSessionDetail,
 	AcpSessionSummary,
 	RagRuntimeStatus,
+	ShortcutRuntimeStatus,
 	WorkspaceState,
 } from "../../lib/tauri/types";
 import type {
@@ -308,10 +309,16 @@ function buildRagRuntimeStatusText(status: RagRuntimeStatus): {
 interface LauncherPageProps {
 	active?: boolean;
 	onOpenSettings?: () => void;
+	shortcutRuntimeStatus: ShortcutRuntimeStatus;
 	windowKind: "main" | "clipboard_history";
 }
 
-export function LauncherPage({ active = true, onOpenSettings, windowKind }: LauncherPageProps) {
+export function LauncherPage({
+	active = true,
+	onOpenSettings,
+	shortcutRuntimeStatus,
+	windowKind,
+}: LauncherPageProps) {
 	const isClipboardWindow = windowKind === "clipboard_history";
 	const launcherViewActive = isClipboardWindow || active;
 	const [inputMode, setInputMode] = useState<InputMode>(defaultInputMode);
@@ -730,6 +737,14 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 	);
 	const shouldShowQaMessages =
 		!activeSession && !jsonPreview && !markdownPreview && !result && visibleQaMessages.length > 0;
+	const showShortcutHint =
+		rawText.trim().length === 0 &&
+		!clipboardPanelVisible &&
+		!operationPending &&
+		!shortcutTranslationPending &&
+		result === null &&
+		activeSessionId === null &&
+		!pendingSlashAction;
 	const statusBarState = useMemo(() => {
 		const sessionInfoItems =
 			activeSession && activeSession.session.workspaceRoot
@@ -830,13 +845,21 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 			};
 		}
 
-		const items = latestSubmittedText ? [latestSubmittedText] : [];
+		const items = latestSubmittedText
+			? [latestSubmittedText]
+			: showShortcutHint
+				? [
+						"Esc 关闭",
+						`${shortcutRuntimeStatus.open_clipboard_history.configuredShortcut} 历史剪贴板`,
+						onOpenSettings ? "快捷键可在设置中修改" : "",
+					]
+				: [];
 		if (error) {
 			items.push(`错误 · ${error}`);
 		}
 
 		return {
-			label: error ? "状态" : "最近输入",
+			label: error ? "状态" : showShortcutHint ? "快捷提示" : "最近输入",
 			items,
 			tone: error ? ("error" as const) : ("default" as const),
 		};
@@ -846,9 +869,12 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 		creatingSession,
 		error,
 		latestSubmittedText,
+		onOpenSettings,
 		operationStatusText,
 		ragRuntimeBar,
+		showShortcutHint,
 		shouldShowQaMessages,
+		shortcutRuntimeStatus.open_clipboard_history.configuredShortcut,
 		workspace,
 	]);
 	const showTranslateAction = launcherMode;
@@ -3177,6 +3203,10 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 		: pendingSlashAction
 			? `已选择 ${pendingSlashAction.aliases[0] ?? pendingSlashAction.title}，输入待处理文本后按 Enter`
 			: "输入应用名，或用 / 执行动作、@ 搜索当前 workspace 文件";
+	const launcherShortcutError = shortcutRuntimeStatus.toggle_launcher.registered
+		? null
+		: (shortcutRuntimeStatus.toggle_launcher.message ??
+			`启动器快捷键 ${shortcutRuntimeStatus.toggle_launcher.configuredShortcut} 当前不可用。`);
 
 	return (
 		<main
@@ -3214,6 +3244,20 @@ export function LauncherPage({ active = true, onOpenSettings, windowKind }: Laun
 					/>
 
 					<RestoreNoticeList restoreNotices={restoreNotices} />
+					{launcherShortcutError ? (
+						<div className="launcher-inline-banner launcher-inline-banner-error">
+							<span>{launcherShortcutError}</span>
+							{onOpenSettings ? (
+								<button
+									className="launcher-inline-banner-action"
+									onClick={onOpenSettings}
+									type="button"
+								>
+									打开设置
+								</button>
+							) : null}
+						</div>
+					) : null}
 
 					<LauncherComposer
 						inputAnchorRef={inputAnchorRef}

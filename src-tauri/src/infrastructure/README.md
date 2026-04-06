@@ -21,6 +21,7 @@
 - macOS 下 Dock 展示与否是应用级策略，不是 `window` 模块的显隐职责；launcher 启动时和设置保存后都必须按 `general.showInDock` 同步应用激活策略与 Dock 图标可见性，避免窗口已经是工具面板但应用仍作为普通前台程序挂在 Dock，或用户明明要求显示 Dock 却始终不生效
 - `config` 统一将用户配置写入用户配置目录下的 `wabity/config.toml`，其中包含翻译提示词、ACP agent 与全局 MCP 清单；workspace 最近目录历史写入 `wabity/workspace-history.toml`
 - `config` 里的快捷键字段当前只保留 `toggle_launcher` / `ocr_translate` 两个稳定键名；运行时访问统一经 `ShortcutKey + ShortcutConfig::{get,set}`，不要在其他模块重复手写字符串分发
+- 快捷键配置值和快捷键运行时注册状态是两回事；启动阶段和设置保存后都必须把当前注册结果投影回前端，供设置页总览和入口故障提示消费，不能让前端只看 `config.toml` 猜是否可用
 - `config` 负责 TOML 序列化、原子 `safe_write`、磁盘读写和内存缓存；启动时由 `AppState::new` 先读取，再把配置投影到运行时状态
 - `openai_compatible` 只负责公共协议兼容、薄传输 client 和响应解析，不承载业务级 prompt、工具编排或 provider 选择；问答、翻译、OCR、RAG embedding 仍各自保留自己的请求体和重试策略，但只要 provider 返回 SSE，就必须由这里按流读取并归并成统一 payload，而不是让上层先把整段 body 读完再猜协议
 - 独立 crate 不得依赖宿主的领域模型；像 `/models` 响应转 `LlmProviderModelEntry` 这类宿主特定投影必须留在当前 shim，而不是反向把 `domain` 拉进基础设施包

@@ -10,10 +10,12 @@ import {
 	getBuiltinMcpServerStatus,
 	getPublicSkillCatalog,
 	getShortcut,
+	getShortcutRuntimeStatus,
 	getWorkspace,
 	hideLauncherWindow,
 	listBuiltinLlmProviderTemplates,
 	listLlmProviderModels,
+	onShortcutRuntimeStatusChanged,
 	onShortcutUpdated,
 	scanRagSources,
 	setShortcut,
@@ -36,6 +38,8 @@ import type {
 	RagScanResult,
 	RagSettings,
 	ShortcutConfig,
+	ShortcutKey,
+	ShortcutRuntimeStatus,
 	WorkspaceState,
 } from "../../lib/tauri/types";
 import { useSettingsWindowFrame } from "./useSettingsWindowFrame";
@@ -52,6 +56,7 @@ import {
 } from "./SettingsSectionViews";
 import {
 	SettingsQuickJumpList,
+	ShortcutSummaryCard,
 	acpAgentOptions,
 	getMcpTransportMeta,
 	getSettingsPanelId,
@@ -148,9 +153,14 @@ import "./settings.css";
 interface SettingsPageProps {
 	onBack: () => void;
 	onAppearanceChange?: (appearance: AppearanceSettings) => void;
+	shortcutRuntimeStatus?: ShortcutRuntimeStatus;
 }
 
-export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) {
+export function SettingsPage({
+	onBack,
+	onAppearanceChange,
+	shortcutRuntimeStatus: shortcutRuntimeStatusProp,
+}: SettingsPageProps) {
 	const [activeSection, setActiveSection] = useState<SettingsSectionId>("general");
 	const [translationPromptExpanded, setTranslationPromptExpanded] = useState(false);
 	const [questionAnswerPromptExpanded, setQuestionAnswerPromptExpanded] = useState(false);
@@ -164,6 +174,25 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 
 	const [shortcutSettings, setShortcutSettings] = useState<ShortcutConfig>(
 		createDefaultShortcutSettings,
+	);
+	const [shortcutRuntimeStatus, setShortcutRuntimeStatus] = useState<ShortcutRuntimeStatus>(
+		shortcutRuntimeStatusProp ?? {
+			toggle_launcher: {
+				configuredShortcut: "Alt+Space",
+				registered: true,
+				message: null,
+			},
+			ocr_translate: {
+				configuredShortcut: "Alt+D",
+				registered: true,
+				message: null,
+			},
+			open_clipboard_history: {
+				configuredShortcut: "Alt+V",
+				registered: true,
+				message: null,
+			},
+		},
 	);
 	const [llmSettings, setLlmSettings] = useState<LlmSettings>(createDefaultLlmSettings);
 	const [builtinLlmTemplates, setBuiltinLlmTemplates] = useState<BuiltinLlmProviderTemplate[]>([]);
@@ -653,6 +682,9 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		void getShortcut().then((config) => {
 			setShortcutSettings(config);
 		});
+		void getShortcutRuntimeStatus().then((status) => {
+			setShortcutRuntimeStatus(status);
+		});
 		void getAcpAgents().then((catalog) => {
 			const draftAgents = catalog.agents.map((agent) => ({
 				id: agent.id,
@@ -712,9 +744,13 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		const unlistenPromise = onShortcutUpdated((config) => {
 			setShortcutSettings(config);
 		});
+		const unlistenRuntimeStatusPromise = onShortcutRuntimeStatusChanged((status) => {
+			setShortcutRuntimeStatus(status);
+		});
 
 		return () => {
 			void unlistenPromise.then((unlisten) => unlisten?.());
+			void unlistenRuntimeStatusPromise.then((unlisten) => unlisten?.());
 		};
 	}, [syncAppearanceState]);
 
@@ -779,6 +815,12 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 			window.removeEventListener("keyup", handleKeyUp, true);
 		};
 	}, [editingShortcut]);
+
+	useEffect(() => {
+		if (shortcutRuntimeStatusProp) {
+			setShortcutRuntimeStatus(shortcutRuntimeStatusProp);
+		}
+	}, [shortcutRuntimeStatusProp]);
 
 	useEffect(() => {
 		const nextSelectedLlmProviderId = selectExistingIdOrFirst(
@@ -884,7 +926,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		return () => {
 			window.clearTimeout(focusTimer);
 		};
-	}, [selectedMcpServerId, mcpServers]);
+	}, [mcpServers, scrollToSectionBlock, selectedMcpServerId]);
 
 	useEffect(() => {
 		const nextSelectedSkillId = selectExistingIdOrFirst(skillCatalog.skills, selectedSkillId);
@@ -896,6 +938,23 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 	const handleShortcutClick = (key: keyof ShortcutConfig) => {
 		setEditingShortcut(key);
 	};
+
+	const handleJumpToShortcutSettings = useCallback(
+		(key?: ShortcutKey) => {
+			scrollToSectionBlock("general-shortcuts");
+			if (key) {
+				const triggerIdByKey: Record<ShortcutKey, string> = {
+					toggle_launcher: "shortcut-toggle-launcher-trigger",
+					ocr_translate: "shortcut-ocr-translate-trigger",
+					open_clipboard_history: "shortcut-open-clipboard-history-trigger",
+				};
+				window.setTimeout(() => {
+					document.getElementById(triggerIdByKey[key])?.focus();
+				}, 180);
+			}
+		},
+		[scrollToSectionBlock],
+	);
 
 	const isRecording = (key: keyof ShortcutConfig) => editingShortcut === key;
 	const llmValidation = validateLlmSettings(llmSettings, builtinLlmTemplates);
@@ -1713,6 +1772,13 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 									/>
 								) : null}
 							</div>
+
+							{activeSection === "general" ? (
+								<ShortcutSummaryCard
+									onJumpToShortcuts={handleJumpToShortcutSettings}
+									runtimeStatus={shortcutRuntimeStatus}
+								/>
+							) : null}
 
 							{activeSection === "general" ? (
 								<GeneralSettingsSection

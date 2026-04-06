@@ -18,6 +18,7 @@
 - [clipboard-history-design-2026-04-01.md](/Users/wweir/Sites/Mine/wabity/docs/clipboard-history-design-2026-04-01.md): 历史剪贴板范围、数据模型和回贴链路
 - [desktop-notification-design-2026-03-27.md](/Users/wweir/Sites/Mine/wabity/docs/desktop-notification-design-2026-03-27.md): 桌面通知完成语义与平台边界
 - [kill-command-design-2026-04-03.md](/Users/wweir/Sites/Mine/wabity/docs/kill-command-design-2026-04-03.md): `/kill` 的补全与执行语义
+- [shortcut-discoverability-design-2026-04-06.md](/Users/wweir/Sites/Mine/wabity/docs/shortcut-discoverability-design-2026-04-06.md): 快捷键失败反馈、设置页总览和 launcher 空态提示
 - [system-opener-design-2026-03-28.md](/Users/wweir/Sites/Mine/wabity/docs/system-opener-design-2026-03-28.md): 统一系统打开能力与安全边界
 
 ### LLM / 设置

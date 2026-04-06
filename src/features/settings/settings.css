@@ -84,6 +84,12 @@
 	margin-bottom: 14px;
 }
 
+.settings-banner-warn {
+	border: 1px solid color-mix(in srgb, var(--warning-strong) 24%, var(--border-soft));
+	background: color-mix(in srgb, var(--warning-soft) 28%, var(--surface-card));
+	color: var(--warning-strong);
+}
+
 .settings-nav {
 	display: grid;
 	gap: 8px;
@@ -2224,6 +2230,78 @@
 .settings-main-header .settings-jump-list-compact {
 	margin-left: 0;
 	max-width: 100%;
+}
+
+.settings-shortcut-summary-card {
+	gap: 14px;
+}
+
+.settings-shortcut-summary-header {
+	align-items: center;
+}
+
+.settings-shortcut-summary-list {
+	display: grid;
+	gap: 10px;
+}
+
+.settings-shortcut-summary-item {
+	appearance: none;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 14px;
+	width: 100%;
+	padding: 12px 14px;
+	border: 1px solid var(--border-soft);
+	border-radius: 14px;
+	background: var(--surface-panel);
+	text-align: left;
+	cursor: pointer;
+}
+
+.settings-shortcut-summary-item:hover {
+	border-color: var(--border-selected);
+	background: color-mix(in srgb, var(--surface-card-selected) 44%, var(--surface-panel));
+}
+
+.settings-shortcut-summary-item-copy {
+	display: grid;
+	gap: 4px;
+	min-width: 0;
+}
+
+.settings-shortcut-summary-item-label {
+	color: var(--text-primary);
+	font-size: var(--text-sm);
+	font-weight: 600;
+}
+
+.settings-shortcut-summary-item-value {
+	color: var(--text-secondary);
+	font-family: var(--font-mono);
+	font-size: var(--text-xs);
+	overflow-wrap: anywhere;
+}
+
+.settings-shortcut-summary-item-message {
+	color: var(--text-muted);
+	font-size: var(--text-xs);
+	line-height: 1.4;
+}
+
+.settings-shortcut-summary-state {
+	flex-shrink: 0;
+	font-size: var(--text-xs);
+	font-weight: 700;
+}
+
+.settings-shortcut-summary-state.is-ok {
+	color: var(--success-strong);
+}
+
+.settings-shortcut-summary-state.is-error {
+	color: var(--error-strong);
 }
 
 .settings-main-title {

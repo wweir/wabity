@@ -720,6 +720,9 @@ pub struct ShortcutRuntimeState {
     launcher_shortcut: Arc<StdRwLock<Option<Shortcut>>>,
     ocr_translate_shortcut: Arc<StdRwLock<Option<Shortcut>>>,
     open_clipboard_history_shortcut: Arc<StdRwLock<Option<Shortcut>>>,
+    launcher_shortcut_status: Arc<StdRwLock<ShortcutRegistrationStatus>>,
+    ocr_translate_shortcut_status: Arc<StdRwLock<ShortcutRegistrationStatus>>,
+    open_clipboard_history_shortcut_status: Arc<StdRwLock<ShortcutRegistrationStatus>>,
     launcher_view_mode: Arc<StdRwLock<LauncherWindowViewMode>>,
     launcher_main_window_size: Arc<StdRwLock<Option<LauncherWindowSize>>>,
     launcher_clipboard_window_size: Arc<StdRwLock<Option<LauncherWindowSize>>>,
@@ -745,6 +748,15 @@ impl Default for ShortcutRuntimeState {
             launcher_shortcut: Arc::new(StdRwLock::new(None)),
             ocr_translate_shortcut: Arc::new(StdRwLock::new(None)),
             open_clipboard_history_shortcut: Arc::new(StdRwLock::new(None)),
+            launcher_shortcut_status: Arc::new(StdRwLock::new(
+                ShortcutRegistrationStatus::default(),
+            )),
+            ocr_translate_shortcut_status: Arc::new(StdRwLock::new(
+                ShortcutRegistrationStatus::default(),
+            )),
+            open_clipboard_history_shortcut_status: Arc::new(StdRwLock::new(
+                ShortcutRegistrationStatus::default(),
+            )),
             launcher_view_mode: Arc::new(StdRwLock::new(LauncherWindowViewMode::Main)),
             launcher_main_window_size: Arc::new(StdRwLock::new(None)),
             launcher_clipboard_window_size: Arc::new(StdRwLock::new(None)),
@@ -773,6 +785,28 @@ pub enum ShortcutAction {
     ToggleLauncher,
     OcrTranslate,
     OpenClipboardHistory,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShortcutRuntimeStatusEntry {
+    pub configured_shortcut: String,
+    pub registered: bool,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ShortcutRuntimeStatusSnapshot {
+    pub toggle_launcher: ShortcutRuntimeStatusEntry,
+    pub ocr_translate: ShortcutRuntimeStatusEntry,
+    pub open_clipboard_history: ShortcutRuntimeStatusEntry,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ShortcutRegistrationStatus {
+    configured_shortcut: String,
+    registered: bool,
+    message: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -824,6 +858,51 @@ impl ShortcutRuntimeState {
             ShortcutKey::OpenClipboardHistory => {
                 *self.open_clipboard_history_shortcut.write().unwrap() = shortcut;
             }
+        }
+    }
+
+    pub fn set_shortcut_registration_status(
+        &self,
+        key: ShortcutKey,
+        configured_shortcut: impl Into<String>,
+        registered: bool,
+        message: Option<String>,
+    ) {
+        let status = ShortcutRegistrationStatus {
+            configured_shortcut: configured_shortcut.into(),
+            registered,
+            message,
+        };
+
+        match key {
+            ShortcutKey::ToggleLauncher => *self.launcher_shortcut_status.write().unwrap() = status,
+            ShortcutKey::OcrTranslate => {
+                *self.ocr_translate_shortcut_status.write().unwrap() = status;
+            }
+            ShortcutKey::OpenClipboardHistory => {
+                *self.open_clipboard_history_shortcut_status.write().unwrap() = status;
+            }
+        }
+    }
+
+    pub fn shortcut_runtime_status(&self) -> ShortcutRuntimeStatusSnapshot {
+        ShortcutRuntimeStatusSnapshot {
+            toggle_launcher: Self::read_shortcut_status(&self.launcher_shortcut_status),
+            ocr_translate: Self::read_shortcut_status(&self.ocr_translate_shortcut_status),
+            open_clipboard_history: Self::read_shortcut_status(
+                &self.open_clipboard_history_shortcut_status,
+            ),
+        }
+    }
+
+    fn read_shortcut_status(
+        status: &StdRwLock<ShortcutRegistrationStatus>,
+    ) -> ShortcutRuntimeStatusEntry {
+        let status = status.read().unwrap().clone();
+        ShortcutRuntimeStatusEntry {
+            configured_shortcut: status.configured_shortcut,
+            registered: status.registered,
+            message: status.message,
         }
     }
 

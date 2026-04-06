@@ -18,10 +18,11 @@ use crate::{
         window,
     },
     services::rag,
-    state::{AppState, ShortcutRuntimeState},
+    state::{AppState, ShortcutRuntimeState, ShortcutRuntimeStatusSnapshot},
 };
 
 const EXECUTION_PROGRESS_EVENT: &str = "execution-progress";
+const SHORTCUT_RUNTIME_STATUS_CHANGED_EVENT: &str = "shortcut-runtime-status-changed";
 const MAX_LAUNCHER_BLUR_AUTO_HIDE_SUPPRESSION_MS: u64 = 5_000;
 
 fn log_launcher_search_completion<T>(
@@ -227,6 +228,23 @@ pub async fn get_shortcut(
     state.config().await.map_err(|error| error.to_string())
 }
 
+pub fn get_shortcut_runtime_status(
+    shortcut_state: State<'_, ShortcutRuntimeState>,
+) -> ShortcutRuntimeStatusSnapshot {
+    shortcut_state.shortcut_runtime_status()
+}
+
+pub fn emit_shortcut_runtime_status(
+    app: &AppHandle,
+    shortcut_state: &ShortcutRuntimeState,
+) -> Result<(), String> {
+    app.emit(
+        SHORTCUT_RUNTIME_STATUS_CHANGED_EVENT,
+        shortcut_state.shortcut_runtime_status(),
+    )
+    .map_err(|error| error.to_string())
+}
+
 pub async fn set_shortcut(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -249,6 +267,13 @@ pub async fn set_shortcut(
         if let Some(previous_shortcut) = previous_shortcut {
             let _ = crate::infrastructure::hotkey::register_shortcut(&app, previous_shortcut);
         }
+        shortcut_state.set_shortcut_registration_status(
+            key,
+            shortcut.clone(),
+            false,
+            Some(error.to_string()),
+        );
+        let _ = emit_shortcut_runtime_status(&app, shortcut_state.inner());
         return Err(error.to_string());
     }
 
@@ -257,14 +282,23 @@ pub async fn set_shortcut(
         if let Some(previous_shortcut) = previous_shortcut {
             let _ = crate::infrastructure::hotkey::register_shortcut(&app, previous_shortcut);
         }
+        shortcut_state.set_shortcut_registration_status(
+            key,
+            shortcut.clone(),
+            previous_shortcut.is_some(),
+            Some(error.to_string()),
+        );
+        let _ = emit_shortcut_runtime_status(&app, shortcut_state.inner());
         return Err(error.to_string());
     }
 
     shortcut_state.set_shortcut(key, Some(next_shortcut));
+    shortcut_state.set_shortcut_registration_status(key, shortcut.clone(), true, None);
 
     let config = state.config().await.map_err(|error| error.to_string())?;
     app.emit("shortcut-updated", config)
         .map_err(|error| error.to_string())?;
+    emit_shortcut_runtime_status(&app, shortcut_state.inner())?;
 
     Ok(())
 }
@@ -520,6 +554,23 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
             let state = super::parse_arg(&invoke, "get_shortcut", "state")?;
             get_shortcut(state).await.map_err(InvokeError::from)
         }),
+        "get_shortcut_runtime_status" => {
+            let resolver = invoke.resolver.clone();
+            let Some(shortcut_state) = super::parse_or_invoke_error(
+                &invoke,
+                "get_shortcut_runtime_status",
+                "shortcutState",
+            ) else {
+                return true;
+            };
+
+            super::respond_sync(
+                resolver,
+                Ok::<ShortcutRuntimeStatusSnapshot, InvokeError>(get_shortcut_runtime_status(
+                    shortcut_state,
+                )),
+            )
+        }
         "set_shortcut" => super::respond_async(invoke.resolver.clone(), async move {
             let app = super::parse_arg(&invoke, "set_shortcut", "app")?;
             let state = super::parse_arg(&invoke, "set_shortcut", "state")?;

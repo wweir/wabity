@@ -284,7 +284,7 @@ pub fn run() -> Result<()> {
             window::configure_main_window(&main_window)?;
             window::configure_clipboard_window(&clipboard_window)?;
 
-            tauri::async_runtime::block_on(initialize_shortcuts(
+            let shortcut_failures = tauri::async_runtime::block_on(initialize_shortcuts(
                 &app.handle().clone(),
                 &app_state,
                 &shortcut_state,
@@ -298,6 +298,23 @@ pub fn run() -> Result<()> {
                 .context("failed to hide clipboard history window on startup")?;
             shortcut_state.set_launcher_visible(false);
             shortcut_state.set_clipboard_history_visible(false);
+            commands::launcher::emit_shortcut_runtime_status(app.handle(), &shortcut_state)?;
+
+            if !shortcut_failures.is_empty() {
+                let launcher_failure = shortcut_failures
+                    .iter()
+                    .find(|failure| failure.key == ShortcutKey::ToggleLauncher);
+                if launcher_failure.is_some() {
+                    window::reveal_main_window(app.handle())?;
+                }
+
+                let shortcut_summary = shortcut_failures
+                    .iter()
+                    .map(|failure| failure.message.as_str())
+                    .collect::<Vec<_>>()
+                    .join("；");
+                tracing::warn!(shortcut_summary, "startup shortcut registration degraded");
+            }
 
             Ok(())
         })
@@ -380,14 +397,21 @@ enum ShortcutRegistrationMode {
     Optional,
 }
 
+#[derive(Debug, Clone)]
+struct ShortcutRegistrationFailure {
+    key: ShortcutKey,
+    message: String,
+}
+
 async fn initialize_shortcuts(
     app: &tauri::AppHandle,
     app_state: &AppState,
     shortcut_state: &ShortcutRuntimeState,
-) -> Result<()> {
+) -> Result<Vec<ShortcutRegistrationFailure>> {
     let config = app_state.app_config().await?;
+    let mut failures = Vec::new();
 
-    register_startup_shortcut(
+    if let Some(failure) = register_startup_shortcut(
         app,
         app_state,
         shortcut_state,
@@ -395,8 +419,11 @@ async fn initialize_shortcuts(
         ShortcutKey::ToggleLauncher,
         ShortcutRegistrationMode::Required,
     )
-    .await?;
-    register_startup_shortcut(
+    .await?
+    {
+        failures.push(failure);
+    }
+    if let Some(failure) = register_startup_shortcut(
         app,
         app_state,
         shortcut_state,
@@ -404,8 +431,11 @@ async fn initialize_shortcuts(
         ShortcutKey::OcrTranslate,
         ShortcutRegistrationMode::Optional,
     )
-    .await?;
-    register_startup_shortcut(
+    .await?
+    {
+        failures.push(failure);
+    }
+    if let Some(failure) = register_startup_shortcut(
         app,
         app_state,
         shortcut_state,
@@ -413,9 +443,12 @@ async fn initialize_shortcuts(
         ShortcutKey::OpenClipboardHistory,
         ShortcutRegistrationMode::Optional,
     )
-    .await?;
+    .await?
+    {
+        failures.push(failure);
+    }
 
-    Ok(())
+    Ok(failures)
 }
 
 async fn register_startup_shortcut(
@@ -425,31 +458,60 @@ async fn register_startup_shortcut(
     shortcuts: &ShortcutConfig,
     key: ShortcutKey,
     mode: ShortcutRegistrationMode,
-) -> Result<()> {
+) -> Result<Option<ShortcutRegistrationFailure>> {
     let (shortcut, configured_value) =
         resolve_configured_shortcut(app_state, shortcuts, key).await?;
 
     match hotkey::register_shortcut(app, shortcut) {
         Ok(()) => {
             shortcut_state.set_shortcut(key, Some(shortcut));
-            Ok(())
+            shortcut_state.set_shortcut_registration_status(key, configured_value, true, None);
+            Ok(None)
         }
         Err(error) => match mode {
-            ShortcutRegistrationMode::Required => Err(error).with_context(|| {
-                format!(
-                    "failed to register required {} shortcut",
-                    key.display_name()
-                )
-            }),
+            ShortcutRegistrationMode::Required => {
+                let message = format!(
+                    "无法注册快捷键 {}（{}）：{}",
+                    key.display_name(),
+                    configured_value,
+                    error
+                );
+                tracing::error!(
+                    ?error,
+                    shortcut_key = %key.as_str(),
+                    configured_shortcut = %configured_value,
+                    "failed to register required shortcut"
+                );
+                shortcut_state.set_shortcut(key, None);
+                shortcut_state.set_shortcut_registration_status(
+                    key,
+                    configured_value.clone(),
+                    false,
+                    Some(message.clone()),
+                );
+                Ok(Some(ShortcutRegistrationFailure { key, message }))
+            }
             ShortcutRegistrationMode::Optional => {
+                shortcut_state.set_shortcut(key, None);
+                let message = format!(
+                    "无法注册快捷键 {}（{}）：{}",
+                    key.display_name(),
+                    configured_value,
+                    error
+                );
                 tracing::warn!(
                     ?error,
                     shortcut_key = %key.as_str(),
                     configured_shortcut = %configured_value,
                     "failed to register optional shortcut"
                 );
-                shortcut_state.set_shortcut(key, None);
-                Ok(())
+                shortcut_state.set_shortcut_registration_status(
+                    key,
+                    configured_value.clone(),
+                    false,
+                    Some(message.clone()),
+                );
+                Ok(Some(ShortcutRegistrationFailure { key, message }))
             }
         },
     }

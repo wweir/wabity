@@ -3,9 +3,12 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LauncherPage } from "../features/launcher/LauncherPage";
 import {
 	getAppSettings,
+	getShortcutRuntimeStatus,
 	onOcrTranslationStarted,
 	onRevealLauncherMainPanel,
+	onShortcutRuntimeStatusChanged,
 } from "../lib/tauri/client";
+import type { ShortcutRuntimeStatus } from "../lib/tauri/types";
 import { defaultAppearanceSettings, syncAppearanceSettings } from "./appearance";
 
 const SettingsPage = lazy(() =>
@@ -29,6 +32,11 @@ export function App() {
 	const [currentView, setCurrentView] = useState<AppView>("launcher");
 	const [windowKind] = useState<AppWindowKind>(resolveInitialWindowKind);
 	const [appearanceSettings, setAppearanceSettings] = useState(defaultAppearanceSettings);
+	const [shortcutRuntimeStatus, setShortcutRuntimeStatus] = useState<ShortcutRuntimeStatus>({
+		toggle_launcher: { configuredShortcut: "Alt+Space", registered: true, message: null },
+		ocr_translate: { configuredShortcut: "Alt+D", registered: true, message: null },
+		open_clipboard_history: { configuredShortcut: "Alt+V", registered: true, message: null },
+	});
 	const launcherVisible = currentView === "launcher";
 
 	useEffect(() => {
@@ -52,6 +60,43 @@ export function App() {
 
 		return () => {
 			cancelled = true;
+		};
+	}, []);
+
+	useEffect(() => {
+		let active = true;
+		let unlistenShortcutRuntime: (() => void) | null = null;
+
+		void getShortcutRuntimeStatus()
+			.then((status) => {
+				if (active) {
+					setShortcutRuntimeStatus(status);
+				}
+			})
+			.catch(() => {});
+
+		void onShortcutRuntimeStatusChanged((status) => {
+			setShortcutRuntimeStatus(status);
+		})
+			.then((unlisten) => {
+				if (!unlisten) {
+					return;
+				}
+
+				if (!active) {
+					unlisten();
+					return;
+				}
+
+				unlistenShortcutRuntime = unlisten;
+			})
+			.catch((error: unknown) => {
+				console.warn("failed to subscribe shortcut runtime status event in App", error);
+			});
+
+		return () => {
+			active = false;
+			unlistenShortcutRuntime?.();
 		};
 	}, []);
 
@@ -110,7 +155,7 @@ export function App() {
 	}, [windowKind]);
 
 	if (windowKind === "clipboard_history") {
-		return <LauncherPage windowKind={windowKind} />;
+		return <LauncherPage shortcutRuntimeStatus={shortcutRuntimeStatus} windowKind={windowKind} />;
 	}
 
 	return (
@@ -118,6 +163,7 @@ export function App() {
 			<div hidden={!launcherVisible}>
 				<LauncherPage
 					active={launcherVisible}
+					shortcutRuntimeStatus={shortcutRuntimeStatus}
 					windowKind={windowKind}
 					onOpenSettings={() => setCurrentView("settings")}
 				/>
@@ -127,6 +173,7 @@ export function App() {
 					<SettingsPage
 						onAppearanceChange={setAppearanceSettings}
 						onBack={() => setCurrentView("launcher")}
+						shortcutRuntimeStatus={shortcutRuntimeStatus}
 					/>
 				</Suspense>
 			) : null}

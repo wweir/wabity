@@ -57,6 +57,7 @@
 - 问答结果落地不是普通文本更新；`LauncherPage.tsx` 在写入 QA message 前必须显式调用 `armLauncherBlurAutoHideSuppression(...)`，并在结果初次落地与后续 resize 稳定期内临时关闭 blur auto-hide，同时暂停 `window focus`、`visibilitychange`、`onFocusChanged` 这类被动 refocus 链；稳定期结束后这两条保护要自动恢复，显式退出 QA 展示态时也要立即恢复，不能再把“等待下一次用户输入”当成唯一恢复路径，否则失焦隐藏会被长期关死。macOS 窗口层已经放弃 `nonactivating panel`，改成“可激活、只抢 key 不争 main”的 floating panel；同时结果展示期如果仍发生原生失焦，窗口层默认不会再自动抢回 key 焦点，而是只保留 suppression，等待用户显式重新聚焦；只有在原生 panel 已经掉出可见层时，窗口层才允许做一次不抢焦点的 `show/orderFrontRegardless` 补偿，避免结果面看起来像“自动隐藏”
 - QA 结果展示期不能简单粗暴地把原生 auto-resize 全关掉；当前策略是继续保留尺寸观察，但进入 QA 后切到“只增不减”的窗口同步。这样首屏回答、懒加载的 Markdown / 语法高亮 / citation 仍能把窗口继续撑开，而短时测量抖动不会把窗口又缩回去截断下半截内容；离开 QA 展示态后才恢复正常的可增可减 resize
 - launcher 通过快捷键、OCR 回填、快捷翻译结果回填或其他显示路径重新出现时，主输入框会主动恢复焦点，不能只依赖首次挂载时的 `autoFocus`
+- launcher 在真正空态时会在输入区下方显示一条低噪音 hint，提醒 `Esc`、历史剪贴板快捷键和“去设置修改快捷键”；一旦开始输入、进入结果态或切到其它交互态，这条提示立即消失，不能常驻抢注意力
 - `Alt+Space` 现在只负责显示或隐藏 launcher；这条热路径不再同步读取外部应用选中文本，否则显隐会被模拟复制和剪贴板轮询拖慢
 - `Alt+Space` 重新显示 launcher 时必须回到 launcher 主页面，不能复活上一次 `Alt+V` 留下的历史剪贴板面板态；剪贴板历史只应由 `Alt+V` 或显式前端切换进入
 - `Alt+V` 会直接打开历史剪贴板面板；如果 launcher 已在前台，则进入“插入输入框”模式；否则进入“外部回贴”模式并只展示剪贴板面板

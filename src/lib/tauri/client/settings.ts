@@ -24,6 +24,7 @@ import type {
 	RagScanResult,
 	RagSettings,
 	ShortcutConfig,
+	ShortcutRuntimeStatus,
 } from "../types";
 
 export { defaultRagIgnoreGlobs };
@@ -42,6 +43,32 @@ export async function setShortcut(key: string, shortcut: string): Promise<void> 
 
 export async function onShortcutUpdated(callback: (config: ShortcutConfig) => void) {
 	return listenIfDesktop("shortcut-updated", callback);
+}
+
+export async function getShortcutRuntimeStatus(): Promise<ShortcutRuntimeStatus> {
+	return invokeOrDefault("get_shortcut_runtime_status", {
+		toggle_launcher: {
+			configuredShortcut: "Alt+Space",
+			registered: true,
+			message: null,
+		},
+		ocr_translate: {
+			configuredShortcut: "Alt+D",
+			registered: true,
+			message: null,
+		},
+		open_clipboard_history: {
+			configuredShortcut: "Alt+V",
+			registered: true,
+			message: null,
+		},
+	});
+}
+
+export async function onShortcutRuntimeStatusChanged(
+	callback: (status: ShortcutRuntimeStatus) => void,
+) {
+	return listenIfDesktop("shortcut-runtime-status-changed", callback);
 }
 
 export async function getAppSettings(): Promise<AppSettings> {
