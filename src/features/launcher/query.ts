@@ -2,7 +2,7 @@ import type { ActionMatch, FileSearchMatch, InputMode, QueryPayload } from "./ty
 
 export const fileSearchDebounceMs = 50;
 export const appSearchDebounceMs = 80;
-export const killSearchDebounceMs = 80;
+export const killSearchDebounceMs = 120;
 export const jsonFormatCommandAliases = ["/format", "/fmt", "/json"] as const;
 export const markdownCommandAliases = ["/md", "/markdown"] as const;
 export const base64CommandAliases = ["/base64"] as const;

@@ -1,11 +1,17 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, RwLock},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 #[cfg(target_os = "macos")]
 use std::process::Command;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use fuzzy_matcher::{skim::SkimMatcherV2, FuzzyMatcher};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, Signal, System};
+use tokio::task;
 
 use crate::domain::{
     execution::{ExecutionResult, ExecutionStatus},
@@ -13,9 +19,23 @@ use crate::domain::{
 };
 
 const KILL_COMMAND_ALIASES: [&str; 1] = ["/kill"];
+pub const PROCESS_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+pub const PROCESS_CACHE_STALE_AFTER: Duration = Duration::from_secs(5);
 
-#[derive(Debug, Clone, Default)]
-pub struct ProcessService;
+#[derive(Debug, Clone)]
+pub struct ProcessService {
+    snapshot: Arc<RwLock<ProcessCatalogSnapshot>>,
+    #[cfg(target_os = "macos")]
+    localized_name_cache: Arc<RwLock<HashMap<String, Option<String>>>>,
+}
+
+#[derive(Debug, Clone)]
+struct ProcessCatalogSnapshot {
+    entries: Arc<Vec<ProcessRecord>>,
+    built_at_ms: Option<u64>,
+    refreshing: bool,
+    version: u64,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProcessRecord {
@@ -41,7 +61,16 @@ struct ProcessSearchCandidate {
 
 impl ProcessService {
     pub fn new() -> Self {
-        Self
+        Self {
+            snapshot: Arc::new(RwLock::new(ProcessCatalogSnapshot {
+                entries: Arc::new(Vec::new()),
+                built_at_ms: None,
+                refreshing: false,
+                version: 0,
+            })),
+            #[cfg(target_os = "macos")]
+            localized_name_cache: Arc::new(RwLock::new(HashMap::new())),
+        }
     }
 
     pub fn search_running(&self, query: &str, limit: usize) -> Result<Vec<RunningProcessMatch>> {
@@ -50,9 +79,55 @@ impl ProcessService {
             return Ok(Vec::new());
         }
 
-        let current_pid = current_pid_u32()?;
-        let processes = collect_process_records(current_pid);
-        Ok(rank_processes(&processes, needle, limit))
+        if self.entries_snapshot()?.is_empty() {
+            self.refresh_now_blocking()?;
+        } else {
+            self.schedule_refresh_if_stale(PROCESS_CACHE_STALE_AFTER);
+        }
+
+        let entries = self.entries_snapshot()?;
+        Ok(rank_processes(entries.as_ref(), needle, limit))
+    }
+
+    pub async fn refresh_now(&self) -> Result<()> {
+        if !self.begin_refresh()? {
+            return Ok(());
+        }
+
+        let service = self.clone();
+        let build_result = task::spawn_blocking(move || service.collect_process_records_fresh())
+            .await
+            .context("failed to join process cache refresh task")?;
+        match build_result {
+            Ok(entries) => {
+                self.replace_snapshot(entries)?;
+                Ok(())
+            }
+            Err(error) => {
+                self.finish_failed_refresh()?;
+                Err(error)
+            }
+        }
+    }
+
+    pub fn schedule_refresh_if_stale(&self, max_age: Duration) {
+        let should_refresh = match self.should_refresh(max_age) {
+            Ok(should_refresh) => should_refresh,
+            Err(error) => {
+                tracing::warn!(?error, "failed to inspect process cache state");
+                return;
+            }
+        };
+        if !should_refresh {
+            return;
+        }
+
+        let service = self.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = service.refresh_now().await {
+                tracing::warn!(?error, "failed to refresh process cache");
+            }
+        });
     }
 
     pub fn kill_action(&self, raw_text: &str) -> Result<ExecutionResult> {
@@ -64,8 +139,7 @@ impl ProcessService {
             ));
         }
 
-        let current_pid = current_pid_u32()?;
-        let processes = collect_process_records(current_pid);
+        let processes = self.collect_process_records_fresh()?;
         match resolve_kill_target(target_text, &processes) {
             KillTargetResolution::NotFound => Ok(warning_result(
                 Some(target_text.to_string()),
@@ -81,78 +155,187 @@ impl ProcessService {
             KillTargetResolution::Unique(target) => terminate_process(&target),
         }
     }
+
+    fn refresh_now_blocking(&self) -> Result<()> {
+        if !self.begin_refresh()? {
+            return Ok(());
+        }
+
+        match self.collect_process_records_fresh() {
+            Ok(entries) => {
+                self.replace_snapshot(entries)?;
+                Ok(())
+            }
+            Err(error) => {
+                self.finish_failed_refresh()?;
+                Err(error)
+            }
+        }
+    }
+
+    fn collect_process_records_fresh(&self) -> Result<Vec<ProcessRecord>> {
+        let started_at = std::time::Instant::now();
+        let current_pid = current_pid_u32()?;
+        let mut system = System::new();
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::everything(),
+        );
+
+        let mut processes = system
+            .processes()
+            .values()
+            .filter_map(|process| self.process_record_from_sysinfo(process, current_pid))
+            .collect::<Vec<_>>();
+        processes.sort_by(|left, right| {
+            left.display_name
+                .cmp(&right.display_name)
+                .then_with(|| left.pid.cmp(&right.pid))
+        });
+        tracing::info!(
+            count = processes.len(),
+            elapsed_ms = started_at.elapsed().as_millis(),
+            "process cache refreshed"
+        );
+        Ok(processes)
+    }
+
+    fn process_record_from_sysinfo(
+        &self,
+        process: &sysinfo::Process,
+        current_pid: u32,
+    ) -> Option<ProcessRecord> {
+        let pid = process.pid().as_u32();
+        if pid == current_pid {
+            return None;
+        }
+
+        let process_name = process.name().to_string_lossy().trim().to_string();
+        if process_name.is_empty() {
+            return None;
+        }
+
+        let executable_path = process
+            .exe()
+            .map(|path| path.to_string_lossy().into_owned());
+        let app_bundle_path = process
+            .exe()
+            .and_then(extract_app_bundle_path)
+            .map(|path| path.to_string_lossy().into_owned());
+        let display_name = app_bundle_path
+            .as_deref()
+            .and_then(|path| self.localized_app_name(Path::new(path)))
+            .or_else(|| {
+                app_bundle_path
+                    .as_deref()
+                    .and_then(|path| bundle_display_name(Path::new(path)))
+            })
+            .unwrap_or_else(|| process_name.clone());
+
+        Some(ProcessRecord {
+            pid,
+            display_name,
+            process_name,
+            executable_path,
+            app_bundle_path: app_bundle_path.clone(),
+            kind: if app_bundle_path.is_some() {
+                RunningProcessKind::App
+            } else {
+                RunningProcessKind::Process
+            },
+        })
+    }
+
+    fn entries_snapshot(&self) -> Result<Arc<Vec<ProcessRecord>>> {
+        let guard = self
+            .snapshot
+            .read()
+            .map_err(|_| anyhow::anyhow!("failed to read process cache state"))?;
+        Ok(Arc::clone(&guard.entries))
+    }
+
+    fn begin_refresh(&self) -> Result<bool> {
+        let mut guard = self
+            .snapshot
+            .write()
+            .map_err(|_| anyhow::anyhow!("failed to write process cache state"))?;
+        if guard.refreshing {
+            return Ok(false);
+        }
+        guard.refreshing = true;
+        Ok(true)
+    }
+
+    fn replace_snapshot(&self, entries: Vec<ProcessRecord>) -> Result<()> {
+        let mut guard = self
+            .snapshot
+            .write()
+            .map_err(|_| anyhow::anyhow!("failed to update process cache state"))?;
+        let version = guard.version.saturating_add(1);
+        guard.entries = Arc::new(entries);
+        guard.built_at_ms = Some(current_time_ms());
+        guard.refreshing = false;
+        guard.version = version;
+        tracing::info!(
+            count = guard.entries.len(),
+            version = guard.version,
+            "process cache snapshot replaced"
+        );
+        Ok(())
+    }
+
+    fn finish_failed_refresh(&self) -> Result<()> {
+        let mut guard = self
+            .snapshot
+            .write()
+            .map_err(|_| anyhow::anyhow!("failed to update process cache state"))?;
+        guard.refreshing = false;
+        Ok(())
+    }
+
+    fn should_refresh(&self, max_age: Duration) -> Result<bool> {
+        let guard = self
+            .snapshot
+            .read()
+            .map_err(|_| anyhow::anyhow!("failed to read process cache state"))?;
+        if guard.refreshing {
+            return Ok(false);
+        }
+
+        if guard.entries.is_empty() || guard.built_at_ms.is_none() {
+            return Ok(true);
+        }
+
+        Ok(cache_age_exceeded(guard.built_at_ms, max_age))
+    }
+
+    #[cfg(target_os = "macos")]
+    fn localized_app_name(&self, path: &Path) -> Option<String> {
+        let cache_key = path.to_string_lossy().into_owned();
+        if let Ok(guard) = self.localized_name_cache.read() {
+            if let Some(cached) = guard.get(&cache_key) {
+                return cached.clone();
+            }
+        }
+
+        let resolved = localized_app_name_uncached(path);
+        if let Ok(mut guard) = self.localized_name_cache.write() {
+            guard.insert(cache_key, resolved.clone());
+        }
+        resolved
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn localized_app_name(&self, _path: &Path) -> Option<String> {
+        None
+    }
 }
 
 fn current_pid_u32() -> Result<u32> {
     Ok(sysinfo::get_current_pid()
         .map_err(|error| anyhow::anyhow!("failed to resolve current process id: {error}"))?
         .as_u32())
-}
-
-fn collect_process_records(current_pid: u32) -> Vec<ProcessRecord> {
-    let mut system = System::new();
-    system.refresh_processes_specifics(
-        ProcessesToUpdate::All,
-        true,
-        ProcessRefreshKind::everything(),
-    );
-
-    let mut processes = system
-        .processes()
-        .values()
-        .filter_map(|process| process_record_from_sysinfo(process, current_pid))
-        .collect::<Vec<_>>();
-    processes.sort_by(|left, right| {
-        left.display_name
-            .cmp(&right.display_name)
-            .then_with(|| left.pid.cmp(&right.pid))
-    });
-    processes
-}
-
-fn process_record_from_sysinfo(
-    process: &sysinfo::Process,
-    current_pid: u32,
-) -> Option<ProcessRecord> {
-    let pid = process.pid().as_u32();
-    if pid == current_pid {
-        return None;
-    }
-
-    let process_name = process.name().to_string_lossy().trim().to_string();
-    if process_name.is_empty() {
-        return None;
-    }
-
-    let executable_path = process
-        .exe()
-        .map(|path| path.to_string_lossy().into_owned());
-    let app_bundle_path = process
-        .exe()
-        .and_then(extract_app_bundle_path)
-        .map(|path| path.to_string_lossy().into_owned());
-    let display_name = app_bundle_path
-        .as_deref()
-        .and_then(|path| localized_app_name(Path::new(path)))
-        .or_else(|| {
-            app_bundle_path
-                .as_deref()
-                .and_then(|path| bundle_display_name(Path::new(path)))
-        })
-        .unwrap_or_else(|| process_name.clone());
-
-    Some(ProcessRecord {
-        pid,
-        display_name,
-        process_name,
-        executable_path,
-        app_bundle_path: app_bundle_path.clone(),
-        kind: if app_bundle_path.is_some() {
-            RunningProcessKind::App
-        } else {
-            RunningProcessKind::Process
-        },
-    })
 }
 
 fn extract_app_bundle_path(executable_path: &Path) -> Option<PathBuf> {
@@ -185,7 +368,7 @@ fn parse_pid_target(value: &str) -> Option<u32> {
 }
 
 #[cfg(target_os = "macos")]
-fn localized_app_name(path: &Path) -> Option<String> {
+fn localized_app_name_uncached(path: &Path) -> Option<String> {
     let output = Command::new("mdls")
         .arg("-raw")
         .arg("-name")
@@ -199,11 +382,6 @@ fn localized_app_name(path: &Path) -> Option<String> {
 
     let display_name = String::from_utf8(output.stdout).ok()?;
     normalize_display_name(&display_name)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn localized_app_name(_path: &Path) -> Option<String> {
-    None
 }
 
 fn normalize_display_name(raw_name: &str) -> Option<String> {
@@ -412,13 +590,28 @@ fn warning_result(primary_text: Option<String>, message: &str) -> ExecutionResul
     }
 }
 
+fn cache_age_exceeded(built_at_ms: Option<u64>, max_age: Duration) -> bool {
+    let Some(built_at_ms) = built_at_ms else {
+        return true;
+    };
+    let age_ms = current_time_ms().saturating_sub(built_at_ms);
+    age_ms > max_age.as_millis() as u64
+}
+
+fn current_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{path::Path, time::Duration};
 
     use super::{
-        bundle_display_name, extract_app_bundle_path, normalize_display_name, rank_processes,
-        resolve_kill_target, KillTargetResolution, ProcessRecord,
+        bundle_display_name, cache_age_exceeded, extract_app_bundle_path, normalize_display_name,
+        rank_processes, resolve_kill_target, KillTargetResolution, ProcessRecord,
     };
     use crate::domain::process::RunningProcessKind;
 
@@ -504,5 +697,15 @@ mod tests {
             Some("WeChat")
         );
         assert_eq!(normalize_display_name("(null)"), None);
+    }
+
+    #[test]
+    fn cache_age_reports_stale_only_after_threshold() {
+        let now_ms = super::current_time_ms();
+        assert!(!cache_age_exceeded(Some(now_ms), Duration::from_secs(5)));
+        assert!(cache_age_exceeded(
+            Some(now_ms.saturating_sub(6_000)),
+            Duration::from_secs(5)
+        ));
     }
 }

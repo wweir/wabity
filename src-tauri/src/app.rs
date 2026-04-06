@@ -18,7 +18,8 @@ use crate::{
     },
     services::{
         application::APPLICATION_CACHE_REFRESH_INTERVAL, executor::ExecutorService,
-        matcher::MatcherService, ocr, selection, translate,
+        matcher::MatcherService, ocr, process::PROCESS_CACHE_REFRESH_INTERVAL, selection,
+        translate,
     },
     state::{AppState, ShortcutAction, ShortcutRuntimeState},
 };
@@ -271,6 +272,7 @@ pub fn run() -> Result<()> {
             app_state.acp().start_event_loop();
             tauri::async_runtime::block_on(app_state.restore_acp_sessions())?;
             start_application_cache_tasks(app_state.application().clone());
+            start_process_cache_tasks(app_state.process().clone());
 
             let main_window = app
                 .get_webview_window("main")
@@ -322,6 +324,24 @@ fn reconcile_configured_autostart(app: &tauri::AppHandle, app_state: &AppState) 
             "failed to reconcile autostart state on startup"
         );
     }
+}
+
+fn start_process_cache_tasks(process: crate::services::process::ProcessService) {
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = process.refresh_now().await {
+            tracing::warn!(?error, "failed to prewarm process cache");
+        }
+
+        let mut interval = tokio_time::interval(PROCESS_CACHE_REFRESH_INTERVAL);
+        interval.tick().await;
+
+        loop {
+            interval.tick().await;
+            if let Err(error) = process.refresh_now().await {
+                tracing::warn!(?error, "failed to refresh process cache on interval");
+            }
+        }
+    });
 }
 
 #[cfg(rust_analyzer)]

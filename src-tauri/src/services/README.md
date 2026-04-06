@@ -4,7 +4,7 @@
 
 - `acp`：启动本地 `stdio` ACP agent、维护 session 生命周期并投影消息流；`mod.rs` 只保留 service 主流程、session 记录和 runtime 事件消费，agent 命令构建下沉到 `command_builder`，ACP mode / config / MCP transport 映射下沉到 `mapping`
 - `application`：扫描已安装应用、缓存索引并执行应用启动
-- `process`：枚举当前运行中的进程，为 `/kill` 提供补全搜索和安全终止执行
+- `process`：维护当前运行进程的短 TTL 常驻快照，为 `/kill` 提供低延迟补全搜索，并在执行阶段重新实时校验后再终止目标
 - `matcher`：根据输入上下文筛选并排序动作
 - `notification`：根据通知设置、launcher 前后台态和完成事件语义，决定是否发系统通知，并把问答/ACP 的最终响应压缩成受控摘要
 - `executor`：执行动作并返回结构化结果
@@ -29,6 +29,8 @@
 - `clipboard` 和 `selection` 不是同一种能力：`selection` 只负责临时模拟复制当前选区并恢复原剪贴板；历史剪贴板则维护长期少量文本记录，两者不能混成一个模块
 - `open_target` 属于有副作用的运行时能力，不继续塞进 `executor`；`/open` 的 URL、绝对路径、`~` 路径和 workspace-relative 路径都在这里解析并统一交给系统 opener
 - `process` 和 `open_target` 一样属于有副作用的运行时能力，不继续塞进 `executor`；`/kill` 的补全只搜索当前运行中的目标，执行只接受 `pid:<id>` 或精确名称命中单个运行目标，命中多个时必须拒绝并要求用户回到补全
+- `process` 的补全路径不再在每次按键时全量枚举系统进程；启动后会后台预热并维持短 TTL 内存快照，查询阶段优先只读快照，过期后异步刷新；但真正执行 `/kill` 时仍必须重新读取最新进程列表并校验目标，不能直接信任补全缓存
+- macOS 下 `process` 不再在搜索热路径里反复对同一个 `.app` bundle 调 `mdls`；本地化显示名按 bundle path 缓存复用，避免把外部命令开销摊到每次输入
 - `application` 当前刻意只覆盖 macOS `.app` bundle：扫描 `/Applications`、`/System/Applications` 和 `~/Applications`
 - `application` 对每个 bundle 优先读取 macOS metadata 里的本地化显示名，并把 bundle 目录名保留为别名参与匹配，解决 `WeChat.app` / `DingTalk.app` 这类中文名称搜索问题
 - `application` 在启动后后台预热索引，并维持常驻内存快照；查询阶段只打内存，不同步触发扫描

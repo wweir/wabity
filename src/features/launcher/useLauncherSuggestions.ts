@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
 	appSearchDebounceMs,
@@ -34,6 +34,7 @@ export function useLauncherSuggestions(args: UseLauncherSuggestionsArgs) {
 	const [fileMatches, setFileMatches] = useState<FileSearchMatch[]>([]);
 	const [appMatches, setAppMatches] = useState<InstalledAppMatch[]>([]);
 	const [killMatches, setKillMatches] = useState<RunningProcessMatch[]>([]);
+	const killSuggestionCacheRef = useRef<Map<string, RunningProcessMatch[]>>(new Map());
 	const [selectedIndex, setSelectedIndex] = useState(0);
 	const [suggestionLoading, setSuggestionLoading] = useState(false);
 	const [suggestionsHidden, setSuggestionsHidden] = useState(false);
@@ -64,6 +65,54 @@ export function useLauncherSuggestions(args: UseLauncherSuggestionsArgs) {
 			args.setError(null);
 		},
 		[args.setError],
+	);
+
+	const warmKillSuggestionsFromCache = useCallback(
+		(query: string) => {
+			const normalizedQuery = query.trim().toLowerCase();
+			if (!normalizedQuery) {
+				return false;
+			}
+
+			const cache = killSuggestionCacheRef.current;
+			const exact = cache.get(normalizedQuery);
+			if (exact) {
+				showSuggestions({ killMatches: exact });
+				return true;
+			}
+
+			let bestPrefixMatches: RunningProcessMatch[] | null = null;
+			let bestPrefixLength = 0;
+			for (const [cachedQuery, cachedMatches] of cache.entries()) {
+				if (cachedQuery.length <= bestPrefixLength || !normalizedQuery.startsWith(cachedQuery)) {
+					continue;
+				}
+				bestPrefixLength = cachedQuery.length;
+				bestPrefixMatches = cachedMatches;
+			}
+
+			if (!bestPrefixMatches) {
+				return false;
+			}
+
+			const filteredMatches = bestPrefixMatches
+				.filter((match) => {
+					const pidText = `pid:${match.pid}`;
+					return (
+						match.displayName.toLowerCase().includes(normalizedQuery) ||
+						match.processName.toLowerCase().includes(normalizedQuery) ||
+						pidText.startsWith(normalizedQuery)
+					);
+				})
+				.slice(0, 8);
+			if (filteredMatches.length === 0) {
+				return false;
+			}
+
+			showSuggestions({ killMatches: filteredMatches });
+			return true;
+		},
+		[showSuggestions],
 	);
 
 	useEffect(() => {
@@ -168,6 +217,10 @@ export function useLauncherSuggestions(args: UseLauncherSuggestionsArgs) {
 						resultCount: nextMatches.length,
 					});
 					if (!cancelled) {
+						killSuggestionCacheRef.current.set(
+							args.killSearchQuery.trim().toLowerCase(),
+							nextMatches,
+						);
 						showSuggestions({ killMatches: nextMatches });
 					}
 				} catch (loadError) {
@@ -227,6 +280,7 @@ export function useLauncherSuggestions(args: UseLauncherSuggestionsArgs) {
 				};
 			}
 
+			warmKillSuggestionsFromCache(args.killSearchQuery);
 			debounceTimer = window.setTimeout(() => {
 				void loadSuggestions();
 			}, killSearchDebounceMs);
@@ -253,6 +307,7 @@ export function useLauncherSuggestions(args: UseLauncherSuggestionsArgs) {
 		args.textBeforeCaret,
 		resetSuggestions,
 		showSuggestions,
+		warmKillSuggestionsFromCache,
 	]);
 
 	return {
