@@ -22,6 +22,7 @@ enum EmbeddingScenario {
     PreferSpecificFile,
     DiversifyAcrossFiles,
     GenericBoilerplateWins,
+    RewritePrefersFocusedQuery,
     UniformNoise,
 }
 
@@ -156,6 +157,18 @@ fn embedding_for(scenario: EmbeddingScenario, text: &str) -> Vec<f32> {
                 vec![0.6, 0.4]
             } else if lower.contains("timeout") {
                 vec![0.8, 0.2]
+            } else {
+                vec![0.0, 1.0]
+            }
+        }
+        EmbeddingScenario::RewritePrefersFocusedQuery => {
+            if lower.contains("where is the alpha timeout root cause documented") {
+                vec![0.1, 0.9]
+            } else if lower.contains("alpha") && lower.contains("timeout") && lower.contains("root")
+            {
+                vec![1.0, 0.0]
+            } else if lower.contains("timeout") || lower.contains("documented") {
+                vec![0.35, 0.65]
             } else {
                 vec![0.0, 1.0]
             }
@@ -351,6 +364,53 @@ async fn rag_retrieval_prefers_exact_root_cause_over_generic_boilerplate_after_r
             .all(|hit| !hit.absolute_path.ends_with("/generic-checklist.md")),
         "当前查询只需要高关联证据时，不应把泛化 checklist 一并返回"
     );
+}
+
+#[tokio::test]
+async fn rag_retrieval_query_rewrite_recovers_focused_evidence_from_question_wrapper() {
+    let docs = [
+        (
+            "exact-root-cause.md",
+            "Alpha timeout root cause analysis for the cache lock path and the concrete mitigation.",
+        ),
+        (
+            "question-template.md",
+            "Where is the timeout issue documented? General checklist for finding docs.",
+        ),
+    ];
+    let (result, requests, server_handle) = build_index_and_search(
+        EmbeddingScenario::RewritePrefersFocusedQuery,
+        &docs,
+        "where is the alpha timeout root cause documented?",
+        2,
+    )
+    .await;
+
+    server_handle.abort();
+
+    assert!(!result.hits.is_empty());
+    assert!(
+        result.hits[0]
+            .absolute_path
+            .ends_with("/exact-root-cause.md"),
+        "query rewrite 应把问题包装语剥离为更聚焦的 semantic/lexical 查询"
+    );
+
+    let request_log = requests.lock().expect("failed to lock embedding requests");
+    let embedded_inputs = request_log
+        .iter()
+        .flat_map(|request| {
+            request
+                .get("input")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter_map(|input| input.as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    assert!(embedded_inputs
+        .iter()
+        .any(|input| input == "alpha timeout root cause"));
 }
 
 #[tokio::test]

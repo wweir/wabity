@@ -27,6 +27,104 @@ const FALLBACK_MIN_SCORE: f32 = 0.3;
 const STRONG_QUERY_MAX_DISTANCE_DELTA: f32 = 0.12;
 const BASE64_LINE_MIN_LEN: usize = 24;
 const HEADING_ONLY_MAX_VISIBLE_CHARS: usize = 24;
+const MAX_SEMANTIC_QUERIES: usize = 3;
+const MAX_LEXICAL_QUERIES: usize = 4;
+const VECTOR_SEMANTIC_CANDIDATE_FLOOR: usize = 12;
+const LEXICAL_SEMANTIC_CANDIDATE_FLOOR: usize = 12;
+
+const ENGLISH_QUERY_NOISE_TERMS: &[&str] = &[
+    "a",
+    "an",
+    "the",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "do",
+    "does",
+    "did",
+    "to",
+    "for",
+    "of",
+    "in",
+    "on",
+    "at",
+    "by",
+    "with",
+    "from",
+    "about",
+    "into",
+    "show",
+    "where",
+    "which",
+    "what",
+    "when",
+    "why",
+    "how",
+    "find",
+    "locate",
+    "look",
+    "need",
+    "want",
+    "tell",
+    "me",
+    "documented",
+    "documentation",
+    "docs",
+    "file",
+    "files",
+    "code",
+    "source",
+    "implementation",
+    "explain",
+];
+
+const CHINESE_QUERY_NOISE_TERMS: &[&str] = &[
+    "请",
+    "帮我",
+    "一下",
+    "哪里",
+    "在哪",
+    "什么",
+    "为什么",
+    "怎么",
+    "如何",
+    "哪个",
+    "文档",
+    "文件",
+    "代码",
+    "实现",
+    "说明",
+    "解释",
+    "给我",
+    "找",
+    "看看",
+];
+
+#[derive(Debug, Clone)]
+struct SemanticQuery {
+    text: String,
+    weight: f32,
+}
+
+#[derive(Debug, Clone)]
+struct LexicalQuery {
+    match_query: String,
+    weight: f32,
+}
+
+#[derive(Debug, Clone)]
+struct QueryPlan {
+    normalized_query: String,
+    focus_query: String,
+    normalized_focus_query: String,
+    required_terms: Vec<String>,
+    semantic_queries: Vec<SemanticQuery>,
+    lexical_queries: Vec<LexicalQuery>,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,6 +150,8 @@ pub struct RagSearchHit {
     pub(crate) lexical_score: f32,
     #[serde(skip_serializing)]
     pub(crate) has_vector_signal: bool,
+    #[serde(skip_serializing)]
+    pub(crate) retrieval_boost: f32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -79,6 +179,7 @@ struct LexicalMatchSignals {
     term_coverage: f32,
     exact_query_match: bool,
     matched_query_terms: usize,
+    required_term_coverage: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -107,6 +208,14 @@ pub async fn search_chunks(
     if trimmed_query.is_empty() {
         bail!("query 不能为空");
     }
+    let query_plan = build_query_plan(trimmed_query);
+    tracing::debug!(
+        focus_query = query_plan.focus_query,
+        semantic_query_count = query_plan.semantic_queries.len(),
+        lexical_query_count = query_plan.lexical_queries.len(),
+        required_term_count = query_plan.required_terms.len(),
+        "built RAG query plan"
+    );
 
     if rag_settings.source_directories.is_empty()
         || rag_settings
@@ -121,12 +230,22 @@ pub async fn search_chunks(
 
     let embedding_provider = rag::resolve_embedding_provider(rag_settings, llm_settings)?;
     let candidate_limit = expanded_candidate_limit(top_k);
+    let vector_limit = per_query_candidate_limit(
+        candidate_limit,
+        query_plan.semantic_queries.len(),
+        VECTOR_SEMANTIC_CANDIDATE_FLOOR,
+    );
+    let lexical_limit = per_query_candidate_limit(
+        candidate_limit,
+        query_plan.lexical_queries.len(),
+        LEXICAL_SEMANTIC_CANDIDATE_FLOOR,
+    );
     let (vector_hits, lexical_hits) = tokio::join!(
-        search_similar_chunks(data_dir, trimmed_query, embedding_provider, candidate_limit),
-        search_lexical_chunks(data_dir, trimmed_query, candidate_limit),
+        search_similar_chunks(data_dir, embedding_provider, &query_plan, vector_limit),
+        search_lexical_chunks(data_dir, &query_plan, lexical_limit),
     );
     let hits = merge_search_hits(vector_hits?, lexical_hits?);
-    let ranked_hits = rerank_search_hits(trimmed_query, hits);
+    let ranked_hits = rerank_search_hits(&query_plan, hits);
     let filtered_hits = prune_search_hits(ranked_hits, top_k, min_score);
     let metadata_path = rag::rag_metadata_database_path(data_dir);
     let pending_indexing = rag::metadata_store_has_pending_rows(&metadata_path)?;
@@ -184,8 +303,8 @@ async fn get_rag_query_db(database_path: &Path) -> Result<LanceConnection> {
 
 async fn search_similar_chunks(
     data_dir: &Path,
-    query: &str,
     embedding_provider: &LlmProviderConfig,
+    query_plan: &QueryPlan,
     top_k: usize,
 ) -> Result<Vec<RagSearchHit>> {
     let vector_search_started_at = Instant::now();
@@ -206,46 +325,57 @@ async fn search_similar_chunks(
         .await
         .context("failed to open RAG chunk table")?;
     let client = rag::build_embedding_client()?;
-    let vectors =
-        rag::request_embeddings(&client, embedding_provider, &[query.to_string()]).await?;
-    let query_vector = vectors
-        .into_iter()
-        .next()
-        .context("embedding provider did not return query embedding")?;
+    let semantic_queries = query_plan
+        .semantic_queries
+        .iter()
+        .map(|query| query.text.clone())
+        .collect::<Vec<_>>();
+    let vectors = rag::request_embeddings(&client, embedding_provider, &semantic_queries).await?;
     let limit = top_k.max(1);
 
-    let stream = table
-        .query()
-        .only_if("chunk_state = 'active'")
-        .select(Select::columns(&[
-            "source_root",
-            "absolute_path",
-            "document_kind",
-            "chunk_index",
-            "line_start",
-            "line_end",
-            "paragraph_line_start",
-            "page_start",
-            "page_end",
-            "heading_path",
-            "anchor_label",
-            "text",
-            "_distance",
-        ]))
-        .nearest_to(query_vector.as_slice())
-        .context("failed to prepare RAG vector search query")?
-        .limit(limit)
-        .execute()
-        .await
-        .context("failed to execute RAG vector search")?;
-    let batches = stream
-        .try_collect::<Vec<_>>()
-        .await
-        .context("failed to collect RAG vector search batches")?;
-
     let mut hits = Vec::new();
-    for batch in batches {
-        hits.extend(parse_search_batch(&batch)?);
+    for (query_index, query_vector) in vectors.into_iter().enumerate() {
+        let query_weight = query_plan
+            .semantic_queries
+            .get(query_index)
+            .map(|query| query.weight)
+            .unwrap_or(0.0);
+        let stream = table
+            .query()
+            .only_if("chunk_state = 'active'")
+            .select(Select::columns(&[
+                "source_root",
+                "absolute_path",
+                "document_kind",
+                "chunk_index",
+                "line_start",
+                "line_end",
+                "paragraph_line_start",
+                "page_start",
+                "page_end",
+                "heading_path",
+                "anchor_label",
+                "text",
+                "_distance",
+            ]))
+            .nearest_to(query_vector.as_slice())
+            .context("failed to prepare RAG vector search query")?
+            .limit(limit)
+            .execute()
+            .await
+            .context("failed to execute RAG vector search")?;
+        let batches = stream
+            .try_collect::<Vec<_>>()
+            .await
+            .context("failed to collect RAG vector search batches")?;
+
+        for batch in batches {
+            let mut batch_hits = parse_search_batch(&batch)?;
+            for hit in &mut batch_hits {
+                hit.retrieval_boost = hit.retrieval_boost.max(query_weight);
+            }
+            hits.extend(batch_hits);
+        }
     }
 
     hits.sort_by(|left, right| {
@@ -306,6 +436,7 @@ fn parse_search_batch(batch: &RecordBatch) -> Result<Vec<RagSearchHit>> {
             vector_score,
             lexical_score: 0.0,
             has_vector_signal: true,
+            retrieval_boost: 0.0,
         });
     }
 
@@ -314,44 +445,58 @@ fn parse_search_batch(batch: &RecordBatch) -> Result<Vec<RagSearchHit>> {
 
 async fn search_lexical_chunks(
     data_dir: &Path,
-    query: &str,
+    query_plan: &QueryPlan,
     top_k: usize,
 ) -> Result<Vec<RagSearchHit>> {
-    let Some(match_query) = build_lexical_match_query(query) else {
+    if query_plan.lexical_queries.is_empty() {
         return Ok(Vec::new());
-    };
+    }
 
     let metadata_path = rag::rag_metadata_database_path(data_dir);
+    let lexical_queries = query_plan.lexical_queries.clone();
     let rows = tokio::task::spawn_blocking(move || {
-        rag::search_lexical_chunks(&metadata_path, &match_query, top_k)
+        let mut merged = HashMap::new();
+        for query in lexical_queries {
+            for row in rag::search_lexical_chunks(&metadata_path, &query.match_query, top_k)? {
+                let score = bm25_rank_to_score(row.bm25_rank) + query.weight;
+                let key = format!("{}#{}", row.absolute_path, row.chunk_index);
+                merged
+                    .entry(key)
+                    .and_modify(|existing: &mut (_, f32)| {
+                        if score > existing.1 {
+                            *existing = (row.clone(), score);
+                        }
+                    })
+                    .or_insert((row, score));
+            }
+        }
+        Ok::<_, anyhow::Error>(merged.into_values().collect::<Vec<_>>())
     })
     .await
     .context("failed to join RAG lexical search task")??;
 
     Ok(rows
         .into_iter()
-        .map(|row| {
-            let lexical_score = bm25_rank_to_score(row.bm25_rank);
-            RagSearchHit {
-                source_root: row.source_root,
-                absolute_path: row.absolute_path.clone(),
-                path: rag::display_path_for_prompt(&row.absolute_path),
-                document_kind: row.document_kind,
-                chunk_index: row.chunk_index,
-                line_start: row.line_start,
-                line_end: row.line_end,
-                paragraph_line_start: row.paragraph_line_start,
-                page_start: row.page_start,
-                page_end: row.page_end,
-                heading_path: row.heading_path,
-                anchor_label: row.anchor_label,
-                text: row.text,
-                distance: lexical_distance_for_score(lexical_score),
-                score: lexical_score,
-                vector_score: 0.0,
-                lexical_score,
-                has_vector_signal: false,
-            }
+        .map(|(row, lexical_score)| RagSearchHit {
+            source_root: row.source_root,
+            absolute_path: row.absolute_path.clone(),
+            path: rag::display_path_for_prompt(&row.absolute_path),
+            document_kind: row.document_kind,
+            chunk_index: row.chunk_index,
+            line_start: row.line_start,
+            line_end: row.line_end,
+            paragraph_line_start: row.paragraph_line_start,
+            page_start: row.page_start,
+            page_end: row.page_end,
+            heading_path: row.heading_path,
+            anchor_label: row.anchor_label,
+            text: row.text,
+            distance: lexical_distance_for_score(lexical_score),
+            score: lexical_score,
+            vector_score: 0.0,
+            lexical_score,
+            has_vector_signal: false,
+            retrieval_boost: lexical_score.min(0.2),
         })
         .collect())
 }
@@ -468,6 +613,7 @@ fn merge_search_hit(existing: &mut RagSearchHit, incoming: &RagSearchHit) {
         existing.text = incoming.text.clone();
     }
     existing.score = hybrid_candidate_score(existing.vector_score, existing.lexical_score);
+    existing.retrieval_boost = existing.retrieval_boost.max(incoming.retrieval_boost);
     if !existing.has_vector_signal {
         existing.distance = lexical_distance_for_score(existing.lexical_score);
     }
@@ -596,19 +742,20 @@ fn meets_anchor_term_floor(ranked_hit: &RankedSearchHit, matched_terms_floor: us
         || ranked_hit.matched_query_terms >= matched_terms_floor
 }
 
-fn rerank_search_hits(query: &str, hits: Vec<RagSearchHit>) -> Vec<RankedSearchHit> {
-    let normalized_query = normalize_text(query);
-    let query_terms = extract_query_terms(query);
+fn rerank_search_hits(query_plan: &QueryPlan, hits: Vec<RagSearchHit>) -> Vec<RankedSearchHit> {
     let mut scored = hits
         .into_iter()
         .enumerate()
         .map(|(index, hit)| {
-            let lexical_signals = lexical_match_signals(&hit, &normalized_query, &query_terms);
+            let lexical_signals = lexical_match_signals(&hit, query_plan);
             let lexical = lexical_signals.score;
-            let structural_signals =
-                structural_match_signals(&hit, &normalized_query, &query_terms);
+            let structural_signals = structural_match_signals(&hit, query_plan);
             let structural = structural_signals.score;
-            let combined = hit.score + lexical * 0.45 + structural * 0.2;
+            let combined = hit.score
+                + lexical * 0.45
+                + structural * 0.2
+                + hit.retrieval_boost * 0.25
+                + lexical_signals.required_term_coverage * 0.15;
             (
                 combined,
                 hit.distance,
@@ -641,11 +788,7 @@ fn rerank_search_hits(query: &str, hits: Vec<RagSearchHit>) -> Vec<RankedSearchH
     scored.into_iter().map(|(_, _, _, hit)| hit).collect()
 }
 
-fn lexical_match_signals(
-    hit: &RagSearchHit,
-    normalized_query: &str,
-    query_terms: &[String],
-) -> LexicalMatchSignals {
+fn lexical_match_signals(hit: &RagSearchHit, query_plan: &QueryPlan) -> LexicalMatchSignals {
     let haystack = normalize_text(&format!(
         "{} {} {}",
         hit.path,
@@ -653,23 +796,34 @@ fn lexical_match_signals(
         hit.text
     ));
     let mut score = 0.0;
-    let exact_query_match = !normalized_query.is_empty() && haystack.contains(normalized_query);
+    let exact_query_match = !query_plan.normalized_focus_query.is_empty()
+        && haystack.contains(query_plan.normalized_focus_query.as_str());
     if exact_query_match {
         score += 1.0;
     }
+    if !query_plan.normalized_query.is_empty()
+        && query_plan.normalized_query != query_plan.normalized_focus_query
+        && haystack.contains(query_plan.normalized_query.as_str())
+    {
+        score += 0.3;
+    }
     let mut term_coverage = 0.0;
-    if !query_terms.is_empty() {
-        let matched_terms = query_terms
+    let mut required_term_coverage = 0.0;
+    if !query_plan.required_terms.is_empty() {
+        let matched_terms = query_plan
+            .required_terms
             .iter()
             .filter(|term| haystack.contains(term.as_str()))
             .count();
-        term_coverage = matched_terms as f32 / query_terms.len() as f32;
-        score += term_coverage;
+        term_coverage = matched_terms as f32 / query_plan.required_terms.len() as f32;
+        required_term_coverage = term_coverage;
+        score += term_coverage * 1.2;
         return LexicalMatchSignals {
             score,
             term_coverage,
             exact_query_match,
             matched_query_terms: matched_terms,
+            required_term_coverage,
         };
     }
     LexicalMatchSignals {
@@ -677,47 +831,54 @@ fn lexical_match_signals(
         term_coverage,
         exact_query_match,
         matched_query_terms: 0,
+        required_term_coverage,
     }
 }
 
-fn structural_match_signals(
-    hit: &RagSearchHit,
-    normalized_query: &str,
-    query_terms: &[String],
-) -> StructuralMatchSignals {
+fn structural_match_signals(hit: &RagSearchHit, query_plan: &QueryPlan) -> StructuralMatchSignals {
     let path = normalize_text(&hit.path);
     let headings = normalize_text(&hit.heading_path.join(" "));
     let anchor = normalize_text(hit.anchor_label.as_deref().unwrap_or_default());
     let mut score = 0.0;
     let mut has_anchor = false;
-    if !normalized_query.is_empty() && path.contains(normalized_query) {
+    if !query_plan.normalized_focus_query.is_empty()
+        && path.contains(query_plan.normalized_focus_query.as_str())
+    {
         score += 0.8;
         has_anchor = true;
     }
-    if !normalized_query.is_empty() && headings.contains(normalized_query) {
+    if !query_plan.normalized_focus_query.is_empty()
+        && headings.contains(query_plan.normalized_focus_query.as_str())
+    {
         score += 0.6;
         has_anchor = true;
     }
-    if !normalized_query.is_empty() && !anchor.is_empty() && anchor.contains(normalized_query) {
+    if !query_plan.normalized_focus_query.is_empty()
+        && !anchor.is_empty()
+        && anchor.contains(query_plan.normalized_focus_query.as_str())
+    {
         score += 0.3;
         has_anchor = true;
     }
-    if !query_terms.is_empty() {
-        let path_terms = query_terms
+    if !query_plan.required_terms.is_empty() {
+        let path_terms = query_plan
+            .required_terms
             .iter()
             .filter(|term| path.contains(term.as_str()))
             .count();
-        let heading_terms = query_terms
+        let heading_terms = query_plan
+            .required_terms
             .iter()
             .filter(|term| headings.contains(term.as_str()))
             .count();
-        let anchor_terms = query_terms
+        let anchor_terms = query_plan
+            .required_terms
             .iter()
             .filter(|term| anchor.contains(term.as_str()))
             .count();
-        score += path_terms as f32 / query_terms.len() as f32 * 0.35;
-        score += heading_terms as f32 / query_terms.len() as f32 * 0.25;
-        score += anchor_terms as f32 / query_terms.len() as f32 * 0.1;
+        score += path_terms as f32 / query_plan.required_terms.len() as f32 * 0.35;
+        score += heading_terms as f32 / query_plan.required_terms.len() as f32 * 0.25;
+        score += anchor_terms as f32 / query_plan.required_terms.len() as f32 * 0.1;
         has_anchor = has_anchor || path_terms > 0 || heading_terms > 0 || anchor_terms > 0;
     }
     StructuralMatchSignals { score, has_anchor }
@@ -797,19 +958,187 @@ fn distance_ceiling_for_strong_query(best_hit: &RankedSearchHit) -> Option<f32> 
         .then_some(best_hit.hit.distance + STRONG_QUERY_MAX_DISTANCE_DELTA)
 }
 
-fn build_lexical_match_query(query: &str) -> Option<String> {
-    let terms = extract_query_terms(query);
+fn build_query_plan(query: &str) -> QueryPlan {
+    let raw_query = query.trim().to_string();
+    let normalized_query = normalize_text(&raw_query);
+    let raw_terms = extract_query_terms(&raw_query);
+    let required_terms = filter_query_noise_terms(&raw_terms);
+    let focus_terms = if required_terms.is_empty() {
+        raw_terms.clone()
+    } else {
+        required_terms.clone()
+    };
+    let focus_query = if focus_terms.is_empty() {
+        raw_query.clone()
+    } else {
+        focus_terms.join(" ")
+    };
+    let normalized_focus_query = normalize_text(&focus_query);
+    let mut semantic_queries = vec![SemanticQuery {
+        text: raw_query.clone(),
+        weight: 0.0,
+    }];
+    push_semantic_query(
+        &mut semantic_queries,
+        focus_query.clone(),
+        0.12,
+        MAX_SEMANTIC_QUERIES,
+    );
+    if let Some(path_focused_query) = path_focused_query(&raw_query) {
+        push_semantic_query(
+            &mut semantic_queries,
+            path_focused_query,
+            0.08,
+            MAX_SEMANTIC_QUERIES,
+        );
+    }
+
+    let mut lexical_queries = Vec::new();
+    if !normalized_focus_query.is_empty() && normalized_focus_query != normalized_query {
+        push_lexical_query(
+            &mut lexical_queries,
+            format!("\"{}\"", escape_fts_phrase(&normalized_focus_query)),
+            0.25,
+            MAX_LEXICAL_QUERIES,
+        );
+    }
+    if let Some(and_query) = build_term_conjunction_query(&required_terms) {
+        push_lexical_query(&mut lexical_queries, and_query, 0.15, MAX_LEXICAL_QUERIES);
+    }
+    if let Some(or_query) = build_term_disjunction_query(if required_terms.is_empty() {
+        &raw_terms
+    } else {
+        &required_terms
+    }) {
+        push_lexical_query(&mut lexical_queries, or_query, 0.0, MAX_LEXICAL_QUERIES);
+    }
+    if let Some(path_query) = build_term_disjunction_query(&path_focused_terms(&raw_query)) {
+        push_lexical_query(&mut lexical_queries, path_query, 0.1, MAX_LEXICAL_QUERIES);
+    }
+
+    QueryPlan {
+        normalized_query,
+        focus_query,
+        normalized_focus_query,
+        required_terms,
+        semantic_queries,
+        lexical_queries,
+    }
+}
+
+fn push_semantic_query(queries: &mut Vec<SemanticQuery>, text: String, weight: f32, limit: usize) {
+    let text = text.trim();
+    if text.is_empty()
+        || queries
+            .iter()
+            .any(|query| query.text.eq_ignore_ascii_case(text))
+        || queries.len() >= limit
+    {
+        return;
+    }
+    queries.push(SemanticQuery {
+        text: text.to_string(),
+        weight,
+    });
+}
+
+fn push_lexical_query(
+    queries: &mut Vec<LexicalQuery>,
+    match_query: String,
+    weight: f32,
+    limit: usize,
+) {
+    let match_query = match_query.trim();
+    if match_query.is_empty()
+        || queries
+            .iter()
+            .any(|query| query.match_query.eq_ignore_ascii_case(match_query))
+        || queries.len() >= limit
+    {
+        return;
+    }
+    queries.push(LexicalQuery {
+        match_query: match_query.to_string(),
+        weight,
+    });
+}
+
+fn filter_query_noise_terms(terms: &[String]) -> Vec<String> {
+    terms
+        .iter()
+        .filter(|term| is_informative_query_term(term))
+        .cloned()
+        .collect()
+}
+
+fn is_informative_query_term(term: &str) -> bool {
+    let normalized = normalize_text(term);
+    if normalized.is_empty() {
+        return false;
+    }
+    !ENGLISH_QUERY_NOISE_TERMS.contains(&normalized.as_str())
+        && !CHINESE_QUERY_NOISE_TERMS.contains(&normalized.as_str())
+}
+
+fn path_focused_query(query: &str) -> Option<String> {
+    let terms = path_focused_terms(query);
+    (!terms.is_empty()).then(|| terms.join(" "))
+}
+
+fn path_focused_terms(query: &str) -> Vec<String> {
+    query
+        .split(|character: char| {
+            !(character.is_alphanumeric() || matches!(character, '_' | '-' | '/' | '.' | ':'))
+        })
+        .flat_map(|segment| segment.split(['/', '.', ':']))
+        .map(normalize_text)
+        .filter(|term| term.chars().count() >= 2 && is_informative_query_term(term))
+        .fold(Vec::new(), |mut acc, term| {
+            if !acc.contains(&term) {
+                acc.push(term);
+            }
+            acc
+        })
+}
+
+fn build_term_conjunction_query(terms: &[String]) -> Option<String> {
+    if terms.len() < 2 {
+        return None;
+    }
+    Some(
+        terms
+            .iter()
+            .map(|term| format!("\"{}\"", escape_fts_phrase(term)))
+            .collect::<Vec<_>>()
+            .join(" AND "),
+    )
+}
+
+fn build_term_disjunction_query(terms: &[String]) -> Option<String> {
     if terms.is_empty() {
         return None;
     }
-
     Some(
         terms
-            .into_iter()
-            .map(|term| format!("\"{}\"", escape_fts_phrase(&term)))
+            .iter()
+            .map(|term| format!("\"{}\"", escape_fts_phrase(term)))
             .collect::<Vec<_>>()
             .join(" OR "),
     )
+}
+
+fn per_query_candidate_limit(total_limit: usize, query_count: usize, floor: usize) -> usize {
+    let divisor = query_count.max(1);
+    total_limit.saturating_div(divisor).max(floor)
+}
+
+#[cfg(test)]
+fn build_lexical_match_query(query: &str) -> Option<String> {
+    let plan = build_query_plan(query);
+    plan.lexical_queries
+        .into_iter()
+        .next()
+        .map(|query| query.match_query)
 }
 
 fn escape_fts_phrase(term: &str) -> String {
@@ -872,11 +1201,11 @@ mod tests {
     use crate::services::document_extract::DocumentKind;
 
     use super::{
-        bm25_rank_to_score, build_lexical_match_query, distance_to_score, expanded_candidate_limit,
-        get_rag_query_db, hybrid_candidate_score, invalidate_rag_query_db_cache,
-        is_base64_like_chunk, is_heading_only_chunk, min_anchor_term_matches, min_lexical_presence,
-        min_relevance_score, prune_search_hits, rag_query_db_cache, rerank_search_hits,
-        RagSearchHit, RankedSearchHit,
+        bm25_rank_to_score, build_lexical_match_query, build_query_plan, distance_to_score,
+        expanded_candidate_limit, get_rag_query_db, hybrid_candidate_score,
+        invalidate_rag_query_db_cache, is_base64_like_chunk, is_heading_only_chunk,
+        min_anchor_term_matches, min_lexical_presence, min_relevance_score, prune_search_hits,
+        rag_query_db_cache, rerank_search_hits, RagSearchHit, RankedSearchHit,
     };
 
     static NEXT_RAG_QUERY_CACHE_TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -901,6 +1230,7 @@ mod tests {
             vector_score: 0.92,
             lexical_score: 0.0,
             has_vector_signal: true,
+            retrieval_boost: 0.0,
         }
     }
 
@@ -963,8 +1293,22 @@ mod tests {
     fn lexical_match_query_quotes_terms_for_fts() {
         assert_eq!(
             build_lexical_match_query("alpha timeout root cause").as_deref(),
-            Some("\"alpha\" OR \"timeout\" OR \"root\" OR \"cause\"")
+            Some("\"alpha\" AND \"timeout\" AND \"root\" AND \"cause\"")
         );
+    }
+
+    #[test]
+    fn query_plan_rewrites_question_wrapper_into_focus_terms() {
+        let plan = build_query_plan("where is the alpha timeout root cause documented?");
+
+        assert_eq!(plan.focus_query, "alpha timeout root cause");
+        assert!(plan
+            .semantic_queries
+            .iter()
+            .any(|query| query.text == "alpha timeout root cause"));
+        assert!(plan.lexical_queries.iter().any(
+            |query| query.match_query == "\"alpha\" AND \"timeout\" AND \"root\" AND \"cause\""
+        ));
     }
 
     #[test]
@@ -1163,7 +1507,7 @@ mod tests {
     #[test]
     fn rerank_prefers_exact_term_matches_over_generic_similarity_ties() {
         let reranked = rerank_search_hits(
-            "alpha timeout root cause",
+            &build_query_plan("alpha timeout root cause"),
             vec![
                 RagSearchHit {
                     heading_path: vec!["General".to_string()],

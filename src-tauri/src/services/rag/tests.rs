@@ -5,6 +5,7 @@ use std::{
 };
 
 use super::*;
+use crate::services::document_extract::{extract_document_from_bytes, is_supported_document_file};
 use arrow_array::{
     types::Float32Type, FixedSizeListArray, Int32Array, RecordBatch, RecordBatchIterator,
     StringArray,
@@ -18,8 +19,6 @@ use tokio::{
     sync::mpsc,
 };
 use zip::{write::SimpleFileOptions, ZipWriter};
-
-use crate::services::document_extract::{extract_document_from_bytes, is_supported_document_file};
 
 fn temp_test_root(label: &str) -> PathBuf {
     let unique = SystemTime::now()
@@ -511,8 +510,6 @@ fn collect_chunks_for_path_supports_text_files_under_50_mb() {
 
 #[test]
 fn collect_chunks_for_path_supports_docx_files() {
-    let root = temp_test_root("docx-file");
-    let file_path = root.join("notes.docx");
     let document_xml = r#"
             <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
               <w:body>
@@ -526,6 +523,8 @@ fn collect_chunks_for_path_supports_docx_files() {
               </w:body>
             </w:document>
         "#;
+    let root = temp_test_root("docx-file");
+    let file_path = root.join("notes.docx");
     std::fs::create_dir_all(&root).expect("create rag temp root");
     std::fs::write(&file_path, build_test_docx(document_xml, None)).expect("write docx");
 

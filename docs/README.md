@@ -31,6 +31,7 @@
 - [rag-qa-design.md](/Users/wweir/Sites/Mine/wabity/docs/rag-qa-design.md): launcher 轻量问答链路
 - [rag-document-ingestion-design-2026-03-26.md](/Users/wweir/Sites/Mine/wabity/docs/rag-document-ingestion-design-2026-03-26.md): 文档摄取、切分和索引边界
 - [rag-metadata-cache.md](/Users/wweir/Sites/Mine/wabity/docs/rag-metadata-cache.md): RAG 元数据缓存与 staged/active 切换语义
+- [rag-retrieval-optimization-2026-04-07.md](/Users/wweir/Sites/Mine/wabity/docs/rag-retrieval-optimization-2026-04-07.md): 启发式 query rewrite 与多查询召回优化
 - [rag-mcp-server.md](/Users/wweir/Sites/Mine/wabity/docs/rag-mcp-server.md): 内置 MCP server 的模块化设计
 - [rag-answer-refactor-2026-03-30.md](/Users/wweir/Sites/Mine/wabity/docs/rag-answer-refactor-2026-03-30.md): 问答后端重构记录
 - [acp-timeline-chronology-rework-2026-04-03.md](/Users/wweir/Sites/Mine/wabity/docs/acp-timeline-chronology-rework-2026-04-03.md): ACP transcript 按真实时序渲染的实现决策
