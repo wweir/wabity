@@ -5,11 +5,15 @@ set -euo pipefail
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 readonly TARGET_DIR="${REPO_ROOT}/src-tauri/target"
+readonly DEBUG_DIR="${TARGET_DIR}/debug"
 readonly DEFAULT_DAYS=3
+readonly DEFAULT_HOURS=6
 
 days="${DEFAULT_DAYS}"
+hours=""
 dry_run=0
 remove_all=0
+scope="all"
 now_epoch="$(date +%s)"
 
 usage() {
@@ -19,10 +23,12 @@ Usage: scripts/clean-target.sh [options]
 Clean stale artifacts under src-tauri/target.
 
 Options:
-  --days <n>   Remove artifacts older than n days. Default: 3
-  --all        Remove all recognized target artifacts, ignoring age
-  --dry-run    Print candidates without deleting them
-  -h, --help   Show this help message
+  --days <n>      Remove artifacts older than n days. Default: 3
+  --hours <n>     Remove artifacts older than n hours
+  --scope <name>  Remove targets for a named scope: all | debug-cache. Default: all
+  --all           Remove all recognized target artifacts, ignoring age
+  --dry-run       Print candidates without deleting them
+  -h, --help      Show this help message
 EOF
 }
 
@@ -61,6 +67,15 @@ collect_paths() {
 	done < <(find "${TARGET_DIR}" -type d \( -name 'debug' -o -name 'release' \) | sort -u)
 }
 
+collect_debug_cache_paths() {
+	local list_file="$1"
+	local cache_dir
+
+	for cache_dir in "${DEBUG_DIR}/deps" "${DEBUG_DIR}/incremental"; do
+		append_if_stale "${list_file}" "${cache_dir}"
+	done
+}
+
 mtime_epoch() {
 	local path="$1"
 
@@ -87,7 +102,11 @@ append_if_stale() {
 	path_mtime="$(mtime_epoch "${path}")"
 	age_seconds="$((now_epoch - path_mtime))"
 
-	if ((age_seconds >= days * 86400)); then
+	if [[ -n "${hours}" ]]; then
+		if ((age_seconds >= hours * 3600)); then
+			printf '%s\n' "${path}" >>"${list_file}"
+		fi
+	elif ((age_seconds >= days * 86400)); then
 		printf '%s\n' "${path}" >>"${list_file}"
 	fi
 }
@@ -131,6 +150,16 @@ while [[ $# -gt 0 ]]; do
 		[[ $# -gt 0 ]] || fail "--days requires a value"
 		days="$1"
 		;;
+	--hours)
+		shift
+		[[ $# -gt 0 ]] || fail "--hours requires a value"
+		hours="$1"
+		;;
+	--scope)
+		shift
+		[[ $# -gt 0 ]] || fail "--scope requires a value"
+		scope="$1"
+		;;
 	--all)
 		remove_all=1
 		;;
@@ -150,18 +179,36 @@ done
 
 [[ -d "${TARGET_DIR}" ]] || fail "target directory not found: ${TARGET_DIR}"
 [[ "${days}" =~ ^[0-9]+$ ]] || fail "--days must be a non-negative integer"
+[[ -z "${hours}" || "${hours}" =~ ^[0-9]+$ ]] || fail "--hours must be a non-negative integer"
+[[ "${scope}" == "all" || "${scope}" == "debug-cache" ]] || fail "--scope must be one of: all, debug-cache"
+
+if [[ "${scope}" == "debug-cache" && -z "${hours}" ]]; then
+	hours="${DEFAULT_HOURS}"
+fi
 
 candidate_file="$(mktemp)"
 trap 'rm -f "${candidate_file}"' EXIT
 
-collect_paths "${candidate_file}"
+case "${scope}" in
+all)
+	collect_paths "${candidate_file}"
+	;;
+debug-cache)
+	collect_debug_cache_paths "${candidate_file}"
+	;;
+esac
+
 sort -u "${candidate_file}" -o "${candidate_file}"
 
 if [[ ! -s "${candidate_file}" ]]; then
 	if [[ "${remove_all}" -eq 1 ]]; then
-		printf 'No target artifacts matched.\n'
+		printf 'No target artifacts matched for scope %s.\n' "${scope}"
 	else
-		printf 'No target artifacts older than %s day(s) matched.\n' "${days}"
+		if [[ -n "${hours}" ]]; then
+			printf 'No target artifacts older than %s hour(s) matched for scope %s.\n' "${hours}" "${scope}"
+		else
+			printf 'No target artifacts older than %s day(s) matched for scope %s.\n' "${days}" "${scope}"
+		fi
 	fi
 	exit 0
 fi
@@ -170,10 +217,15 @@ total_kb="$(estimate_kb "${candidate_file}")"
 total_mb="$((total_kb / 1024))"
 
 printf 'Target directory: %s\n' "${TARGET_DIR}"
+printf 'Scope: %s\n' "${scope}"
 if [[ "${remove_all}" -eq 1 ]]; then
 	printf 'Mode: remove all recognized target artifacts\n'
 else
-	printf 'Mode: remove artifacts older than %s day(s)\n' "${days}"
+	if [[ -n "${hours}" ]]; then
+		printf 'Mode: remove artifacts older than %s hour(s)\n' "${hours}"
+	else
+		printf 'Mode: remove artifacts older than %s day(s)\n' "${days}"
+	fi
 fi
 printf 'Estimated reclaim: %s MB\n' "${total_mb}"
 printf 'Candidates:\n'
