@@ -8,6 +8,14 @@
 - 负责 `responses` / `chat/completions` 的文本提取与 SSE 归并
 - 负责 provider 错误体提取与 `/models` 列表解析
 
+内部结构：
+
+- `client.rs`：HTTP client、鉴权注入、异步/阻塞响应读取
+- `parsing.rs`：JSON/SSE payload 解析入口、错误体提取、body preview
+- `streaming/`：SSE 帧解析，以及 `responses` / `chat/completions` 增量重建
+- `extract.rs`：从兼容 payload 提取文本、reasoning、refusal 与诊断信息
+- `models.rs`：`/models` 列表解析与 identity hint 归一化
+
 非职责：
 
 - 不依赖宿主 crate 的领域模型
