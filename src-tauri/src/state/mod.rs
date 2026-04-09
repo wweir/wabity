@@ -258,7 +258,7 @@ impl AppState {
     }
 
     pub fn ocr_provider(&self) -> Arc<dyn OcrProvider> {
-        self.ocr_provider.read().unwrap().clone()
+        read_runtime_lock(&self.ocr_provider, "ocr provider").clone()
     }
 
     pub async fn app_config(&self) -> Result<AppConfig> {
@@ -424,7 +424,8 @@ impl AppState {
         config.rag = settings.rag.clone();
         config.normalize()?;
         store.save(&config).await?;
-        *self.ocr_provider.write().unwrap() = build_ocr_provider(&config.ocr, &config.llm);
+        *write_runtime_lock(&self.ocr_provider, "ocr provider") =
+            build_ocr_provider(&config.ocr, &config.llm);
         self.rag_index
             .apply_settings(config.rag.clone(), config.llm.clone())
             .await;
@@ -682,6 +683,38 @@ impl AppState {
     }
 }
 
+fn read_runtime_lock<'a, T>(
+    lock: &'a StdRwLock<T>,
+    label: &str,
+) -> std::sync::RwLockReadGuard<'a, T> {
+    match lock.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!(
+                resource = label,
+                "runtime state read lock poisoned; recovering state"
+            );
+            poisoned.into_inner()
+        }
+    }
+}
+
+fn write_runtime_lock<'a, T>(
+    lock: &'a StdRwLock<T>,
+    label: &str,
+) -> std::sync::RwLockWriteGuard<'a, T> {
+    match lock.write() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!(
+                resource = label,
+                "runtime state write lock poisoned; recovering state"
+            );
+            poisoned.into_inner()
+        }
+    }
+}
+
 fn normalize_optional_id(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -841,22 +874,33 @@ impl ShortcutRuntimeState {
 
     pub fn current_shortcut(&self, key: ShortcutKey) -> Option<Shortcut> {
         match key {
-            ShortcutKey::ToggleLauncher => *self.launcher_shortcut.read().unwrap(),
-            ShortcutKey::OcrTranslate => *self.ocr_translate_shortcut.read().unwrap(),
-            ShortcutKey::OpenClipboardHistory => {
-                *self.open_clipboard_history_shortcut.read().unwrap()
+            ShortcutKey::ToggleLauncher => {
+                *read_runtime_lock(&self.launcher_shortcut, "launcher shortcut")
             }
+            ShortcutKey::OcrTranslate => {
+                *read_runtime_lock(&self.ocr_translate_shortcut, "ocr translate shortcut")
+            }
+            ShortcutKey::OpenClipboardHistory => *read_runtime_lock(
+                &self.open_clipboard_history_shortcut,
+                "clipboard history shortcut",
+            ),
         }
     }
 
     pub fn set_shortcut(&self, key: ShortcutKey, shortcut: Option<Shortcut>) {
         match key {
-            ShortcutKey::ToggleLauncher => *self.launcher_shortcut.write().unwrap() = shortcut,
+            ShortcutKey::ToggleLauncher => {
+                *write_runtime_lock(&self.launcher_shortcut, "launcher shortcut") = shortcut
+            }
             ShortcutKey::OcrTranslate => {
-                *self.ocr_translate_shortcut.write().unwrap() = shortcut;
+                *write_runtime_lock(&self.ocr_translate_shortcut, "ocr translate shortcut") =
+                    shortcut;
             }
             ShortcutKey::OpenClipboardHistory => {
-                *self.open_clipboard_history_shortcut.write().unwrap() = shortcut;
+                *write_runtime_lock(
+                    &self.open_clipboard_history_shortcut,
+                    "clipboard history shortcut",
+                ) = shortcut;
             }
         }
     }
@@ -875,12 +919,21 @@ impl ShortcutRuntimeState {
         };
 
         match key {
-            ShortcutKey::ToggleLauncher => *self.launcher_shortcut_status.write().unwrap() = status,
+            ShortcutKey::ToggleLauncher => {
+                *write_runtime_lock(&self.launcher_shortcut_status, "launcher shortcut status") =
+                    status
+            }
             ShortcutKey::OcrTranslate => {
-                *self.ocr_translate_shortcut_status.write().unwrap() = status;
+                *write_runtime_lock(
+                    &self.ocr_translate_shortcut_status,
+                    "ocr translate shortcut status",
+                ) = status;
             }
             ShortcutKey::OpenClipboardHistory => {
-                *self.open_clipboard_history_shortcut_status.write().unwrap() = status;
+                *write_runtime_lock(
+                    &self.open_clipboard_history_shortcut_status,
+                    "clipboard history shortcut status",
+                ) = status;
             }
         }
     }
@@ -898,7 +951,7 @@ impl ShortcutRuntimeState {
     fn read_shortcut_status(
         status: &StdRwLock<ShortcutRegistrationStatus>,
     ) -> ShortcutRuntimeStatusEntry {
-        let status = status.read().unwrap().clone();
+        let status = read_runtime_lock(status, "shortcut registration status").clone();
         ShortcutRuntimeStatusEntry {
             configured_shortcut: status.configured_shortcut,
             registered: status.registered,
@@ -912,11 +965,11 @@ impl ShortcutRuntimeState {
 
     #[cfg(test)]
     pub fn launcher_view_mode(&self) -> LauncherWindowViewMode {
-        *self.launcher_view_mode.read().unwrap()
+        *read_runtime_lock(&self.launcher_view_mode, "launcher view mode")
     }
 
     pub fn set_launcher_view_mode(&self, mode: LauncherWindowViewMode) {
-        *self.launcher_view_mode.write().unwrap() = mode;
+        *write_runtime_lock(&self.launcher_view_mode, "launcher view mode") = mode;
     }
 
     pub fn cached_launcher_window_size(
@@ -924,10 +977,13 @@ impl ShortcutRuntimeState {
         mode: LauncherWindowViewMode,
     ) -> Option<LauncherWindowSize> {
         match mode {
-            LauncherWindowViewMode::Main => *self.launcher_main_window_size.read().unwrap(),
-            LauncherWindowViewMode::ClipboardHistory => {
-                *self.launcher_clipboard_window_size.read().unwrap()
+            LauncherWindowViewMode::Main => {
+                *read_runtime_lock(&self.launcher_main_window_size, "launcher main window size")
             }
+            LauncherWindowViewMode::ClipboardHistory => *read_runtime_lock(
+                &self.launcher_clipboard_window_size,
+                "clipboard window size",
+            ),
         }
     }
 
@@ -938,10 +994,14 @@ impl ShortcutRuntimeState {
     ) {
         match mode {
             LauncherWindowViewMode::Main => {
-                *self.launcher_main_window_size.write().unwrap() = Some(size)
+                *write_runtime_lock(&self.launcher_main_window_size, "launcher main window size") =
+                    Some(size)
             }
             LauncherWindowViewMode::ClipboardHistory => {
-                *self.launcher_clipboard_window_size.write().unwrap() = Some(size);
+                *write_runtime_lock(
+                    &self.launcher_clipboard_window_size,
+                    "clipboard window size",
+                ) = Some(size);
             }
         }
     }
@@ -984,34 +1044,41 @@ impl ShortcutRuntimeState {
     }
 
     pub fn arm_launcher_resize_reposition(&self, duration: Duration) {
-        *self.launcher_resize_reposition_until.write().unwrap() = Some(Instant::now() + duration);
+        *write_runtime_lock(
+            &self.launcher_resize_reposition_until,
+            "launcher resize reposition deadline",
+        ) = Some(Instant::now() + duration);
     }
 
     pub fn clear_launcher_resize_reposition(&self) {
-        *self.launcher_resize_reposition_until.write().unwrap() = None;
+        *write_runtime_lock(
+            &self.launcher_resize_reposition_until,
+            "launcher resize reposition deadline",
+        ) = None;
     }
 
     pub fn arm_launcher_blur_auto_hide_suppression(&self, duration: Duration) -> Instant {
         let deadline = Instant::now() + duration;
-        *self
-            .launcher_blur_auto_hide_suppressed_until
-            .write()
-            .unwrap() = Some(deadline);
+        *write_runtime_lock(
+            &self.launcher_blur_auto_hide_suppressed_until,
+            "launcher blur auto hide suppression deadline",
+        ) = Some(deadline);
         deadline
     }
 
     pub fn clear_launcher_blur_auto_hide_suppression(&self) {
-        *self
-            .launcher_blur_auto_hide_suppressed_until
-            .write()
-            .unwrap() = None;
+        *write_runtime_lock(
+            &self.launcher_blur_auto_hide_suppressed_until,
+            "launcher blur auto hide suppression deadline",
+        ) = None;
     }
 
     pub fn launcher_blur_auto_hide_delay(&self) -> Option<Duration> {
-        self.launcher_blur_auto_hide_suppressed_until
-            .read()
-            .unwrap()
-            .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
+        read_runtime_lock(
+            &self.launcher_blur_auto_hide_suppressed_until,
+            "launcher blur auto hide suppression deadline",
+        )
+        .and_then(|deadline| deadline.checked_duration_since(Instant::now()))
     }
 
     pub fn arm_launcher_blur_auto_hide_confirmation(&self) -> usize {
@@ -1035,10 +1102,11 @@ impl ShortcutRuntimeState {
             return true;
         }
 
-        self.launcher_resize_reposition_until
-            .read()
-            .unwrap()
-            .is_some_and(|deadline| Instant::now() <= deadline)
+        read_runtime_lock(
+            &self.launcher_resize_reposition_until,
+            "launcher resize reposition deadline",
+        )
+        .is_some_and(|deadline| Instant::now() <= deadline)
     }
 
     pub fn begin_shortcut_press(&self, action: ShortcutAction) -> bool {
@@ -1084,19 +1152,23 @@ impl ShortcutRuntimeState {
 
     #[cfg(target_os = "macos")]
     pub fn remember_clipboard_external_paste_target_pid(&self, pid: Option<i32>) {
-        *self.clipboard_external_paste_target_pid.write().unwrap() = pid;
+        *write_runtime_lock(
+            &self.clipboard_external_paste_target_pid,
+            "clipboard external paste target pid",
+        ) = pid;
     }
 
     #[cfg(target_os = "macos")]
     pub fn take_clipboard_external_paste_target_pid(&self) -> Option<i32> {
-        self.clipboard_external_paste_target_pid
-            .write()
-            .unwrap()
-            .take()
+        write_runtime_lock(
+            &self.clipboard_external_paste_target_pid,
+            "clipboard external paste target pid",
+        )
+        .take()
     }
 
     fn begin_shortcut_press_gate(gate: &StdRwLock<ShortcutPressGate>) -> bool {
-        let mut gate = gate.write().unwrap();
+        let mut gate = write_runtime_lock(gate, "shortcut press gate");
         let now = Instant::now();
 
         if gate.pressed
@@ -1113,7 +1185,7 @@ impl ShortcutRuntimeState {
     }
 
     fn end_shortcut_press_gate(gate: &StdRwLock<ShortcutPressGate>) {
-        let mut gate = gate.write().unwrap();
+        let mut gate = write_runtime_lock(gate, "shortcut press gate");
         gate.pressed = false;
         gate.pressed_at = None;
     }

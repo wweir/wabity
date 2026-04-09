@@ -17,7 +17,12 @@ import type {
 	QueryPayload,
 	RunningProcessMatch,
 } from "./types";
-import { matchActions, searchApps, searchFiles, searchProcesses } from "../../lib/tauri/client";
+import {
+	matchActions,
+	searchApps,
+	searchFiles,
+	searchProcesses,
+} from "../../lib/tauri/client/launcher";
 
 interface UseLauncherSuggestionsArgs {
 	currentFileNeedle: string;

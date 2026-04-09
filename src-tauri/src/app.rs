@@ -5,7 +5,7 @@ use tauri::{Manager, Wry};
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_global_shortcut::{Builder as GlobalShortcutBuilder, ShortcutState};
 use time::{format_description::well_known::Rfc3339, UtcOffset};
-use tokio::{task, time as tokio_time};
+use tokio::task;
 use tracing_subscriber::fmt::time::OffsetTime;
 use tracing_subscriber::EnvFilter;
 
@@ -16,11 +16,7 @@ use crate::{
         config::{ShortcutConfig, ShortcutKey},
         hotkey, window,
     },
-    services::{
-        application::APPLICATION_CACHE_REFRESH_INTERVAL, executor::ExecutorService,
-        matcher::MatcherService, ocr, process::PROCESS_CACHE_REFRESH_INTERVAL, selection,
-        translate,
-    },
+    services::{executor::ExecutorService, matcher::MatcherService, ocr, selection, translate},
     state::{AppState, ShortcutAction, ShortcutRuntimeState},
 };
 
@@ -271,8 +267,8 @@ pub fn run() -> Result<()> {
             reconcile_configured_autostart(&app.handle().clone(), &app_state);
             app_state.acp().start_event_loop();
             tauri::async_runtime::block_on(app_state.restore_acp_sessions())?;
-            start_application_cache_tasks(app_state.application().clone());
-            start_process_cache_tasks(app_state.process().clone());
+            prewarm_application_cache(app_state.application().clone());
+            prewarm_process_cache(app_state.process().clone());
 
             let main_window = app
                 .get_webview_window("main")
@@ -298,7 +294,14 @@ pub fn run() -> Result<()> {
                 .context("failed to hide clipboard history window on startup")?;
             shortcut_state.set_launcher_visible(false);
             shortcut_state.set_clipboard_history_visible(false);
-            commands::launcher::emit_shortcut_runtime_status(app.handle(), &shortcut_state)?;
+            if let Err(error) =
+                commands::launcher::emit_shortcut_runtime_status(app.handle(), &shortcut_state)
+            {
+                tracing::warn!(
+                    ?error,
+                    "failed to emit initial shortcut runtime status on startup"
+                );
+            }
 
             if !shortcut_failures.is_empty() {
                 let launcher_failure = shortcut_failures
@@ -343,20 +346,10 @@ fn reconcile_configured_autostart(app: &tauri::AppHandle, app_state: &AppState) 
     }
 }
 
-fn start_process_cache_tasks(process: crate::services::process::ProcessService) {
+fn prewarm_process_cache(process: crate::services::process::ProcessService) {
     tauri::async_runtime::spawn(async move {
         if let Err(error) = process.refresh_now().await {
             tracing::warn!(?error, "failed to prewarm process cache");
-        }
-
-        let mut interval = tokio_time::interval(PROCESS_CACHE_REFRESH_INTERVAL);
-        interval.tick().await;
-
-        loop {
-            interval.tick().await;
-            if let Err(error) = process.refresh_now().await {
-                tracing::warn!(?error, "failed to refresh process cache on interval");
-            }
         }
     });
 }
@@ -748,19 +741,10 @@ async fn perform_shortcut_ocr(
     }
 }
 
-fn start_application_cache_tasks(application: crate::services::application::ApplicationService) {
+fn prewarm_application_cache(application: crate::services::application::ApplicationService) {
     tauri::async_runtime::spawn(async move {
         if let Err(error) = application.refresh_now().await {
             tracing::warn!(?error, "failed to warm application cache on startup");
-        }
-
-        let mut interval = tokio_time::interval(APPLICATION_CACHE_REFRESH_INTERVAL);
-        interval.tick().await;
-        loop {
-            interval.tick().await;
-            if let Err(error) = application.refresh_now().await {
-                tracing::warn!(?error, "failed to refresh application cache on interval");
-            }
         }
     });
 }

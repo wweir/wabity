@@ -285,14 +285,12 @@ const SessionFeedback = memo(function SessionFeedback({
 			activeSession.runtime.availableModes.find(
 				(mode) => mode.id === activeSession.runtime.currentModeId,
 			) ?? null,
-		[
-			activeSession.runtime.availableModes,
-			activeSession.runtime.currentModeId,
-		],
+		[activeSession.runtime.availableModes, activeSession.runtime.currentModeId],
 	);
 	const hasRuntimeControls =
 		activeSession.runtime.availableModes.length > 0 ||
 		activeSession.runtime.configOptions.length > 0;
+	const isRuntimeReadOnly = activeSession.session.status !== "idle";
 	const visibleMessages = useMemo(
 		() => activeSession.messages.filter((message) => message.role !== "system"),
 		[activeSession.messages],
@@ -353,10 +351,7 @@ const SessionFeedback = memo(function SessionFeedback({
 								<select
 									className="session-runtime-select"
 									value={activeSession.runtime.currentModeId ?? ""}
-									disabled={
-										activeSession.session.status !== "idle" ||
-										runtimeControlPendingKey === "mode"
-									}
+									disabled={isRuntimeReadOnly || runtimeControlPendingKey === "mode"}
 									onChange={(event) => {
 										if (event.target.value) {
 											void onSetAcpSessionMode(event.target.value);
@@ -387,10 +382,7 @@ const SessionFeedback = memo(function SessionFeedback({
 								<select
 									className="session-runtime-select"
 									value={option.kind.currentValueId}
-									disabled={
-										activeSession.session.status !== "idle" ||
-										runtimeControlPendingKey === `config:${option.id}`
-									}
+									disabled={isRuntimeReadOnly || runtimeControlPendingKey === `config:${option.id}`}
 									onChange={(event) => {
 										void onSetAcpSessionConfigOption(option.id, event.target.value);
 									}}

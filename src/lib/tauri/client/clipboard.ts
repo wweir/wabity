@@ -1,6 +1,4 @@
-import {
-	browserClipboardHistorySnapshot,
-} from "./defaults";
+import { browserClipboardHistorySnapshot } from "./defaults";
 import { invokeIfDesktop, invokeOrDefault, listenIfDesktop } from "./runtime";
 import type {
 	ClipboardHistorySnapshot,

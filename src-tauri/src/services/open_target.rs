@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     ffi::OsStr,
     io::ErrorKind,
     path::{Path, PathBuf},
@@ -153,6 +154,12 @@ fn resolve_existing_path(
         return Ok(None);
     }
 
+    let enforce_unique_match = allowed_roots.is_some()
+        && !Path::new(input).is_absolute()
+        && !input.starts_with("~/")
+        && !input.starts_with("~\\");
+    let mut resolved_matches = Vec::new();
+
     for candidate in candidates {
         match candidate.canonicalize() {
             Ok(path) => {
@@ -160,7 +167,9 @@ fn resolve_existing_path(
                     bail!("不是可打开的文件或目录: {}", path.display());
                 }
                 ensure_path_is_allowed(&path, allowed_roots)?;
-                return Ok(Some(path));
+                if !resolved_matches.iter().any(|existing| existing == &path) {
+                    resolved_matches.push(path);
+                }
             }
             Err(error) if error.kind() == ErrorKind::NotFound => continue,
             Err(error) => {
@@ -168,6 +177,19 @@ fn resolve_existing_path(
                     .with_context(|| format!("无法解析要打开的路径: {}", candidate.display()));
             }
         }
+    }
+
+    if resolved_matches.len() == 1 {
+        return Ok(Some(resolved_matches.remove(0)));
+    }
+
+    if enforce_unique_match && resolved_matches.len() > 1 {
+        let matches = resolved_matches
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!("相对路径命中多个允许目录中的目标，请改用绝对路径或更精确路径: {matches}");
     }
 
     Ok(None)
@@ -204,8 +226,10 @@ fn build_candidate_paths(
     }
 
     if let Some(allowed_roots) = allowed_roots {
+        let mut seen = HashSet::new();
         return allowed_roots
             .iter()
+            .filter(|root| seen.insert(normalize_allowed_root_key(root)))
             .map(|root| root.join(&expanded))
             .collect();
     }
@@ -213,6 +237,10 @@ fn build_candidate_paths(
     workspace_root
         .map(|root| vec![root.join(expanded)])
         .unwrap_or_default()
+}
+
+fn normalize_allowed_root_key(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn expand_home(input: &str) -> Option<PathBuf> {
@@ -387,5 +415,46 @@ mod tests {
         let error = resolve_target("./missing.txt", Some(&workspace), None).unwrap_err();
 
         assert_eq!(error.to_string(), "路径不存在或不可访问: ./missing.txt");
+    }
+
+    #[test]
+    fn relative_allowed_root_path_rejects_ambiguous_matches() {
+        let root = temp_dir("ambiguous");
+        let workspace = root.join("workspace");
+        let docs = root.join("docs");
+        fs::create_dir_all(workspace.join("guides")).unwrap();
+        fs::create_dir_all(docs.join("guides")).unwrap();
+        fs::write(workspace.join("guides/intro.md"), "workspace").unwrap();
+        fs::write(docs.join("guides/intro.md"), "docs").unwrap();
+        let workspace = workspace.canonicalize().unwrap();
+        let docs = docs.canonicalize().unwrap();
+
+        let error = resolve_target("guides/intro.md", None, Some(&[workspace, docs])).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("相对路径命中多个允许目录中的目标"));
+    }
+
+    #[test]
+    fn equivalent_allowed_roots_do_not_create_false_ambiguity() {
+        let workspace = temp_dir("dedup-roots");
+        let file_path = workspace.join("guides/intro.md");
+        fs::create_dir_all(file_path.parent().expect("guides parent")).unwrap();
+        fs::write(&file_path, "workspace").unwrap();
+        let canonical_workspace = workspace.canonicalize().unwrap();
+        let dotted_workspace = canonical_workspace.join(".");
+
+        let resolved = resolve_target(
+            "guides/intro.md",
+            None,
+            Some(&[canonical_workspace.clone(), dotted_workspace]),
+        )
+        .expect("equivalent allowed roots should resolve uniquely");
+
+        assert_eq!(
+            resolved,
+            OpenTarget::Path(file_path.canonicalize().unwrap())
+        );
     }
 }

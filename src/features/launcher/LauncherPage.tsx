@@ -273,25 +273,30 @@ function buildRagRuntimeStatusText(status: RagRuntimeStatus): {
 	text: string | null;
 	tone: "default" | "progress" | "error";
 } {
+	const warningSuffix = status.warningCount > 0 ? ` · ${status.warningCount} 条警告` : "";
+	const latestWarning =
+		status.recentWarnings.length > 0
+			? status.recentWarnings[status.recentWarnings.length - 1]
+			: null;
 	switch (status.phase) {
 		case "scanning":
 			return {
 				text:
 					status.totalFileCount > 0
-						? `索引构建中 · 已扫描 ${status.scannedFileCount} 个文件，当前进度 ${status.completedFileCount}/${status.totalFileCount}`
+						? `索引构建中 · 已扫描 ${status.scannedFileCount} 个文件，当前进度 ${status.completedFileCount}/${status.totalFileCount}${warningSuffix}`
 						: status.scannedFileCount > 0
-							? `索引构建中 · 已扫描 ${status.scannedFileCount} 个文件`
-							: "索引构建中 · 正在扫描文档",
+							? `索引构建中 · 已扫描 ${status.scannedFileCount} 个文件${warningSuffix}`
+							: `索引构建中 · 正在扫描文档${warningSuffix}`,
 				tone: "progress",
 			};
 		case "indexing":
 			return {
 				text:
 					status.totalFileCount > 0
-						? `索引构建中 · 当前进度 ${status.completedFileCount}/${status.totalFileCount}（剩余 ${status.pendingFileCount} 个文件）`
+						? `索引构建中 · 当前进度 ${status.completedFileCount}/${status.totalFileCount}（剩余 ${status.pendingFileCount} 个文件）${warningSuffix}`
 						: status.pendingFileCount > 0
-							? `索引构建中 · 正在计算向量（剩余 ${status.pendingFileCount} 个文件）`
-							: "索引构建中 · 正在计算向量",
+							? `索引构建中 · 正在计算向量（剩余 ${status.pendingFileCount} 个文件）${warningSuffix}`
+							: `索引构建中 · 正在计算向量${warningSuffix}`,
 				tone: "progress",
 			};
 		case "error":
@@ -301,6 +306,16 @@ function buildRagRuntimeStatusText(status: RagRuntimeStatus): {
 					: "索引构建失败 · 请检查 RAG 配置和日志",
 				tone: "error",
 			};
+		case "idle":
+			if (status.warningCount > 0) {
+				return {
+					text: latestWarning
+						? `最近一次索引构建有 ${status.warningCount} 条警告 · ${latestWarning}`
+						: `最近一次索引构建有 ${status.warningCount} 条警告`,
+					tone: "default",
+				};
+			}
+			return { text: null, tone: "default" };
 		default:
 			return { text: null, tone: "default" };
 	}
@@ -379,6 +394,8 @@ export function LauncherPage({
 		completedFileCount: 0,
 		totalFileCount: 0,
 		pendingFileCount: 0,
+		warningCount: 0,
+		recentWarnings: [],
 		lastError: null,
 		updatedAtMs: 0,
 	});
@@ -764,6 +781,7 @@ export function LauncherPage({
 			}
 
 			return {
+				announce: true,
 				label: "运行状态",
 				items,
 				tone: error ? ("error" as const) : ("progress" as const),
@@ -777,6 +795,7 @@ export function LauncherPage({
 			}
 
 			return {
+				announce: true,
 				label: "运行状态",
 				items,
 				tone: error ? ("error" as const) : ("progress" as const),
@@ -795,6 +814,7 @@ export function LauncherPage({
 			}
 
 			return {
+				announce: true,
 				label: "运行状态",
 				items,
 				tone: error ? ("error" as const) : ("progress" as const),
@@ -808,6 +828,7 @@ export function LauncherPage({
 			}
 
 			return {
+				announce: true,
 				label: "运行状态",
 				items,
 				tone: error ? ("error" as const) : ragRuntimeBar.tone,
@@ -824,6 +845,7 @@ export function LauncherPage({
 			}
 
 			return {
+				announce: Boolean(error) || Boolean(activeSession.session.lastError),
 				label: "会话状态",
 				items,
 				tone: items.some((item) => item.startsWith("错误 ·"))
@@ -839,6 +861,7 @@ export function LauncherPage({
 			}
 
 			return {
+				announce: Boolean(error),
 				label: "会话状态",
 				items,
 				tone: error ? ("error" as const) : ("default" as const),
@@ -859,6 +882,7 @@ export function LauncherPage({
 		}
 
 		return {
+			announce: Boolean(error),
 			label: error ? "状态" : showShortcutHint ? "快捷提示" : "最近输入",
 			items,
 			tone: error ? ("error" as const) : ("default" as const),
@@ -3267,6 +3291,7 @@ export function LauncherPage({
 						inputPlaceholder={inputPlaceholder}
 						inputLabel="输入动作、问题或文件路径"
 						inputDescriptionId="launcher-status-region"
+						announceStatus={statusBarState.announce}
 						statusLabel={statusBarState.label}
 						statusItems={statusBarState.items}
 						statusTone={statusBarState.tone}

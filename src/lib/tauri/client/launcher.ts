@@ -115,9 +115,7 @@ export async function onOcrTranslationStream(
 	return listenIfDesktop("ocr-translation-stream", callback);
 }
 
-export async function onExecutionProgress(
-	callback: (payload: ExecutionProgressEvent) => void,
-) {
+export async function onExecutionProgress(callback: (payload: ExecutionProgressEvent) => void) {
 	return listenIfDesktop("execution-progress", callback);
 }
 
@@ -204,9 +202,7 @@ export async function closeAcpSession(sessionId: string): Promise<void> {
 	return invokeIfDesktop("close_acp_session", { sessionId });
 }
 
-export async function subscribeAcpSessionUpdates(
-	callback: (detail: AcpSessionDetail) => void,
-) {
+export async function subscribeAcpSessionUpdates(callback: (detail: AcpSessionDetail) => void) {
 	return subscribeChannelIfDesktop(
 		"subscribe_acp_session_updates",
 		"unsubscribe_acp_session_updates",
@@ -214,9 +210,7 @@ export async function subscribeAcpSessionUpdates(
 	);
 }
 
-export async function subscribeAcpSessionRemovals(
-	callback: (sessionId: string) => void,
-) {
+export async function subscribeAcpSessionRemovals(callback: (sessionId: string) => void) {
 	return subscribeChannelIfDesktop(
 		"subscribe_acp_session_removals",
 		"unsubscribe_acp_session_removals",

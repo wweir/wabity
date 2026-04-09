@@ -320,7 +320,14 @@ impl AcpService {
     }
 
     pub fn start_event_loop(&self) {
-        let Some(mut receiver) = self.runtime_event_rx.lock().unwrap().take() else {
+        let mut receiver_guard = match self.runtime_event_rx.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("ACP runtime event receiver lock poisoned; recovering state");
+                poisoned.into_inner()
+            }
+        };
+        let Some(mut receiver) = receiver_guard.take() else {
             return;
         };
         let service = self.clone();

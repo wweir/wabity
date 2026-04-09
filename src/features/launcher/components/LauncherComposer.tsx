@@ -1,13 +1,15 @@
 import {
-	useLayoutEffect,
-	useRef,
-	useState,
-	type CSSProperties,
 	type ChangeEvent,
+	type KeyboardEvent as ReactKeyboardEvent,
 	type KeyboardEvent,
 	type MouseEvent as ReactMouseEvent,
+	type ReactElement,
 	type RefObject,
 	type SyntheticEvent,
+	useLayoutEffect,
+	useMemo,
+	useRef,
+	useState,
 } from "react";
 import type { InputMode } from "../types";
 import { usesInlineInputControl } from "../inputMode";
@@ -23,6 +25,7 @@ interface LauncherComposerProps {
 	statusLabel: string;
 	statusItems: string[];
 	statusTone: "default" | "progress" | "error";
+	announceStatus?: boolean;
 	onUpdateRawText: (value: string, caretIndex: number) => void;
 	onSyncCaretIndex: (element: HTMLInputElement | HTMLTextAreaElement) => void;
 	onKeyDown: (event: KeyboardEvent<HTMLInputElement> | KeyboardEvent<HTMLTextAreaElement>) => void;
@@ -53,118 +56,128 @@ interface LauncherComposerProps {
 }
 
 function LauncherStatusBar({
-	id,
 	statusLabel,
 	statusItems,
 	statusTone,
+	announceStatus = false,
 }: {
-	id?: string;
 	statusLabel: string;
 	statusItems: string[];
 	statusTone: "default" | "progress" | "error";
-}) {
+	announceStatus?: boolean;
+}): ReactElement {
 	const viewportRef = useRef<HTMLDivElement | null>(null);
-	const measureRef = useRef<HTMLSpanElement | null>(null);
-	const [shouldScroll, setShouldScroll] = useState(false);
-	const [scrollDistance, setScrollDistance] = useState(0);
-	const [scrollDurationSeconds, setScrollDurationSeconds] = useState(0);
-	const normalizedStatusItems = statusItems
-		.map((item) => item.trim())
-		.filter((item) => item.length > 0);
-	const hasMultipleItems = normalizedStatusItems.length > 1;
-	const normalizedStatusText = normalizedStatusItems[0] ?? "";
+	const [canScrollStatus, setCanScrollStatus] = useState(false);
+	const normalizedStatusItems = useMemo(
+		() => statusItems.map((item) => item.trim()).filter((item) => item.length > 0),
+		[statusItems],
+	);
+	const isEmptyStatus = normalizedStatusItems.length === 0;
+	const visibleStatusItems = useMemo(() => {
+		if (isEmptyStatus) {
+			return ["暂无最近输入"];
+		}
+		return normalizedStatusItems;
+	}, [isEmptyStatus, normalizedStatusItems]);
 
 	useLayoutEffect(() => {
 		const viewportElement = viewportRef.current;
-		const measureElement = measureRef.current;
-		if (!viewportElement || !measureElement || !normalizedStatusText || hasMultipleItems) {
-			setShouldScroll(false);
-			setScrollDistance(0);
-			setScrollDurationSeconds(0);
+		if (!viewportElement) {
+			setCanScrollStatus(false);
 			return;
 		}
 
-		const updateScrollState = () => {
-			const overflow = measureElement.scrollWidth - viewportElement.clientWidth;
-			if (overflow <= 0) {
-				setShouldScroll(false);
-				setScrollDistance(0);
-				setScrollDurationSeconds(0);
-				return;
-			}
-
-			const gap = 32;
-			const nextDistance = measureElement.scrollWidth + gap;
-			setShouldScroll(true);
-			setScrollDistance(nextDistance);
-			setScrollDurationSeconds(Math.max(10, nextDistance / 28));
+		const updateScrollableState = () => {
+			setCanScrollStatus(viewportElement.scrollHeight - viewportElement.clientHeight > 1);
 		};
 
-		updateScrollState();
+		updateScrollableState();
 
 		if (typeof ResizeObserver === "undefined") {
 			return;
 		}
 
 		const observer = new ResizeObserver(() => {
-			updateScrollState();
+			updateScrollableState();
 		});
 		observer.observe(viewportElement);
-		observer.observe(measureElement);
+		const listElement = viewportElement.firstElementChild;
+		if (listElement instanceof HTMLElement) {
+			observer.observe(listElement);
+		}
 		return () => {
 			observer.disconnect();
 		};
-	}, [hasMultipleItems, normalizedStatusText]);
+	}, [visibleStatusItems]);
+
+	function handleViewportKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+		const viewportElement = event.currentTarget;
+		const scrollStep = 22;
+
+		switch (event.key) {
+			case "ArrowDown":
+				viewportElement.scrollBy({ top: scrollStep });
+				event.preventDefault();
+				break;
+			case "ArrowUp":
+				viewportElement.scrollBy({ top: -scrollStep });
+				event.preventDefault();
+				break;
+			case "PageDown":
+				viewportElement.scrollBy({ top: viewportElement.clientHeight });
+				event.preventDefault();
+				break;
+			case "PageUp":
+				viewportElement.scrollBy({ top: -viewportElement.clientHeight });
+				event.preventDefault();
+				break;
+			case "Home":
+				viewportElement.scrollTo({ top: 0 });
+				event.preventDefault();
+				break;
+			case "End":
+				viewportElement.scrollTo({ top: viewportElement.scrollHeight });
+				event.preventDefault();
+				break;
+			default:
+				break;
+		}
+	}
+
+	function getViewportAriaLabel(): string | undefined {
+		if (!canScrollStatus) {
+			return undefined;
+		}
+		return `${statusLabel}，可上下滚动查看全部状态`;
+	}
 
 	return (
 		<div
-			id={id}
-			aria-atomic="true"
-			aria-live="polite"
-			className={`launcher-status-bar tone-${statusTone}${hasMultipleItems ? " has-multiple" : ""}`}
-			role="status"
+			aria-atomic={announceStatus ? "true" : undefined}
+			aria-live={announceStatus ? "polite" : undefined}
+			className={`launcher-status-bar tone-${statusTone}`}
+			role={announceStatus ? "status" : undefined}
 		>
 			<span className="launcher-status-bar-label">{statusLabel}</span>
-			<div className="launcher-status-bar-viewport" ref={viewportRef}>
-				{normalizedStatusItems.length > 0 ? (
-					hasMultipleItems ? (
-						<div className="launcher-status-bar-list">
-							{normalizedStatusItems.map((item, index) => (
-								<span key={`${index}:${item}`} className="launcher-status-bar-text">
-									{item}
-								</span>
-							))}
-						</div>
-					) : shouldScroll ? (
-						<div
-							aria-label={normalizedStatusText}
-							className="launcher-status-bar-marquee"
-							style={
-								{
-									"--status-scroll-distance": `${scrollDistance}px`,
-									"--status-scroll-duration": `${scrollDurationSeconds}s`,
-								} as CSSProperties
-							}
-						>
-							<span className="launcher-status-bar-text">{normalizedStatusText}</span>
-							<span aria-hidden="true" className="launcher-status-bar-separator">
-								·
+			<div className="launcher-status-bar-body">
+				<div
+					aria-label={getViewportAriaLabel()}
+					className="launcher-status-bar-viewport"
+					onKeyDown={canScrollStatus ? handleViewportKeyDown : undefined}
+					ref={viewportRef}
+					tabIndex={canScrollStatus ? 0 : undefined}
+				>
+					<div className="launcher-status-bar-list">
+						{visibleStatusItems.map((item, index) => (
+							<span
+								key={`${index}:${item}`}
+								className={`launcher-status-bar-text${isEmptyStatus ? " empty" : ""}`}
+							>
+								{item}
 							</span>
-							<span aria-hidden="true" className="launcher-status-bar-text">
-								{normalizedStatusText}
-							</span>
-						</div>
-					) : (
-						<span className="launcher-status-bar-text">{normalizedStatusText}</span>
-					)
-				) : (
-					<span className="launcher-status-bar-text empty">暂无最近输入</span>
-				)}
-				{hasMultipleItems ? null : (
-					<span className="launcher-status-bar-measure" ref={measureRef}>
-						{normalizedStatusText}
-					</span>
-				)}
+						))}
+					</div>
+				</div>
 			</div>
 		</div>
 	);
@@ -181,6 +194,7 @@ export function LauncherComposer({
 	statusLabel,
 	statusItems,
 	statusTone,
+	announceStatus = false,
 	onUpdateRawText,
 	onSyncCaretIndex,
 	onKeyDown,
@@ -208,8 +222,9 @@ export function LauncherComposer({
 	showCancelActiveSession,
 	onCancelActiveSession,
 	onRunPrimaryAction,
-}: LauncherComposerProps) {
+}: LauncherComposerProps): ReactElement {
 	const inputId = "launcher-primary-input";
+	const resolvedInputDescriptionId = inputDescriptionId ?? undefined;
 	const inputProps = {
 		autoFocus: true,
 		autoCapitalize: "none" as const,
@@ -230,7 +245,7 @@ export function LauncherComposer({
 	};
 	const sharedAccessibilityProps = {
 		"aria-label": inputLabel,
-		"aria-describedby": inputDescriptionId,
+		"aria-describedby": resolvedInputDescriptionId,
 		"aria-controls": completionPopupId,
 		"aria-expanded": hasSuggestions,
 		"aria-activedescendant": activeCompletionOptionId,
@@ -243,6 +258,11 @@ export function LauncherComposer({
 				<label className="sr-only" htmlFor={inputId}>
 					{inputLabel}
 				</label>
+				{resolvedInputDescriptionId ? (
+					<span className="sr-only" id={resolvedInputDescriptionId}>
+						支持普通文本、斜杠动作与文件补全。下方状态区域会在运行中显示进度或错误。
+					</span>
+				) : null}
 				{usesInlineInputControl(inputMode) ? (
 					<input
 						{...inputProps}
@@ -271,7 +291,7 @@ export function LauncherComposer({
 
 			<div className="control-row">
 				<LauncherStatusBar
-					id={inputDescriptionId}
+					announceStatus={announceStatus}
 					statusLabel={statusLabel}
 					statusItems={statusItems}
 					statusTone={statusTone}

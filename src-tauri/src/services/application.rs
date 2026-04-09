@@ -17,7 +17,6 @@ use crate::{
     infrastructure::opener,
 };
 
-pub const APPLICATION_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 pub const APPLICATION_CACHE_STALE_AFTER: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug, Clone)]
@@ -60,8 +59,8 @@ impl ApplicationService {
             return Ok(Vec::new());
         }
 
-        self.schedule_refresh_if_stale(APPLICATION_CACHE_STALE_AFTER);
-        let entries = self.entries_snapshot()?;
+        let entries =
+            self.search_entries(APPLICATION_CACHE_STALE_AFTER, build_application_index)?;
         Ok(rank_matches(entries.as_ref(), needle, limit))
     }
 
@@ -80,13 +79,24 @@ impl ApplicationService {
     }
 
     pub async fn refresh_now(&self) -> Result<()> {
+        self.refresh_now_with(build_application_index).await
+    }
+
+    async fn refresh_now_with<F>(&self, build: F) -> Result<()>
+    where
+        F: FnOnce() -> Result<Vec<ApplicationRecord>> + Send + 'static,
+    {
         if !self.begin_refresh()? {
             return Ok(());
         }
 
-        let build_result = task::spawn_blocking(build_application_index)
-            .await
-            .context("failed to join application index refresh task")?;
+        let build_result = match task::spawn_blocking(build).await {
+            Ok(result) => result,
+            Err(error) => {
+                self.finish_failed_refresh()?;
+                return Err(error).context("failed to join application index refresh task");
+            }
+        };
         match build_result {
             Ok(entries) => {
                 self.replace_snapshot(entries)?;
@@ -97,6 +107,81 @@ impl ApplicationService {
                 Err(error)
             }
         }
+    }
+
+    fn entries_snapshot(&self) -> Result<Arc<Vec<ApplicationRecord>>> {
+        Ok(self.read_snapshot_state()?.entries)
+    }
+
+    fn entries_for_search<F>(&self, build: F) -> Result<Arc<Vec<ApplicationRecord>>>
+    where
+        F: FnOnce() -> Result<Vec<ApplicationRecord>>,
+    {
+        let started_refresh = self.begin_refresh()?;
+        match build() {
+            Ok(entries) => {
+                self.replace_snapshot(entries)?;
+                self.entries_snapshot()
+            }
+            Err(error) => {
+                if started_refresh {
+                    self.finish_failed_refresh()?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn read_snapshot_state(&self) -> Result<ApplicationCatalogSnapshot> {
+        let guard = read_snapshot_lock(&self.snapshot, "read");
+        Ok(guard.clone())
+    }
+
+    fn begin_refresh(&self) -> Result<bool> {
+        let mut guard = write_snapshot_lock(&self.snapshot, "write");
+        if guard.refreshing {
+            return Ok(false);
+        }
+        guard.refreshing = true;
+        Ok(true)
+    }
+
+    fn replace_snapshot(&self, entries: Vec<ApplicationRecord>) -> Result<()> {
+        self.write_snapshot(entries, false)
+    }
+    fn write_snapshot(&self, entries: Vec<ApplicationRecord>, refreshing: bool) -> Result<()> {
+        let mut guard = write_snapshot_lock(&self.snapshot, "update");
+        let version = guard.version.saturating_add(1);
+        guard.entries = Arc::new(entries);
+        guard.built_at_ms = Some(current_time_ms());
+        guard.refreshing = refreshing;
+        guard.version = version;
+        tracing::info!(
+            count = guard.entries.len(),
+            refreshing = guard.refreshing,
+            version = guard.version,
+            "application cache refreshed"
+        );
+        Ok(())
+    }
+
+    fn finish_failed_refresh(&self) -> Result<()> {
+        let mut guard = write_snapshot_lock(&self.snapshot, "update");
+        guard.refreshing = false;
+        Ok(())
+    }
+
+    fn should_refresh(&self, max_age: Duration) -> Result<bool> {
+        let guard = read_snapshot_lock(&self.snapshot, "read");
+        if guard.refreshing {
+            return Ok(false);
+        }
+
+        if guard.entries.is_empty() || guard.built_at_ms.is_none() {
+            return Ok(true);
+        }
+
+        Ok(cache_age_exceeded(guard.built_at_ms, max_age))
     }
 
     pub fn schedule_refresh_if_stale(&self, max_age: Duration) {
@@ -111,6 +196,10 @@ impl ApplicationService {
             return;
         }
 
+        self.spawn_refresh_task();
+    }
+
+    fn spawn_refresh_task(&self) {
         let service = self.clone();
         tauri::async_runtime::spawn(async move {
             if let Err(error) = service.refresh_now().await {
@@ -119,67 +208,52 @@ impl ApplicationService {
         });
     }
 
-    fn entries_snapshot(&self) -> Result<Arc<Vec<ApplicationRecord>>> {
-        let guard = self
-            .snapshot
-            .read()
-            .map_err(|_| anyhow::anyhow!("failed to read application cache state"))?;
-        Ok(Arc::clone(&guard.entries))
-    }
-
-    fn begin_refresh(&self) -> Result<bool> {
-        let mut guard = self
-            .snapshot
-            .write()
-            .map_err(|_| anyhow::anyhow!("failed to write application cache state"))?;
-        if guard.refreshing {
-            return Ok(false);
-        }
-        guard.refreshing = true;
-        Ok(true)
-    }
-
-    fn replace_snapshot(&self, entries: Vec<ApplicationRecord>) -> Result<()> {
-        let mut guard = self
-            .snapshot
-            .write()
-            .map_err(|_| anyhow::anyhow!("failed to update application cache state"))?;
-        let version = guard.version.saturating_add(1);
-        guard.entries = Arc::new(entries);
-        guard.built_at_ms = Some(current_time_ms());
-        guard.refreshing = false;
-        guard.version = version;
-        tracing::info!(
-            count = guard.entries.len(),
-            version = guard.version,
-            "application cache refreshed"
-        );
-        Ok(())
-    }
-
-    fn finish_failed_refresh(&self) -> Result<()> {
-        let mut guard = self
-            .snapshot
-            .write()
-            .map_err(|_| anyhow::anyhow!("failed to update application cache state"))?;
-        guard.refreshing = false;
-        Ok(())
-    }
-
-    fn should_refresh(&self, max_age: Duration) -> Result<bool> {
-        let guard = self
-            .snapshot
-            .read()
-            .map_err(|_| anyhow::anyhow!("failed to read application cache state"))?;
-        if guard.refreshing {
-            return Ok(false);
+    fn search_entries<F>(&self, max_age: Duration, build: F) -> Result<Arc<Vec<ApplicationRecord>>>
+    where
+        F: FnOnce() -> Result<Vec<ApplicationRecord>>,
+    {
+        if self.snapshot_needs_refresh(max_age)? {
+            return self.entries_for_search(build);
         }
 
-        if guard.entries.is_empty() || guard.built_at_ms.is_none() {
-            return Ok(true);
-        }
+        self.entries_snapshot()
+    }
 
-        Ok(cache_age_exceeded(guard.built_at_ms, max_age))
+    fn snapshot_needs_refresh(&self, max_age: Duration) -> Result<bool> {
+        let snapshot = self.read_snapshot_state()?;
+        Ok(snapshot.entries.is_empty() || cache_age_exceeded(snapshot.built_at_ms, max_age))
+    }
+}
+
+fn read_snapshot_lock<'a>(
+    snapshot: &'a Arc<RwLock<ApplicationCatalogSnapshot>>,
+    action: &str,
+) -> std::sync::RwLockReadGuard<'a, ApplicationCatalogSnapshot> {
+    match snapshot.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!(
+                action,
+                "application cache lock poisoned; recovering cached state"
+            );
+            poisoned.into_inner()
+        }
+    }
+}
+
+fn write_snapshot_lock<'a>(
+    snapshot: &'a Arc<RwLock<ApplicationCatalogSnapshot>>,
+    action: &str,
+) -> std::sync::RwLockWriteGuard<'a, ApplicationCatalogSnapshot> {
+    match snapshot.write() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!(
+                action,
+                "application cache lock poisoned; recovering cached state"
+            );
+            poisoned.into_inner()
+        }
     }
 }
 
@@ -280,6 +354,12 @@ fn build_application_index() -> Result<Vec<ApplicationRecord>> {
 
         tracing::info!(
             count = entries.len(),
+            total_name_bytes = entries.iter().map(|entry| entry.name.len()).sum::<usize>(),
+            total_alias_bytes = entries
+                .iter()
+                .map(|entry| entry.aliases.iter().map(String::len).sum::<usize>())
+                .sum::<usize>(),
+            total_path_bytes = entries.iter().map(|entry| entry.path.len()).sum::<usize>(),
             elapsed_ms = started_at.elapsed().as_millis(),
             "application index ready"
         );
@@ -505,13 +585,15 @@ mod tests {
     use std::{
         fs,
         path::Path,
+        sync::Arc,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     use super::{
         app_directory_priority, build_aliases, cache_age_exceeded, current_time_ms,
         normalize_app_name, normalize_display_name, rank_matches, validate_app_bundle_path,
-        ApplicationRecord,
+        ApplicationCatalogSnapshot, ApplicationRecord, ApplicationService,
+        APPLICATION_CACHE_STALE_AFTER,
     };
 
     #[test]
@@ -638,5 +720,164 @@ mod tests {
             app_directory_priority(Path::new("/Applications/Foo.app"))
                 > app_directory_priority(Path::new("/System/Applications/Foo.app"))
         );
+    }
+
+    #[test]
+    fn search_entries_clears_refreshing_after_direct_build() {
+        let service = ApplicationService::new().expect("service should initialize");
+        *service.snapshot.write().expect("snapshot lock should work") =
+            ApplicationCatalogSnapshot {
+                entries: Arc::new(Vec::new()),
+                built_at_ms: None,
+                refreshing: true,
+                version: 7,
+            };
+
+        let entries = service
+            .entries_for_search(|| {
+                Ok(vec![ApplicationRecord {
+                    name: "Arc".to_string(),
+                    aliases: vec!["Arc".to_string()],
+                    path: "/Applications/Arc.app".to_string(),
+                    normalized_name: "arc".to_string(),
+                    normalized_aliases: vec!["arc".to_string()],
+                }])
+            })
+            .expect("fallback build should succeed");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "Arc");
+        let snapshot = service
+            .snapshot
+            .read()
+            .expect("snapshot lock should work after fallback");
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].name, "Arc");
+        assert!(!snapshot.refreshing);
+        assert_eq!(snapshot.version, 8);
+    }
+
+    #[test]
+    fn search_entries_rebuilds_stale_snapshot_before_returning_results() {
+        let service = ApplicationService::new().expect("service should initialize");
+        *service.snapshot.write().expect("snapshot lock should work") =
+            ApplicationCatalogSnapshot {
+                entries: Arc::new(vec![ApplicationRecord {
+                    name: "Old".to_string(),
+                    aliases: vec!["Old".to_string()],
+                    path: "/Applications/Old.app".to_string(),
+                    normalized_name: "old".to_string(),
+                    normalized_aliases: vec!["old".to_string()],
+                }]),
+                built_at_ms: Some(current_time_ms().saturating_sub(20 * 60 * 1000)),
+                refreshing: false,
+                version: 3,
+            };
+
+        let entries = service
+            .search_entries(APPLICATION_CACHE_STALE_AFTER, || {
+                Ok(vec![ApplicationRecord {
+                    name: "Fresh".to_string(),
+                    aliases: vec!["Fresh".to_string()],
+                    path: "/Applications/Fresh.app".to_string(),
+                    normalized_name: "fresh".to_string(),
+                    normalized_aliases: vec!["fresh".to_string()],
+                }])
+            })
+            .expect("stale application snapshot should rebuild before returning");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "Fresh");
+
+        let snapshot = service
+            .snapshot
+            .read()
+            .expect("snapshot lock should work after rebuild");
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].name, "Fresh");
+        assert!(!snapshot.refreshing);
+        assert_eq!(snapshot.version, 4);
+    }
+
+    #[test]
+    fn search_entries_rebuilds_stale_snapshot_even_while_refreshing() {
+        let service = ApplicationService::new().expect("service should initialize");
+        *service.snapshot.write().expect("snapshot lock should work") =
+            ApplicationCatalogSnapshot {
+                entries: Arc::new(vec![ApplicationRecord {
+                    name: "Old".to_string(),
+                    aliases: vec!["Old".to_string()],
+                    path: "/Applications/Old.app".to_string(),
+                    normalized_name: "old".to_string(),
+                    normalized_aliases: vec!["old".to_string()],
+                }]),
+                built_at_ms: Some(current_time_ms().saturating_sub(20 * 60 * 1000)),
+                refreshing: true,
+                version: 9,
+            };
+
+        let entries = service
+            .search_entries(APPLICATION_CACHE_STALE_AFTER, || {
+                Ok(vec![ApplicationRecord {
+                    name: "Fresh".to_string(),
+                    aliases: vec!["Fresh".to_string()],
+                    path: "/Applications/Fresh.app".to_string(),
+                    normalized_name: "fresh".to_string(),
+                    normalized_aliases: vec!["fresh".to_string()],
+                }])
+            })
+            .expect("stale refreshing snapshot should still rebuild before returning");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "Fresh");
+
+        let snapshot = service
+            .snapshot
+            .read()
+            .expect("snapshot lock should work after refreshing rebuild");
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].name, "Fresh");
+        assert!(!snapshot.refreshing);
+        assert_eq!(snapshot.version, 10);
+    }
+
+    #[tokio::test]
+    async fn refresh_now_clears_refreshing_when_background_build_panics() {
+        let service = ApplicationService::new().expect("service should initialize");
+
+        let error = service
+            .refresh_now_with(|| -> anyhow::Result<Vec<ApplicationRecord>> {
+                panic!("panic during application refresh");
+            })
+            .await
+            .expect_err("panic in refresh task should surface as an error");
+
+        assert!(error
+            .to_string()
+            .contains("failed to join application index refresh task"));
+        assert!(
+            !service
+                .snapshot
+                .read()
+                .expect("snapshot lock should work after panic")
+                .refreshing
+        );
+    }
+
+    #[test]
+    fn entries_snapshot_recovers_from_poisoned_snapshot_lock() {
+        let service = ApplicationService::new().expect("service should initialize");
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = service
+                .snapshot
+                .write()
+                .expect("snapshot lock should succeed");
+            panic!("poison application snapshot lock");
+        }));
+
+        let entries = service
+            .entries_snapshot()
+            .expect("poisoned application snapshot lock should recover");
+        assert!(entries.is_empty());
     }
 }

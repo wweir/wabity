@@ -19,8 +19,7 @@ use crate::domain::{
 };
 
 const KILL_COMMAND_ALIASES: [&str; 1] = ["/kill"];
-pub const PROCESS_CACHE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
-pub const PROCESS_CACHE_STALE_AFTER: Duration = Duration::from_secs(5);
+pub const PROCESS_CACHE_STALE_AFTER: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone)]
 pub struct ProcessService {
@@ -79,25 +78,33 @@ impl ProcessService {
             return Ok(Vec::new());
         }
 
-        if self.entries_snapshot()?.is_empty() {
-            self.refresh_now_blocking()?;
-        } else {
-            self.schedule_refresh_if_stale(PROCESS_CACHE_STALE_AFTER);
-        }
-
-        let entries = self.entries_snapshot()?;
+        let entries = self.entries_for_search(PROCESS_CACHE_STALE_AFTER)?;
         Ok(rank_processes(entries.as_ref(), needle, limit))
     }
 
     pub async fn refresh_now(&self) -> Result<()> {
+        self.refresh_now_with({
+            let service = self.clone();
+            move || service.collect_process_records_fresh()
+        })
+        .await
+    }
+
+    async fn refresh_now_with<F>(&self, build: F) -> Result<()>
+    where
+        F: FnOnce() -> Result<Vec<ProcessRecord>> + Send + 'static,
+    {
         if !self.begin_refresh()? {
             return Ok(());
         }
 
-        let service = self.clone();
-        let build_result = task::spawn_blocking(move || service.collect_process_records_fresh())
-            .await
-            .context("failed to join process cache refresh task")?;
+        let build_result = match task::spawn_blocking(build).await {
+            Ok(result) => result,
+            Err(error) => {
+                self.finish_failed_refresh()?;
+                return Err(error).context("failed to join process cache refresh task");
+            }
+        };
         match build_result {
             Ok(entries) => {
                 self.replace_snapshot(entries)?;
@@ -108,26 +115,6 @@ impl ProcessService {
                 Err(error)
             }
         }
-    }
-
-    pub fn schedule_refresh_if_stale(&self, max_age: Duration) {
-        let should_refresh = match self.should_refresh(max_age) {
-            Ok(should_refresh) => should_refresh,
-            Err(error) => {
-                tracing::warn!(?error, "failed to inspect process cache state");
-                return;
-            }
-        };
-        if !should_refresh {
-            return;
-        }
-
-        let service = self.clone();
-        tauri::async_runtime::spawn(async move {
-            if let Err(error) = service.refresh_now().await {
-                tracing::warn!(?error, "failed to refresh process cache");
-            }
-        });
     }
 
     pub fn kill_action(&self, raw_text: &str) -> Result<ExecutionResult> {
@@ -156,23 +143,6 @@ impl ProcessService {
         }
     }
 
-    fn refresh_now_blocking(&self) -> Result<()> {
-        if !self.begin_refresh()? {
-            return Ok(());
-        }
-
-        match self.collect_process_records_fresh() {
-            Ok(entries) => {
-                self.replace_snapshot(entries)?;
-                Ok(())
-            }
-            Err(error) => {
-                self.finish_failed_refresh()?;
-                Err(error)
-            }
-        }
-    }
-
     fn collect_process_records_fresh(&self) -> Result<Vec<ProcessRecord>> {
         let started_at = std::time::Instant::now();
         let current_pid = current_pid_u32()?;
@@ -195,10 +165,96 @@ impl ProcessService {
         });
         tracing::info!(
             count = processes.len(),
+            total_display_name_bytes = processes
+                .iter()
+                .map(|process| process.display_name.len())
+                .sum::<usize>(),
+            total_process_name_bytes = processes
+                .iter()
+                .map(|process| process.process_name.len())
+                .sum::<usize>(),
+            total_path_bytes = processes
+                .iter()
+                .map(|process| {
+                    process
+                        .executable_path
+                        .as_ref()
+                        .map(String::len)
+                        .unwrap_or_default()
+                        .saturating_add(
+                            process
+                                .app_bundle_path
+                                .as_ref()
+                                .map(String::len)
+                                .unwrap_or_default(),
+                        )
+                })
+                .sum::<usize>(),
             elapsed_ms = started_at.elapsed().as_millis(),
             "process cache refreshed"
         );
         Ok(processes)
+    }
+
+    fn entries_for_search(&self, max_age: Duration) -> Result<Arc<Vec<ProcessRecord>>> {
+        let snapshot = self.read_snapshot_state()?;
+        if snapshot.entries.is_empty() {
+            return self.entries_for_search_with(|| self.collect_process_records_fresh());
+        }
+
+        if cache_age_exceeded(snapshot.built_at_ms, max_age) {
+            self.schedule_refresh_if_stale(max_age);
+        }
+
+        Ok(snapshot.entries)
+    }
+
+    fn entries_for_search_with<F>(&self, build: F) -> Result<Arc<Vec<ProcessRecord>>>
+    where
+        F: FnOnce() -> Result<Vec<ProcessRecord>>,
+    {
+        let started_refresh = self.begin_refresh()?;
+        match build() {
+            Ok(entries) => {
+                self.replace_snapshot(entries)?;
+                self.entries_snapshot()
+            }
+            Err(error) => {
+                if started_refresh {
+                    self.finish_failed_refresh()?;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn read_snapshot_state(&self) -> Result<ProcessCatalogSnapshot> {
+        let guard = read_snapshot_lock(&self.snapshot, "read");
+        Ok(guard.clone())
+    }
+
+    fn schedule_refresh_if_stale(&self, max_age: Duration) {
+        let should_refresh = match self.snapshot_needs_refresh(max_age) {
+            Ok(should_refresh) => should_refresh,
+            Err(error) => {
+                tracing::warn!(?error, "failed to inspect process cache state");
+                return;
+            }
+        };
+        if !should_refresh {
+            return;
+        }
+
+        self.spawn_refresh_task();
+    }
+
+    fn spawn_refresh_task(&self) {
+        let service = self.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = service.refresh_now().await {
+                tracing::warn!(?error, "failed to refresh process cache");
+            }
+        });
     }
 
     fn process_record_from_sysinfo(
@@ -248,18 +304,11 @@ impl ProcessService {
     }
 
     fn entries_snapshot(&self) -> Result<Arc<Vec<ProcessRecord>>> {
-        let guard = self
-            .snapshot
-            .read()
-            .map_err(|_| anyhow::anyhow!("failed to read process cache state"))?;
-        Ok(Arc::clone(&guard.entries))
+        Ok(self.read_snapshot_state()?.entries)
     }
 
     fn begin_refresh(&self) -> Result<bool> {
-        let mut guard = self
-            .snapshot
-            .write()
-            .map_err(|_| anyhow::anyhow!("failed to write process cache state"))?;
+        let mut guard = write_snapshot_lock(&self.snapshot, "write");
         if guard.refreshing {
             return Ok(false);
         }
@@ -268,10 +317,7 @@ impl ProcessService {
     }
 
     fn replace_snapshot(&self, entries: Vec<ProcessRecord>) -> Result<()> {
-        let mut guard = self
-            .snapshot
-            .write()
-            .map_err(|_| anyhow::anyhow!("failed to update process cache state"))?;
+        let mut guard = write_snapshot_lock(&self.snapshot, "update");
         let version = guard.version.saturating_add(1);
         guard.entries = Arc::new(entries);
         guard.built_at_ms = Some(current_time_ms());
@@ -286,49 +332,94 @@ impl ProcessService {
     }
 
     fn finish_failed_refresh(&self) -> Result<()> {
-        let mut guard = self
-            .snapshot
-            .write()
-            .map_err(|_| anyhow::anyhow!("failed to update process cache state"))?;
+        let mut guard = write_snapshot_lock(&self.snapshot, "update");
         guard.refreshing = false;
         Ok(())
     }
 
-    fn should_refresh(&self, max_age: Duration) -> Result<bool> {
-        let guard = self
-            .snapshot
-            .read()
-            .map_err(|_| anyhow::anyhow!("failed to read process cache state"))?;
-        if guard.refreshing {
+    fn snapshot_needs_refresh(&self, max_age: Duration) -> Result<bool> {
+        let snapshot = self.read_snapshot_state()?;
+        if snapshot.refreshing {
             return Ok(false);
         }
 
-        if guard.entries.is_empty() || guard.built_at_ms.is_none() {
-            return Ok(true);
-        }
-
-        Ok(cache_age_exceeded(guard.built_at_ms, max_age))
+        Ok(snapshot.entries.is_empty() || cache_age_exceeded(snapshot.built_at_ms, max_age))
     }
 
     #[cfg(target_os = "macos")]
     fn localized_app_name(&self, path: &Path) -> Option<String> {
         let cache_key = path.to_string_lossy().into_owned();
-        if let Ok(guard) = self.localized_name_cache.read() {
-            if let Some(cached) = guard.get(&cache_key) {
-                return cached.clone();
-            }
+        let guard = read_localized_name_cache(&self.localized_name_cache);
+        if let Some(cached) = guard.get(&cache_key).cloned() {
+            return cached;
         }
 
         let resolved = localized_app_name_uncached(path);
-        if let Ok(mut guard) = self.localized_name_cache.write() {
-            guard.insert(cache_key, resolved.clone());
-        }
+        write_localized_name_cache(&self.localized_name_cache).insert(cache_key, resolved.clone());
         resolved
     }
 
     #[cfg(not(target_os = "macos"))]
     fn localized_app_name(&self, _path: &Path) -> Option<String> {
         None
+    }
+}
+
+fn read_snapshot_lock<'a>(
+    snapshot: &'a Arc<RwLock<ProcessCatalogSnapshot>>,
+    action: &str,
+) -> std::sync::RwLockReadGuard<'a, ProcessCatalogSnapshot> {
+    match snapshot.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!(
+                action,
+                "process cache lock poisoned; recovering cached state"
+            );
+            poisoned.into_inner()
+        }
+    }
+}
+
+fn write_snapshot_lock<'a>(
+    snapshot: &'a Arc<RwLock<ProcessCatalogSnapshot>>,
+    action: &str,
+) -> std::sync::RwLockWriteGuard<'a, ProcessCatalogSnapshot> {
+    match snapshot.write() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!(
+                action,
+                "process cache lock poisoned; recovering cached state"
+            );
+            poisoned.into_inner()
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn read_localized_name_cache<'a>(
+    cache: &'a Arc<RwLock<HashMap<String, Option<String>>>>,
+) -> std::sync::RwLockReadGuard<'a, HashMap<String, Option<String>>> {
+    match cache.read() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!("process localized name cache lock poisoned; recovering cached state");
+            poisoned.into_inner()
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn write_localized_name_cache<'a>(
+    cache: &'a Arc<RwLock<HashMap<String, Option<String>>>>,
+) -> std::sync::RwLockWriteGuard<'a, HashMap<String, Option<String>>> {
+    match cache.write() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!("process localized name cache lock poisoned; recovering cached state");
+            poisoned.into_inner()
+        }
     }
 }
 
@@ -607,11 +698,12 @@ fn current_time_ms() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::Path, time::Duration};
+    use std::{path::Path, sync::Arc, time::Duration};
 
     use super::{
         bundle_display_name, cache_age_exceeded, extract_app_bundle_path, normalize_display_name,
-        rank_processes, resolve_kill_target, KillTargetResolution, ProcessRecord,
+        rank_processes, resolve_kill_target, KillTargetResolution, ProcessCatalogSnapshot,
+        ProcessRecord, ProcessService,
     };
     use crate::domain::process::RunningProcessKind;
 
@@ -707,5 +799,117 @@ mod tests {
             Some(now_ms.saturating_sub(6_000)),
             Duration::from_secs(5)
         ));
+    }
+
+    #[test]
+    fn search_entries_clears_refreshing_after_direct_build() {
+        let service = ProcessService::new();
+        *service.snapshot.write().expect("snapshot lock should work") = ProcessCatalogSnapshot {
+            entries: Arc::new(Vec::new()),
+            built_at_ms: None,
+            refreshing: true,
+            version: 11,
+        };
+
+        let entries = service
+            .entries_for_search_with(|| Ok(vec![process_record(42, "Arc", "Arc")]))
+            .expect("fallback build should succeed");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].pid, 42);
+        let snapshot = service
+            .snapshot
+            .read()
+            .expect("snapshot lock should work after fallback");
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].pid, 42);
+        assert!(!snapshot.refreshing);
+        assert_eq!(snapshot.version, 12);
+    }
+
+    #[test]
+    fn search_entries_builds_snapshot_when_cache_is_empty() {
+        let service = ProcessService::new();
+
+        let entries = service
+            .entries_for_search_with(|| Ok(vec![process_record(7, "Arc", "Arc")]))
+            .expect("empty cache should build snapshot synchronously");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].pid, 7);
+
+        let snapshot = service
+            .snapshot
+            .read()
+            .expect("snapshot lock should work after synchronous build");
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].pid, 7);
+        assert!(!snapshot.refreshing);
+        assert_eq!(snapshot.version, 1);
+    }
+
+    #[tokio::test]
+    async fn search_running_returns_stale_snapshot_while_async_refresh_is_pending() {
+        let service = ProcessService::new();
+        *service.snapshot.write().expect("snapshot lock should work") = ProcessCatalogSnapshot {
+            entries: Arc::new(vec![process_record(7, "Old", "Old")]),
+            built_at_ms: Some(super::current_time_ms().saturating_sub(20_000)),
+            refreshing: false,
+            version: 3,
+        };
+
+        let entries = service
+            .search_running("old", 5)
+            .expect("stale process snapshot should still return cached results immediately");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].pid, 7);
+
+        let snapshot = service
+            .snapshot
+            .read()
+            .expect("snapshot lock should work after immediate return");
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].pid, 7);
+    }
+
+    #[tokio::test]
+    async fn refresh_now_clears_refreshing_when_background_build_panics() {
+        let service = ProcessService::new();
+
+        let error = service
+            .refresh_now_with(|| -> anyhow::Result<Vec<ProcessRecord>> {
+                panic!("panic during process refresh");
+            })
+            .await
+            .expect_err("panic in refresh task should surface as an error");
+
+        assert!(error
+            .to_string()
+            .contains("failed to join process cache refresh task"));
+        assert!(
+            !service
+                .snapshot
+                .read()
+                .expect("snapshot lock should work after panic")
+                .refreshing
+        );
+    }
+
+    #[test]
+    fn entries_snapshot_recovers_from_poisoned_snapshot_lock() {
+        let service = ProcessService::new();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = service
+                .snapshot
+                .write()
+                .expect("snapshot lock should succeed");
+            panic!("poison process snapshot lock");
+        }));
+
+        let entries = service
+            .entries_snapshot()
+            .expect("poisoned process snapshot lock should recover");
+        assert!(entries.is_empty());
     }
 }

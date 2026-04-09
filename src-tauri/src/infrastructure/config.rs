@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
@@ -391,6 +391,26 @@ pub struct ConfigStore {
 }
 
 impl ConfigStore {
+    fn cached_config_guard(&self) -> MutexGuard<'_, Option<AppConfig>> {
+        match self.cached_config.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!("config cache lock poisoned; recovering cached state");
+                poisoned.into_inner()
+            }
+        }
+    }
+
+    fn cached_workspace_history_guard(&self) -> MutexGuard<'_, Option<WorkspaceHistory>> {
+        match self.cached_workspace_history.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!("workspace history cache lock poisoned; recovering cached state");
+                poisoned.into_inner()
+            }
+        }
+    }
+
     pub fn new() -> Result<Self> {
         let config_dir = Self::config_dir()?;
         std::fs::create_dir_all(&config_dir)?;
@@ -407,7 +427,7 @@ impl ConfigStore {
 
     pub async fn load(&self) -> Result<AppConfig> {
         {
-            let cached = self.cached_config.lock().unwrap();
+            let cached = self.cached_config_guard();
             if let Some(ref config) = *cached {
                 return Ok(config.clone());
             }
@@ -416,7 +436,7 @@ impl ConfigStore {
         if !self.config_path.exists() {
             let default_config = AppConfig::default();
             self.save(&default_config).await?;
-            let mut cached = self.cached_config.lock().unwrap();
+            let mut cached = self.cached_config_guard();
             *cached = Some(default_config.clone());
             return Ok(default_config);
         }
@@ -427,7 +447,7 @@ impl ConfigStore {
 
         let config = parse_config_content(&content)?;
 
-        let mut cached = self.cached_config.lock().unwrap();
+        let mut cached = self.cached_config_guard();
         *cached = Some(config.clone());
         Ok(config)
     }
@@ -437,7 +457,7 @@ impl ConfigStore {
         safe_write(&self.config_path, &content).await?;
 
         // Update cache
-        let mut cached = self.cached_config.lock().unwrap();
+        let mut cached = self.cached_config_guard();
         *cached = Some(config.clone());
 
         Ok(())
@@ -445,7 +465,7 @@ impl ConfigStore {
 
     pub async fn load_workspace_history(&self) -> Result<WorkspaceHistory> {
         {
-            let cached = self.cached_workspace_history.lock().unwrap();
+            let cached = self.cached_workspace_history_guard();
             if let Some(ref history) = *cached {
                 return Ok(history.clone());
             }
@@ -454,7 +474,7 @@ impl ConfigStore {
         if !self.workspace_history_path.exists() {
             let default_history = WorkspaceHistory::default();
             self.save_workspace_history(&default_history).await?;
-            let mut cached = self.cached_workspace_history.lock().unwrap();
+            let mut cached = self.cached_workspace_history_guard();
             *cached = Some(default_history.clone());
             return Ok(default_history);
         }
@@ -469,7 +489,7 @@ impl ConfigStore {
             })?;
         let history = parse_workspace_history_content(&content)?;
 
-        let mut cached = self.cached_workspace_history.lock().unwrap();
+        let mut cached = self.cached_workspace_history_guard();
         *cached = Some(history.clone());
         Ok(history)
     }
@@ -478,7 +498,7 @@ impl ConfigStore {
         let content = serialize_workspace_history_content(history)?;
         safe_write(&self.workspace_history_path, &content).await?;
 
-        let mut cached = self.cached_workspace_history.lock().unwrap();
+        let mut cached = self.cached_workspace_history_guard();
         *cached = Some(history.clone());
         Ok(())
     }
@@ -1844,5 +1864,37 @@ sourceDirectories = ["/tmp/docs"]
         assert_eq!(settings.providers[0].model, "");
         assert_eq!(settings.translation_provider_id, None);
         assert_eq!(settings.question_answer_provider_id, None);
+    }
+
+    #[tokio::test]
+    async fn load_recovers_from_poisoned_config_cache_lock() {
+        let store = ConfigStore {
+            config_path: unique_temp_path("config"),
+            workspace_history_path: unique_temp_path("workspace-history"),
+            cached_config: Mutex::new(Some(AppConfig::default())),
+            cached_workspace_history: Mutex::new(None),
+        };
+
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = store
+                .cached_config
+                .lock()
+                .expect("config cache lock should succeed");
+            panic!("poison config cache lock");
+        }));
+
+        let config = store
+            .load()
+            .await
+            .expect("poisoned config cache lock should recover");
+        assert_eq!(config.shortcuts.toggle_launcher, "Alt+Space");
+    }
+
+    fn unique_temp_path(prefix: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}-{nanos}.toml"))
     }
 }

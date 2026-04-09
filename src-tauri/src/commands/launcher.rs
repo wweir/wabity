@@ -245,6 +245,50 @@ pub fn emit_shortcut_runtime_status(
     .map_err(|error| error.to_string())
 }
 
+fn emit_shortcut_update_events(
+    app: &AppHandle,
+    shortcut_state: &ShortcutRuntimeState,
+    config: crate::infrastructure::config::ShortcutConfig,
+) {
+    if let Err(error) = app.emit("shortcut-updated", config) {
+        tracing::warn!(?error, "failed to emit shortcut-updated event");
+    }
+    if let Err(error) = emit_shortcut_runtime_status(app, shortcut_state) {
+        tracing::warn!(?error, "failed to emit shortcut runtime status event");
+    }
+}
+
+fn rollback_shortcut_update(
+    shortcut_state: &ShortcutRuntimeState,
+    key: ShortcutKey,
+    previous_shortcut: Option<tauri_plugin_global_shortcut::Shortcut>,
+    previous_configured_shortcut: &str,
+    primary_error: &str,
+    restore_error: Option<String>,
+) {
+    let status_message = restore_error.map(|restore_error| {
+        format!(
+            "{primary_error}；恢复旧快捷键（{}）失败：{restore_error}",
+            previous_configured_shortcut
+        )
+    });
+    let restored = previous_shortcut.is_some() && status_message.is_none();
+    let restored_shortcut = if restored { previous_shortcut } else { None };
+    let registration_message = if restored {
+        None
+    } else {
+        status_message.or_else(|| Some(primary_error.to_string()))
+    };
+
+    shortcut_state.set_shortcut(key, restored_shortcut);
+    shortcut_state.set_shortcut_registration_status(
+        key,
+        previous_configured_shortcut.to_string(),
+        restored,
+        registration_message,
+    );
+}
+
 pub async fn set_shortcut(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -256,6 +300,8 @@ pub async fn set_shortcut(
     let next_shortcut = crate::infrastructure::hotkey::parse_shortcut(&shortcut)
         .ok_or_else(|| format!("invalid shortcut: {shortcut}"))?;
 
+    let previous_config = state.config().await.map_err(|error| error.to_string())?;
+    let previous_configured_shortcut = previous_config.get(key).to_string();
     let previous_shortcut = shortcut_state.current_shortcut(key);
 
     if let Some(previous_shortcut) = previous_shortcut {
@@ -264,14 +310,18 @@ pub async fn set_shortcut(
     }
 
     if let Err(error) = crate::infrastructure::hotkey::register_shortcut(&app, next_shortcut) {
-        if let Some(previous_shortcut) = previous_shortcut {
-            let _ = crate::infrastructure::hotkey::register_shortcut(&app, previous_shortcut);
-        }
-        shortcut_state.set_shortcut_registration_status(
+        let restore_error = previous_shortcut.and_then(|previous_shortcut| {
+            crate::infrastructure::hotkey::register_shortcut(&app, previous_shortcut)
+                .err()
+                .map(|restore_error| restore_error.to_string())
+        });
+        rollback_shortcut_update(
+            shortcut_state.inner(),
             key,
-            shortcut.clone(),
-            false,
-            Some(error.to_string()),
+            previous_shortcut,
+            &previous_configured_shortcut,
+            &error.to_string(),
+            restore_error,
         );
         let _ = emit_shortcut_runtime_status(&app, shortcut_state.inner());
         return Err(error.to_string());
@@ -279,14 +329,18 @@ pub async fn set_shortcut(
 
     if let Err(error) = state.update_shortcut(key, &shortcut).await {
         let _ = crate::infrastructure::hotkey::unregister_shortcut(&app, next_shortcut);
-        if let Some(previous_shortcut) = previous_shortcut {
-            let _ = crate::infrastructure::hotkey::register_shortcut(&app, previous_shortcut);
-        }
-        shortcut_state.set_shortcut_registration_status(
+        let restore_error = previous_shortcut.and_then(|previous_shortcut| {
+            crate::infrastructure::hotkey::register_shortcut(&app, previous_shortcut)
+                .err()
+                .map(|restore_error| restore_error.to_string())
+        });
+        rollback_shortcut_update(
+            shortcut_state.inner(),
             key,
-            shortcut.clone(),
-            previous_shortcut.is_some(),
-            Some(error.to_string()),
+            previous_shortcut,
+            &previous_configured_shortcut,
+            &error.to_string(),
+            restore_error,
         );
         let _ = emit_shortcut_runtime_status(&app, shortcut_state.inner());
         return Err(error.to_string());
@@ -296,9 +350,7 @@ pub async fn set_shortcut(
     shortcut_state.set_shortcut_registration_status(key, shortcut.clone(), true, None);
 
     let config = state.config().await.map_err(|error| error.to_string())?;
-    app.emit("shortcut-updated", config)
-        .map_err(|error| error.to_string())?;
-    emit_shortcut_runtime_status(&app, shortcut_state.inner())?;
+    emit_shortcut_update_events(&app, shortcut_state.inner(), config);
 
     Ok(())
 }
@@ -583,5 +635,66 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
                 .map_err(InvokeError::from)
         }),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rollback_shortcut_update;
+    use crate::infrastructure::config::ShortcutKey;
+    use crate::infrastructure::hotkey::parse_shortcut;
+    use crate::state::ShortcutRuntimeState;
+
+    #[test]
+    fn rollback_restores_previous_runtime_status_after_failed_update() {
+        let state = ShortcutRuntimeState::default();
+        let previous_shortcut =
+            parse_shortcut("Alt+Space").expect("previous shortcut should parse in test");
+        state.set_shortcut(ShortcutKey::ToggleLauncher, Some(previous_shortcut));
+
+        rollback_shortcut_update(
+            &state,
+            ShortcutKey::ToggleLauncher,
+            Some(previous_shortcut),
+            "Alt+Space",
+            "failed to save shortcut",
+            None,
+        );
+
+        let snapshot = state.shortcut_runtime_status();
+        assert_eq!(
+            state.current_shortcut(ShortcutKey::ToggleLauncher),
+            Some(previous_shortcut)
+        );
+        assert_eq!(snapshot.toggle_launcher.configured_shortcut, "Alt+Space");
+        assert!(snapshot.toggle_launcher.registered);
+        assert_eq!(snapshot.toggle_launcher.message, None);
+    }
+
+    #[test]
+    fn rollback_clears_runtime_shortcut_when_restore_fails() {
+        let state = ShortcutRuntimeState::default();
+        let previous_shortcut =
+            parse_shortcut("Alt+Space").expect("previous shortcut should parse in test");
+        state.set_shortcut(ShortcutKey::ToggleLauncher, Some(previous_shortcut));
+
+        rollback_shortcut_update(
+            &state,
+            ShortcutKey::ToggleLauncher,
+            Some(previous_shortcut),
+            "Alt+Space",
+            "failed to save shortcut",
+            Some("shortcut remained unavailable".to_string()),
+        );
+
+        let snapshot = state.shortcut_runtime_status();
+        assert_eq!(state.current_shortcut(ShortcutKey::ToggleLauncher), None);
+        assert_eq!(snapshot.toggle_launcher.configured_shortcut, "Alt+Space");
+        assert!(!snapshot.toggle_launcher.registered);
+        assert!(snapshot
+            .toggle_launcher
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("恢复旧快捷键")));
     }
 }

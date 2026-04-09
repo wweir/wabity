@@ -120,10 +120,7 @@ export async function resolveCurrentWindowLabel(): Promise<string | null> {
 	return currentWindowLabelPromise;
 }
 
-export async function resizeLauncherWindow(size: {
-	width: number;
-	height: number;
-}): Promise<void> {
+export async function resizeLauncherWindow(size: { width: number; height: number }): Promise<void> {
 	if (!canUseTauriInvoke()) {
 		return;
 	}

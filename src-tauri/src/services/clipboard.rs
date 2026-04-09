@@ -97,8 +97,9 @@ impl ClipboardService {
         }
 
         prune_recent_entries(&mut state.entries);
-        let snapshot = build_snapshot(&state.entries);
-        self.persist_and_emit_locked(&state.entries, &snapshot)
+        let (entries_to_persist, snapshot) = cloned_entries_and_snapshot(&state.entries);
+        drop(state);
+        self.persist_and_emit(&entries_to_persist, &snapshot)
             .await?;
         Ok(snapshot)
     }
@@ -111,8 +112,9 @@ impl ClipboardService {
             bail!("clipboard history entry not found: {entry_id}");
         }
 
-        let snapshot = build_snapshot(&state.entries);
-        self.persist_and_emit_locked(&state.entries, &snapshot)
+        let (entries_to_persist, snapshot) = cloned_entries_and_snapshot(&state.entries);
+        drop(state);
+        self.persist_and_emit(&entries_to_persist, &snapshot)
             .await?;
         Ok(snapshot)
     }
@@ -136,8 +138,9 @@ impl ClipboardService {
             expires_at: Instant::now() + SUPPRESSED_CLIPBOARD_WRITE_TTL,
         });
         mark_entry_seen(&mut state.entries, &entry.text, now_ms);
-        let snapshot = build_snapshot(&state.entries);
-        self.persist_and_emit_locked(&state.entries, &snapshot)
+        let (entries_to_persist, snapshot) = cloned_entries_and_snapshot(&state.entries);
+        drop(state);
+        self.persist_and_emit(&entries_to_persist, &snapshot)
             .await?;
         Ok(snapshot)
     }
@@ -182,21 +185,31 @@ impl ClipboardService {
             return Ok(());
         }
 
-        let snapshot = build_snapshot(&state.entries);
-        self.persist_and_emit_locked(&state.entries, &snapshot)
-            .await
+        let (entries_to_persist, snapshot) = cloned_entries_and_snapshot(&state.entries);
+        drop(state);
+        self.persist_and_emit(&entries_to_persist, &snapshot).await
     }
 
-    async fn persist_and_emit_locked(
+    async fn persist_and_emit(
         &self,
         entries: &[ClipboardHistoryEntry],
         snapshot: &ClipboardHistorySnapshot,
     ) -> Result<()> {
         self.store.save_entries(entries).await?;
-        self.app_handle
+        if let Err(error) = self
+            .app_handle
             .emit(CLIPBOARD_HISTORY_UPDATED_EVENT, snapshot.clone())
-            .context("failed to emit clipboard history update event")
+        {
+            tracing::warn!(?error, "failed to emit clipboard history update event");
+        }
+        Ok(())
     }
+}
+
+fn cloned_entries_and_snapshot(
+    entries: &[ClipboardHistoryEntry],
+) -> (Vec<ClipboardHistoryEntry>, ClipboardHistorySnapshot) {
+    (entries.to_vec(), build_snapshot(entries))
 }
 
 fn sanitize_entries(entries: Vec<ClipboardHistoryEntry>) -> Vec<ClipboardHistoryEntry> {

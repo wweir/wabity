@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
-    ffi::OsStr,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError},
@@ -53,8 +52,16 @@ struct WorkspaceWatcherHandle {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FileRecord {
     path: String,
-    file_name: String,
-    parent: String,
+}
+
+impl FileRecord {
+    fn file_name(&self) -> &str {
+        file_name_from_record_path(&self.path)
+    }
+
+    fn parent(&self) -> &str {
+        parent_from_record_path(&self.path)
+    }
 }
 
 impl FileSearchService {
@@ -87,19 +94,20 @@ impl FileSearchService {
     }
 
     fn workspace_index(&self, workspace_root: &Path) -> Result<Arc<WorkspaceIndexHandle>> {
+        let workspace_root = normalize_workspace_cache_key(workspace_root);
         {
             let mut write_guard = self
                 .cache
                 .write()
                 .map_err(|_| anyhow::anyhow!("failed to update file index cache state"))?;
             let access_tick = next_access_tick(&mut write_guard);
-            if let Some(handle) = write_guard.workspaces.get(workspace_root) {
+            if let Some(handle) = write_guard.workspaces.get(&workspace_root) {
                 handle.mark_access(access_tick);
                 return Ok(Arc::clone(handle));
             }
         }
 
-        let built = Arc::new(WorkspaceIndexHandle::build(workspace_root)?);
+        let built = Arc::new(WorkspaceIndexHandle::build(&workspace_root)?);
         if !built.has_watcher() {
             tracing::warn!(
                 "file search watcher unavailable; caching a static workspace snapshot instead"
@@ -112,14 +120,15 @@ impl FileSearchService {
             .map_err(|_| anyhow::anyhow!("failed to update file index cache state"))?;
         let access_tick = next_access_tick(&mut write_guard);
 
-        if let Some(existing) = write_guard.workspaces.get(workspace_root) {
+        if let Some(existing) = write_guard.workspaces.get(&workspace_root) {
+            built.shutdown_watcher();
             existing.mark_access(access_tick);
             return Ok(Arc::clone(existing));
         }
 
         cache_workspace_index(
             &mut write_guard,
-            workspace_root,
+            &workspace_root,
             Arc::clone(&built),
             access_tick,
         );
@@ -211,17 +220,24 @@ impl FileSearchService {
         &self,
         workspace_root: &Path,
     ) -> Result<Option<Arc<Vec<FileRecord>>>> {
+        let workspace_root = normalize_workspace_cache_key(workspace_root);
         let mut write_guard = self
             .cache
             .write()
             .map_err(|_| anyhow::anyhow!("failed to update file index cache state"))?;
         let access_tick = next_access_tick(&mut write_guard);
-        let Some(handle) = write_guard.workspaces.get(workspace_root) else {
+        let Some(handle) = write_guard.workspaces.get(&workspace_root) else {
             return Ok(None);
         };
         handle.mark_access(access_tick);
         handle.snapshot().map(Some)
     }
+}
+
+fn normalize_workspace_cache_key(workspace_root: &Path) -> PathBuf {
+    workspace_root
+        .canonicalize()
+        .unwrap_or_else(|_| normalize_update_path(workspace_root))
 }
 
 impl WorkspaceIndexHandle {
@@ -240,7 +256,31 @@ impl WorkspaceIndexHandle {
             .read()
             .map_err(|_| anyhow::anyhow!("failed to read workspace file snapshot"))?
             .len();
-        tracing::info!(count, "workspace file index ready");
+        let total_path_bytes = records
+            .lock()
+            .map(|guard| {
+                guard
+                    .values()
+                    .map(|record| record.path.len())
+                    .sum::<usize>()
+            })
+            .unwrap_or_default();
+        let (estimated_file_name_bytes, estimated_parent_bytes) = {
+            let snapshot_guard = snapshot
+                .read()
+                .map_err(|_| anyhow::anyhow!("failed to read workspace file snapshot"))?;
+            (
+                total_file_name_bytes(snapshot_guard.as_ref()),
+                total_parent_bytes(snapshot_guard.as_ref()),
+            )
+        };
+        tracing::info!(
+            count,
+            total_path_bytes,
+            estimated_file_name_bytes,
+            estimated_parent_bytes,
+            "workspace file index ready"
+        );
 
         Ok(Self {
             snapshot,
@@ -275,6 +315,12 @@ impl WorkspaceIndexHandle {
         if let Some(watcher) = watcher {
             watcher.shutdown();
         }
+    }
+}
+
+impl Drop for WorkspaceIndexHandle {
+    fn drop(&mut self) {
+        self.shutdown_watcher();
     }
 }
 
@@ -436,14 +482,16 @@ fn collect_update_targets(
         };
 
         for path in event.paths {
-            if !path.starts_with(root) || should_skip(&path) {
+            let Some(update_target) = classify_update_target(root, &path) else {
                 continue;
-            }
-
-            if path.exists() {
-                rescan_targets.insert(path);
-            } else {
-                remove_targets.insert(path);
+            };
+            match update_target {
+                UpdateTarget::Rescan(target) => {
+                    rescan_targets.insert(target);
+                }
+                UpdateTarget::Remove(target) => {
+                    remove_targets.insert(target);
+                }
             }
         }
     }
@@ -451,6 +499,82 @@ fn collect_update_targets(
     prune_nested_paths(&mut remove_targets);
     prune_nested_paths(&mut rescan_targets);
     (remove_targets, rescan_targets)
+}
+
+enum UpdateTarget {
+    Remove(PathBuf),
+    Rescan(PathBuf),
+}
+
+fn classify_update_target(root: &Path, path: &Path) -> Option<UpdateTarget> {
+    let path = normalize_update_path(path);
+
+    if let Some(scope) = ignore_rule_rescan_scope(root, &path) {
+        return Some(UpdateTarget::Rescan(scope));
+    }
+
+    if !path.starts_with(root) || should_skip(&path) {
+        return None;
+    }
+
+    if path.exists() {
+        Some(UpdateTarget::Rescan(path.to_path_buf()))
+    } else {
+        Some(UpdateTarget::Remove(path.to_path_buf()))
+    }
+}
+
+fn normalize_update_path(path: &Path) -> PathBuf {
+    if let Ok(canonical_path) = path.canonicalize() {
+        return canonical_path;
+    }
+
+    if let (Some(parent), Some(file_name)) = (path.parent(), path.file_name()) {
+        if let Ok(canonical_parent) = parent.canonicalize() {
+            return canonical_parent.join(file_name);
+        }
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            Component::RootDir | Component::Prefix(_) | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        normalized
+    }
+}
+
+fn ignore_rule_rescan_scope(root: &Path, path: &Path) -> Option<PathBuf> {
+    if !path.starts_with(root) {
+        return None;
+    }
+
+    if path
+        .file_name()
+        .is_some_and(|name| name == ".gitignore" || name == ".ignore")
+    {
+        return Some(path.parent().unwrap_or(root).to_path_buf());
+    }
+
+    let exclude_path = root.join(".git").join("info").join("exclude");
+    if path == exclude_path {
+        return Some(root.to_path_buf());
+    }
+
+    None
 }
 
 fn prune_nested_paths(paths: &mut BTreeSet<PathBuf>) {
@@ -594,15 +718,6 @@ fn build_record_for_path(path: &Path) -> Option<FileRecord> {
 
     Some(FileRecord {
         path: path.to_string_lossy().into_owned(),
-        file_name: path
-            .file_name()
-            .unwrap_or_else(|| OsStr::new(""))
-            .to_string_lossy()
-            .into_owned(),
-        parent: path
-            .parent()
-            .map(|parent| parent.to_string_lossy().into_owned())
-            .unwrap_or_default(),
     })
 }
 
@@ -697,8 +812,8 @@ fn rank_matches(entries: &[FileRecord], needle: &str, limit: usize) -> Vec<FileS
                 &mut ranked,
                 FileSearchMatch {
                     path: entry.path.clone(),
-                    file_name: entry.file_name.clone(),
-                    parent: entry.parent.clone(),
+                    file_name: entry.file_name().to_string(),
+                    parent: entry.parent().to_string(),
                     score: saturating_score(score),
                 },
                 normalized_limit,
@@ -718,7 +833,7 @@ fn rank_matches(entries: &[FileRecord], needle: &str, limit: usize) -> Vec<FileS
 fn score_entry(matcher: &SkimMatcherV2, entry: &FileRecord, needle: &str) -> Option<i64> {
     let path_score = matcher.fuzzy_match(&entry.path, needle);
     let file_name_score = matcher
-        .fuzzy_match(&entry.file_name, needle)
+        .fuzzy_match(entry.file_name(), needle)
         .map(|score| score.saturating_add(100));
 
     match (file_name_score, path_score) {
@@ -727,6 +842,24 @@ fn score_entry(matcher: &SkimMatcherV2, entry: &FileRecord, needle: &str) -> Opt
         (None, Some(path_score)) => Some(path_score),
         (None, None) => None,
     }
+}
+
+fn file_name_from_record_path(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+fn parent_from_record_path(path: &str) -> &str {
+    path.rsplit_once(['/', '\\'])
+        .map(|(parent, _)| parent)
+        .unwrap_or_default()
+}
+
+fn total_file_name_bytes(records: &[FileRecord]) -> usize {
+    records.iter().map(|record| record.file_name().len()).sum()
+}
+
+fn total_parent_bytes(records: &[FileRecord]) -> usize {
+    records.iter().map(|record| record.parent().len()).sum()
 }
 
 fn saturating_score(score: i64) -> u16 {
@@ -748,7 +881,7 @@ fn push_ranked(ranked: &mut Vec<FileSearchMatch>, candidate: FileSearchMatch, li
 }
 
 fn should_skip(path: &Path) -> bool {
-    let path_string = path.to_string_lossy();
+    let path_string = path.to_string_lossy().replace('\\', "/");
 
     [
         "/.git/",
@@ -865,29 +998,29 @@ mod tests {
 
     use super::{
         apply_path_updates, build_initial_record_map, cache_workspace_index, collect_path_records,
-        eviction_root, filter_records_to_snapshot, filter_records_with_workspace_rules,
-        is_file_search_ready, rank_matches, snapshot_from_records_map, FileRecord, FileSearchCache,
-        FileSearchService, WorkspaceIndexHandle,
+        collect_update_targets, eviction_root, filter_records_to_snapshot,
+        filter_records_with_workspace_rules, is_file_search_ready, rank_matches, should_skip,
+        snapshot_from_records_map, FileRecord, FileSearchCache, FileSearchService,
+        WorkspaceIndexHandle,
     };
+    use notify::Event;
     use std::{
         collections::{BTreeSet, HashMap},
         path::PathBuf,
         sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
     };
 
+    fn record(path: &str) -> FileRecord {
+        FileRecord {
+            path: path.to_string(),
+        }
+    }
+
     #[test]
     fn fuzzy_search_prefers_close_filename_match() {
         let entries = vec![
-            FileRecord {
-                path: "/Users/demo/Documents/wabity-plan.md".to_string(),
-                file_name: "wabity-plan.md".to_string(),
-                parent: "/Users/demo/Documents".to_string(),
-            },
-            FileRecord {
-                path: "/Users/demo/Desktop/random-note.txt".to_string(),
-                file_name: "random-note.txt".to_string(),
-                parent: "/Users/demo/Desktop".to_string(),
-            },
+            record("/Users/demo/Documents/wabity-plan.md"),
+            record("/Users/demo/Desktop/random-note.txt"),
         ];
 
         let matches = rank_matches(&entries, "wbp", 5);
@@ -900,16 +1033,8 @@ mod tests {
     #[test]
     fn fuzzy_search_handles_mixed_case_query_without_panicking() {
         let entries = vec![
-            FileRecord {
-                path: "/Users/demo/Documents/aaA.md".to_string(),
-                file_name: "aaA.md".to_string(),
-                parent: "/Users/demo/Documents".to_string(),
-            },
-            FileRecord {
-                path: "/Users/demo/Documents/alpha.md".to_string(),
-                file_name: "alpha.md".to_string(),
-                parent: "/Users/demo/Documents".to_string(),
-            },
+            record("/Users/demo/Documents/aaA.md"),
+            record("/Users/demo/Documents/alpha.md"),
         ];
 
         let matches = rank_matches(&entries, "aA", 5);
@@ -944,7 +1069,7 @@ mod tests {
         );
 
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].file_name, "kept.txt");
+        assert_eq!(records[0].file_name(), "kept.txt");
 
         let _ = fs::remove_file(&inside_file);
         let _ = fs::remove_file(&outside_file);
@@ -952,17 +1077,16 @@ mod tests {
     }
 
     #[test]
+    fn should_skip_recognizes_windows_style_ignored_directories() {
+        assert!(should_skip(Path::new(r"C:\repo\node_modules\pkg\index.js")));
+        assert!(should_skip(Path::new(r"C:\repo\target\debug\app.exe")));
+        assert!(should_skip(Path::new(r"C:\repo\.git\config")));
+    }
+
+    #[test]
     fn spotlight_candidates_respect_cached_snapshot_filtering() {
-        let kept = FileRecord {
-            path: "/workspace/kept.txt".to_string(),
-            file_name: "kept.txt".to_string(),
-            parent: "/workspace".to_string(),
-        };
-        let ignored = FileRecord {
-            path: "/workspace/dist/ignored.txt".to_string(),
-            file_name: "ignored.txt".to_string(),
-            parent: "/workspace/dist".to_string(),
-        };
+        let kept = record("/workspace/kept.txt");
+        let ignored = record("/workspace/dist/ignored.txt");
 
         let filtered =
             filter_records_to_snapshot(vec![kept.clone(), ignored], std::slice::from_ref(&kept));
@@ -989,16 +1113,8 @@ mod tests {
 
         let filtered = filter_records_with_workspace_rules(
             vec![
-                FileRecord {
-                    path: kept_file.to_string_lossy().into_owned(),
-                    file_name: "kept.txt".to_string(),
-                    parent: root.to_string_lossy().into_owned(),
-                },
-                FileRecord {
-                    path: ignored_file.to_string_lossy().into_owned(),
-                    file_name: "ignored.txt".to_string(),
-                    parent: ignored_dir.to_string_lossy().into_owned(),
-                },
+                record(&kept_file.to_string_lossy()),
+                record(&ignored_file.to_string_lossy()),
             ],
             &root,
         );
@@ -1006,7 +1122,7 @@ mod tests {
         assert_eq!(
             filtered
                 .iter()
-                .map(|record| record.file_name.as_str())
+                .map(FileRecord::file_name)
                 .collect::<Vec<_>>(),
             vec!["kept.txt"]
         );
@@ -1066,11 +1182,7 @@ mod tests {
 
         let records = Arc::new(Mutex::new(HashMap::from([(
             initial_file.to_string_lossy().into_owned(),
-            FileRecord {
-                path: initial_file.to_string_lossy().into_owned(),
-                file_name: "initial.txt".to_string(),
-                parent: root.to_string_lossy().into_owned(),
-            },
+            record(&initial_file.to_string_lossy()),
         )])));
         let snapshot = Arc::new(RwLock::new(Arc::new(snapshot_from_records_map(
             &records.lock().expect("failed to lock records"),
@@ -1091,7 +1203,7 @@ mod tests {
         let added_snapshot = snapshot.read().expect("failed to read snapshot");
         assert!(added_snapshot
             .iter()
-            .any(|record| record.file_name == "added.txt"));
+            .any(|record| record.file_name() == "added.txt"));
         drop(added_snapshot);
 
         fs::remove_file(&initial_file).expect("failed to remove initial file");
@@ -1107,7 +1219,7 @@ mod tests {
         let removed_snapshot = snapshot.read().expect("failed to read snapshot");
         assert!(!removed_snapshot
             .iter()
-            .any(|record| record.file_name == "initial.txt"));
+            .any(|record| record.file_name() == "initial.txt"));
 
         let _ = fs::remove_file(&added_file);
         let _ = fs::remove_dir_all(&root);
@@ -1155,6 +1267,190 @@ mod tests {
                 .iter()
                 .any(|record| record.path == ignored_file.to_string_lossy()),
             "ignored file should stay excluded after incremental refresh"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn gitignore_update_rebuilds_parent_scope_and_removes_now_ignored_files() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let raw_root =
+            std::env::temp_dir().join(format!("wabity-file-search-gitignore-add-{unique}"));
+        let ignored_dir = raw_root.join("dist");
+
+        fs::create_dir_all(&ignored_dir).expect("failed to create ignored directory");
+        fs::create_dir_all(raw_root.join(".git")).expect("failed to create git directory");
+        let root = raw_root
+            .canonicalize()
+            .expect("canonicalize workspace root");
+        let ignored_file = root.join("dist").join("ignored.txt");
+        fs::write(&ignored_file, "hello").expect("failed to write ignored file");
+
+        let records = Arc::new(Mutex::new(
+            build_initial_record_map(&root).expect("initial index should build without ignore"),
+        ));
+        let snapshot = Arc::new(RwLock::new(Arc::new(snapshot_from_records_map(
+            &records.lock().expect("failed to lock records"),
+        ))));
+        assert!(snapshot
+            .read()
+            .expect("failed to read initial snapshot")
+            .iter()
+            .any(|record| record.path == ignored_file.to_string_lossy()));
+
+        let gitignore_path = root.join(".gitignore");
+        fs::write(&gitignore_path, "dist/\n").expect("failed to write gitignore");
+        let (_, rescan_targets) = collect_update_targets(
+            &root,
+            vec![Ok(Event {
+                kind: notify::EventKind::Modify(notify::event::ModifyKind::Data(
+                    notify::event::DataChange::Content,
+                )),
+                paths: vec![gitignore_path.clone()],
+                attrs: Default::default(),
+            })],
+        );
+
+        assert_eq!(rescan_targets, BTreeSet::from([root.clone()]));
+        apply_path_updates(
+            &root,
+            &records,
+            &snapshot,
+            &BTreeSet::new(),
+            &rescan_targets,
+        )
+        .expect("gitignore scope refresh should succeed");
+
+        let updated_snapshot = snapshot.read().expect("failed to read updated snapshot");
+        assert!(
+            !updated_snapshot
+                .iter()
+                .any(|record| record.path == ignored_file.to_string_lossy()),
+            "newly ignored file should be removed after gitignore refresh"
+        );
+
+        let _ = fs::remove_dir_all(&raw_root);
+    }
+
+    #[test]
+    fn gitignore_removal_rebuilds_parent_scope_and_restores_unignored_files() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let raw_root =
+            std::env::temp_dir().join(format!("wabity-file-search-gitignore-remove-{unique}"));
+        let ignored_dir = raw_root.join("dist");
+
+        fs::create_dir_all(&ignored_dir).expect("failed to create ignored directory");
+        fs::create_dir_all(raw_root.join(".git")).expect("failed to create git directory");
+        let root = raw_root
+            .canonicalize()
+            .expect("canonicalize workspace root");
+        let ignored_file = root.join("dist").join("ignored.txt");
+        let gitignore_path = root.join(".gitignore");
+        fs::write(&gitignore_path, "dist/\n").expect("failed to write gitignore");
+        fs::write(&ignored_file, "hello").expect("failed to write ignored file");
+
+        let records = Arc::new(Mutex::new(
+            build_initial_record_map(&root).expect("initial index should respect gitignore"),
+        ));
+        let snapshot = Arc::new(RwLock::new(Arc::new(snapshot_from_records_map(
+            &records.lock().expect("failed to lock records"),
+        ))));
+        assert!(
+            !snapshot
+                .read()
+                .expect("failed to read initial snapshot")
+                .iter()
+                .any(|record| record.path == ignored_file.to_string_lossy()),
+            "ignored file should be absent before removing gitignore"
+        );
+
+        fs::remove_file(&gitignore_path).expect("failed to remove gitignore");
+        let (_, rescan_targets) = collect_update_targets(
+            &root,
+            vec![Ok(Event {
+                kind: notify::EventKind::Remove(notify::event::RemoveKind::File),
+                paths: vec![gitignore_path.clone()],
+                attrs: Default::default(),
+            })],
+        );
+
+        assert_eq!(rescan_targets, BTreeSet::from([root.clone()]));
+        apply_path_updates(
+            &root,
+            &records,
+            &snapshot,
+            &BTreeSet::new(),
+            &rescan_targets,
+        )
+        .expect("gitignore removal refresh should succeed");
+
+        let updated_snapshot = snapshot.read().expect("failed to read updated snapshot");
+        assert!(
+            updated_snapshot
+                .iter()
+                .any(|record| record.path == ignored_file.to_string_lossy()),
+            "file should be restored after gitignore removal"
+        );
+
+        let _ = fs::remove_dir_all(&raw_root);
+    }
+
+    #[test]
+    fn deleted_directory_event_with_dotdot_path_removes_nested_records() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("wabity-file-search-remove-dir-{unique}"));
+        let nested_dir = root.join("nested");
+        let nested_file = nested_dir.join("a.txt");
+
+        fs::create_dir_all(&nested_dir).expect("failed to create nested directory");
+        fs::write(&nested_file, "hello").expect("failed to write nested file");
+
+        let records = Arc::new(Mutex::new(HashMap::from([(
+            nested_file.to_string_lossy().into_owned(),
+            record(&nested_file.to_string_lossy()),
+        )])));
+        let snapshot = Arc::new(RwLock::new(Arc::new(snapshot_from_records_map(
+            &records.lock().expect("failed to lock records"),
+        ))));
+
+        fs::remove_dir_all(&nested_dir).expect("failed to remove nested directory");
+        let (remove_targets, rescan_targets) = collect_update_targets(
+            &root,
+            vec![Ok(Event {
+                kind: notify::EventKind::Remove(notify::event::RemoveKind::Folder),
+                paths: vec![root.join("missing/../nested")],
+                attrs: Default::default(),
+            })],
+        );
+
+        assert!(rescan_targets.is_empty());
+        assert_eq!(remove_targets, BTreeSet::from([nested_dir.clone()]));
+
+        apply_path_updates(
+            &root,
+            &records,
+            &snapshot,
+            &remove_targets,
+            &BTreeSet::new(),
+        )
+        .expect("directory remove update should succeed");
+
+        let updated_snapshot = snapshot.read().expect("failed to read updated snapshot");
+        assert!(
+            !updated_snapshot
+                .iter()
+                .any(|record| record.path == nested_file.to_string_lossy()),
+            "deleted directory contents should be removed after path normalization"
         );
 
         let _ = fs::remove_dir_all(&root);
@@ -1240,5 +1536,40 @@ mod tests {
         assert_eq!(cache.workspaces.len(), 1);
         assert!(cache.workspaces.contains_key(workspace_root));
         assert!(!handle.has_watcher());
+    }
+
+    #[test]
+    fn workspace_index_reuses_cache_for_equivalent_root_paths() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("wabity-file-search-cache-root-{unique}"));
+        fs::create_dir_all(&root).expect("failed to create workspace root");
+        fs::write(root.join("a.txt"), "hello").expect("failed to write workspace file");
+
+        let service = FileSearchService::new().expect("file search service should initialize");
+        let canonical_root = root.canonicalize().expect("canonicalize workspace root");
+        let dotted_root = canonical_root.join(".");
+
+        let first = service
+            .workspace_index(&canonical_root)
+            .expect("workspace index should build");
+        let second = service
+            .workspace_index(&dotted_root)
+            .expect("equivalent workspace root should reuse cache");
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(
+            service
+                .cache
+                .read()
+                .expect("failed to read file index cache")
+                .workspaces
+                .len(),
+            1
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

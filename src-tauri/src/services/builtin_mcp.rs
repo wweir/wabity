@@ -133,6 +133,11 @@ impl BuiltinMcpServerService {
     }
 
     pub async fn start(&self) {
+        if self.inner.status.read().await.running {
+            tracing::debug!("built-in MCP server start skipped because it is already running");
+            return;
+        }
+
         let listener =
             match tokio::net::TcpListener::bind((INTERNAL_HTTP_HOST, INTERNAL_HTTP_PORT)).await {
                 Ok(listener) => listener,
@@ -708,7 +713,7 @@ pub(super) fn build_tool_pending_result(structured_content: Value, message: Stri
             }
         ],
         "structuredContent": structured_content,
-        "isError": true
+        "isError": false
     })
 }
 
@@ -805,4 +810,27 @@ fn text_response(status: StatusCode, text: &str) -> Response<Body> {
 
 fn mcp_protocol_version_header() -> HeaderName {
     HeaderName::from_static(MCP_PROTOCOL_VERSION_HEADER)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::build_tool_pending_result;
+
+    #[test]
+    fn pending_tool_result_is_not_marked_as_error() {
+        let result = build_tool_pending_result(
+            json!({
+                "pendingIndexing": true,
+                "partialResult": {
+                    "query": "test"
+                }
+            }),
+            "pending".to_string(),
+        );
+
+        assert_eq!(result["isError"], json!(false));
+        assert_eq!(result["structuredContent"]["pendingIndexing"], json!(true));
+    }
 }
