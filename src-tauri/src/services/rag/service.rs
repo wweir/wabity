@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeSet,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -8,6 +8,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use ignore::WalkBuilder;
 use notify::{event::ModifyKind, Event, EventKind, RecursiveMode, Watcher};
 use tauri::AppHandle;
 use tokio::{
@@ -19,6 +20,7 @@ use crate::domain::{
     rag::{RagRuntimePhase, RagRuntimeStatus, RagScanResult},
     settings::{LlmSettings, RagSettings},
 };
+use crate::services::document_extract::is_supported_document_file;
 
 use super::{
     config::{
@@ -26,11 +28,12 @@ use super::{
         rag_settings_disabled, resolve_rag_config, PathStartsWithAny,
     },
     indexing::{
-        build_path_update_plan, execute_path_update_plans, initialize_runtime_storage,
-        rebuild_index_locked,
+        build_path_update_plan, execute_path_update_plans, extend_recent_rag_warnings,
+        format_error_chain, format_rag_warning_for_path, initialize_runtime_storage,
+        rebuild_index_locked, PathUpdateRuntimeContext,
     },
     model::{RagRuntimeContext, RagRuntimeInputs, RagRuntimeStartMode, WATCH_DEBOUNCE_WINDOW},
-    status::{set_runtime_status, set_runtime_status_for_generation},
+    status::{set_runtime_status, set_runtime_status_for_generation, RuntimeStatusUpdate},
     storage::{clear_index, clear_metadata_store, load_metadata_records_for_paths},
 };
 
@@ -66,17 +69,17 @@ impl RagIndexService {
         let next_inputs = RagRuntimeInputs::from_settings(&settings, &llm_settings);
         let previous_inputs = self.runtime_inputs.read().await.clone();
         if previous_inputs.as_ref() == Some(&next_inputs) {
+            let runtime_in_error = self.runtime_status.read().await.phase == RagRuntimePhase::Error;
             let runtime_is_active = self
                 .runtime
                 .read()
                 .await
                 .as_ref()
                 .is_some_and(|handle| !handle.is_finished());
-            if runtime_is_active {
+            if runtime_is_active && !runtime_in_error {
                 return;
             }
 
-            let runtime_in_error = self.runtime_status.read().await.phase == RagRuntimePhase::Error;
             if !runtime_in_error {
                 return;
             }
@@ -120,7 +123,10 @@ impl RagIndexService {
                     generation,
                     RagRuntimePhase::Error,
                     Default::default(),
-                    Some(error.to_string()),
+                    RuntimeStatusUpdate {
+                        last_error: Some(error.to_string()),
+                        ..RuntimeStatusUpdate::default()
+                    },
                 )
                 .await;
                 tracing::error!(?error, "RAG watcher loop exited unexpectedly");
@@ -130,6 +136,21 @@ impl RagIndexService {
 
     pub async fn runtime_status(&self) -> RagRuntimeStatus {
         self.runtime_status.read().await.clone()
+    }
+
+    #[cfg(test)]
+    pub(super) async fn seed_runtime_state_for_test(
+        &self,
+        inputs: RagRuntimeInputs,
+        phase: RagRuntimePhase,
+        handle: JoinHandle<()>,
+    ) {
+        *self.runtime_inputs.write().await = Some(inputs);
+        *self.runtime_status.write().await = RagRuntimeStatus {
+            phase,
+            ..RagRuntimeStatus::default()
+        };
+        *self.runtime.write().await = Some(handle);
     }
 
     pub async fn scan_sources(
@@ -173,7 +194,7 @@ pub(super) async fn run_watch_loop(
                     runtime_context.generation,
                     RagRuntimePhase::Idle,
                     Default::default(),
-                    None,
+                    RuntimeStatusUpdate::default(),
                 )
                 .await;
                 return Ok(());
@@ -185,7 +206,10 @@ pub(super) async fn run_watch_loop(
                 runtime_context.generation,
                 RagRuntimePhase::Error,
                 Default::default(),
-                Some(error.to_string()),
+                RuntimeStatusUpdate {
+                    last_error: Some(error.to_string()),
+                    ..RuntimeStatusUpdate::default()
+                },
             )
             .await;
             return Err(error);
@@ -260,7 +284,10 @@ pub(super) async fn run_watch_loop(
                 runtime_context.generation,
                 RagRuntimePhase::Error,
                 Default::default(),
-                Some(error.to_string()),
+                RuntimeStatusUpdate {
+                    last_error: Some(error.to_string()),
+                    ..RuntimeStatusUpdate::default()
+                },
             )
             .await;
             tracing::warn!(?error, "failed to process RAG watcher events");
@@ -268,7 +295,7 @@ pub(super) async fn run_watch_loop(
     }
 }
 
-async fn process_event_batch(
+pub(super) async fn process_event_batch(
     app_handle: Option<&AppHandle>,
     data_dir: &Path,
     resolved: &super::model::ResolvedRagConfig,
@@ -301,18 +328,24 @@ async fn process_event_batch(
         }
 
         for path in event.paths {
-            if !path.starts_with_any(&resolved.source_roots) {
+            let stable_path = normalize_event_path_for_planning(&path);
+            if !stable_path.starts_with_any(&resolved.source_roots) {
                 continue;
             }
 
-            if path.exists() && path.is_dir() {
+            if stable_path.exists() && stable_path.is_dir() {
                 if should_force_full_rescan_for_existing_directory(event.kind) {
                     full_rescan = true;
+                } else if matches!(
+                    event.kind,
+                    EventKind::Create(notify::event::CreateKind::Folder)
+                ) {
+                    changed_paths.extend(collect_indexable_paths_in_directory(&stable_path));
                 }
                 continue;
             }
 
-            changed_paths.insert(path);
+            changed_paths.insert(stable_path);
         }
     }
 
@@ -339,7 +372,7 @@ async fn process_event_batch(
                 total_file_count: changed_paths.len(),
                 ..Default::default()
             },
-            None,
+            RuntimeStatusUpdate::default(),
         )
         .await;
     }
@@ -351,7 +384,7 @@ async fn process_event_batch(
             runtime_guard,
             RagRuntimePhase::Idle,
             Default::default(),
-            None,
+            RuntimeStatusUpdate::default(),
         )
         .await;
         return Ok(());
@@ -369,28 +402,47 @@ async fn process_event_batch(
     .await
     .context("failed to join RAG metadata batch lookup task")??;
     let resolved_for_batch = resolved.clone();
-    let plans = tokio::task::spawn_blocking(move || {
-        changed_paths
-            .into_iter()
-            .map(|path| {
-                let normalized_path = super::config::normalize_path_string(&path);
-                let stored_record = stored_records.get(&normalized_path).cloned();
-                build_path_update_plan(&resolved_for_batch, &path, stored_record)
-                    .map(|plan| (path, plan))
-            })
-            .collect::<Result<Vec<_>>>()
+    let (plans, planning_update) = tokio::task::spawn_blocking(move || {
+        let mut plans = Vec::new();
+        let mut planning_update = RuntimeStatusUpdate::default();
+        for path in changed_paths {
+            let normalized_path = super::config::normalize_path_string(&path);
+            let stored_record = stored_records.get(&normalized_path).cloned();
+            match build_path_update_plan(&resolved_for_batch, &path, stored_record) {
+                Ok(plan) => plans.push((path, plan)),
+                Err(error) => {
+                    tracing::warn!(
+                        ?error,
+                        path = %path.display(),
+                        "failed to build RAG watcher update plan"
+                    );
+                    planning_update.warning_count = planning_update.warning_count.saturating_add(1);
+                    extend_recent_rag_warnings(
+                        &mut planning_update.recent_warnings,
+                        [format_rag_warning_for_path(
+                            &path,
+                            &format_error_chain(&error),
+                        )],
+                    );
+                }
+            }
+        }
+        (plans, planning_update)
     })
     .await
-    .context("failed to join RAG path batch planning task")??;
+    .context("failed to join RAG path batch planning task")?;
 
-    execute_path_update_plans(
-        app_handle,
+    let status_update = execute_path_update_plans(
+        PathUpdateRuntimeContext {
+            app_handle,
+            runtime_status,
+            runtime_guard,
+        },
         &database_path,
         &metadata_path,
         resolved,
-        runtime_status,
-        runtime_guard,
         plans,
+        planning_update,
     )
     .await?;
 
@@ -400,7 +452,7 @@ async fn process_event_batch(
         runtime_guard,
         RagRuntimePhase::Idle,
         Default::default(),
-        None,
+        status_update,
     )
     .await;
     Ok(())
@@ -418,4 +470,80 @@ pub(super) fn should_ignore_event_for_indexing(event: &Event) -> bool {
 
 pub(super) fn should_force_full_rescan_for_existing_directory(kind: EventKind) -> bool {
     matches!(kind, EventKind::Modify(ModifyKind::Name(_)))
+}
+
+pub(super) fn normalize_event_path_for_planning(path: &Path) -> PathBuf {
+    if let Ok(canonical_path) = path.canonicalize() {
+        return canonical_path;
+    }
+
+    if let (Some(parent), Some(file_name)) = (path.parent(), path.file_name()) {
+        if let Ok(canonical_parent) = parent.canonicalize() {
+            return canonical_parent.join(file_name);
+        }
+    }
+
+    lexical_normalize_path(path)
+}
+
+fn lexical_normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            Component::RootDir | Component::Prefix(_) | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+
+    if normalized.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        normalized
+    }
+}
+
+pub(super) fn collect_indexable_paths_in_directory(path: &Path) -> BTreeSet<PathBuf> {
+    let mut paths = BTreeSet::new();
+    let mut walker = WalkBuilder::new(path);
+    walker
+        .hidden(false)
+        .ignore(false)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false);
+
+    for entry in walker.build() {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    path = %path.display(),
+                    "failed to walk created RAG directory"
+                );
+                continue;
+            }
+        };
+        let entry_path = entry.path();
+        if entry_path == path
+            || !entry
+                .file_type()
+                .map(|kind| kind.is_file())
+                .unwrap_or(false)
+            || !is_supported_document_file(entry_path)
+        {
+            continue;
+        }
+        paths.insert(entry_path.to_path_buf());
+    }
+
+    paths
 }

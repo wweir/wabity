@@ -20,16 +20,13 @@ pub(super) async fn request_responses_turn(
         request_args.api_key,
         "LLM provider base URL",
     )?;
-    let mut body = json!({
-        "model": request_args.model,
-        "instructions": request_args.instructions,
-        "input": request_args.input,
-        "stream": on_text_delta.is_some(),
-    });
-    if !request_args.tool_catalog.request_tools.is_empty() {
-        body["tools"] = Value::Array(request_args.tool_catalog.request_tools.clone());
-        body["parallel_tool_calls"] = Value::Bool(true);
-    }
+    let mut body = build_responses_request_body(
+        request_args.model,
+        request_args.instructions,
+        &request_args.input,
+        &request_args.tool_catalog.request_tools,
+        on_text_delta.is_some(),
+    );
     if let Some(previous_response_id) = request_args.previous_response_id {
         body["previous_response_id"] = Value::String(previous_response_id.to_string());
     }
@@ -54,6 +51,26 @@ pub(super) async fn request_responses_turn(
             )
             .await
     }
+}
+
+fn build_responses_request_body(
+    model: &str,
+    instructions: &str,
+    input: &Value,
+    request_tools: &[Value],
+    stream: bool,
+) -> Value {
+    let mut body = json!({
+        "model": model,
+        "instructions": instructions,
+        "input": input,
+        "stream": stream,
+    });
+    if !request_tools.is_empty() {
+        body["tools"] = Value::Array(request_tools.to_vec());
+        body["parallel_tool_calls"] = Value::Bool(true);
+    }
+    body
 }
 
 pub(super) fn has_mcp_approval_request(payload: &Value) -> bool {
@@ -180,7 +197,8 @@ pub(super) fn should_retry_without_mcp_tools(
             .request_tools
             .iter()
             .any(super::tool_catalog::is_mcp_tool_definition)
-        && is_provider_transport_or_server_error(error)
+        && (is_provider_transport_or_server_error(error)
+            || is_provider_tool_compatibility_error(error))
 }
 
 pub(super) fn should_retry_without_all_tools(
@@ -190,7 +208,8 @@ pub(super) fn should_retry_without_all_tools(
 ) -> bool {
     !disabled_all_tools_for_compat
         && !tool_catalog.request_tools.is_empty()
-        && is_provider_transport_or_server_error(error)
+        && (is_provider_transport_or_server_error(error)
+            || is_provider_tool_compatibility_error(error))
 }
 
 pub(super) fn is_budget_exceeded_error(error: &anyhow::Error) -> bool {
@@ -219,6 +238,44 @@ fn is_provider_transport_or_server_error(error: &anyhow::Error) -> bool {
         || message.to_ascii_lowercase().contains("context canceled")
 }
 
+fn is_provider_tool_compatibility_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    if !message.contains("(400 ") {
+        return false;
+    }
+
+    let mentions_tooling = [
+        "parallel_tool_calls",
+        "tool_choice",
+        "function calling",
+        "function call",
+        "tool call",
+        "\"tools\"",
+        " tools ",
+        "mcp",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle));
+    if !mentions_tooling {
+        return false;
+    }
+
+    [
+        "unsupported",
+        "not supported",
+        "does not support",
+        "not support",
+        "unknown field",
+        "unexpected field",
+        "invalid field",
+        "extra inputs",
+        "not allowed",
+        "invalid input",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+}
+
 fn extract_mcp_call_input_detail(item: &Value) -> Option<String> {
     item.get("arguments")
         .or_else(|| item.get("input"))
@@ -239,4 +296,42 @@ fn extract_mcp_call_output_detail(item: &Value) -> Option<String> {
         .or_else(|| item.get("result"))
         .or_else(|| item.get("content"))
         .map(json_value_to_pretty_text)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::build_responses_request_body;
+
+    #[test]
+    fn responses_request_omits_tool_fields_when_catalog_is_empty() {
+        let body = build_responses_request_body(
+            "test-model",
+            "follow instructions",
+            &json!([{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}]),
+            &[],
+            false,
+        );
+
+        assert_eq!(body["model"], json!("test-model"));
+        assert_eq!(body["stream"], json!(false));
+        assert!(body.get("tools").is_none());
+        assert!(body.get("parallel_tool_calls").is_none());
+    }
+
+    #[test]
+    fn responses_request_preserves_tool_fields_when_catalog_is_present() {
+        let body = build_responses_request_body(
+            "test-model",
+            "follow instructions",
+            &json!([{"role": "user", "content": [{"type": "input_text", "text": "hello"}]}]),
+            &[json!({"type": "function", "name": "wabity.rag.query"})],
+            true,
+        );
+
+        assert_eq!(body["stream"], json!(true));
+        assert_eq!(body["parallel_tool_calls"], json!(true));
+        assert_eq!(body["tools"].as_array().map(Vec::len), Some(1));
+    }
 }

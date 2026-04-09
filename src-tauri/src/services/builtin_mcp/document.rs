@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
@@ -217,8 +220,14 @@ async fn execute_read_file_tool(
         .context("read_file_lines.path 不能为空")?;
     let line_start = value_as_usize(&arguments, "line_start")?.max(1);
     let line_count = value_as_usize(&arguments, "line_count")?.clamp(1, MAX_READ_FILE_LINES);
-    let resolved_path =
-        prepare_readable_document_path(runtime_config, path, "read_file_lines", "文本文件").await?;
+    let resolved_path = prepare_readable_document_path(
+        runtime_config,
+        path,
+        "read_file_lines",
+        "文本文件",
+        Some(MAX_READ_FILE_BYTES),
+    )
+    .await?;
 
     let text = tokio::task::spawn_blocking({
         let resolved_path = resolved_path.clone();
@@ -284,9 +293,14 @@ async fn execute_read_document_excerpt_tool(
         bail!("read_document_excerpt.chunk_index 不能为负数");
     }
 
-    let resolved_path =
-        prepare_readable_document_path(runtime_config, path, "read_document_excerpt", "已索引文档")
-            .await?;
+    let resolved_path = prepare_readable_document_path(
+        runtime_config,
+        path,
+        "read_document_excerpt",
+        "已索引文档",
+        Some(MAX_READ_FILE_BYTES),
+    )
+    .await?;
 
     let excerpt = execute_with_timeout(
         READ_DOCUMENT_EXCERPT_TOOL_NAME,
@@ -343,6 +357,7 @@ async fn prepare_readable_document_path(
     path: &str,
     tool_name: &str,
     target_label: &str,
+    max_bytes: Option<u64>,
 ) -> Result<PathBuf> {
     let allowed_roots = rag::collect_document_access_roots(
         Path::new(&runtime_config.workspace_root),
@@ -352,44 +367,90 @@ async fn prepare_readable_document_path(
     let metadata = fs::metadata(&resolved_path)
         .await
         .with_context(|| format!("无法读取文件 metadata: {}", resolved_path.display()))?;
-    if metadata.len() > MAX_READ_FILE_BYTES {
-        bail!(
-            "文件过大，{tool_name} 只允许读取不超过 {} KB 的{target_label}",
-            MAX_READ_FILE_BYTES / 1024
-        );
-    }
+    ensure_document_size_limit(&metadata, tool_name, target_label, max_bytes)?;
 
     Ok(resolved_path)
 }
 
 fn resolve_readable_file_path(path: &str, allowed_roots: &[PathBuf]) -> Result<PathBuf> {
-    let candidate = if let Some(remainder) = path.strip_prefix("~/") {
-        dirs::home_dir()
-            .map(|home| home.join(remainder))
-            .context("无法展开 ~/ 路径，因为 HOME 不可用")?
-    } else {
-        let candidate = PathBuf::from(path);
-        if candidate.is_absolute() {
-            candidate
-        } else {
-            allowed_roots
-                .first()
-                .cloned()
-                .context("当前没有可访问的文档根目录")?
-                .join(candidate)
+    let candidates = candidate_document_paths(path, allowed_roots)?;
+    let enforce_unique_match = !Path::new(path).is_absolute() && !path.starts_with("~/");
+    let mut resolved_matches = Vec::new();
+    let mut last_not_found = None;
+
+    for candidate in candidates {
+        match candidate.canonicalize() {
+            Ok(resolved) => {
+                ensure_file(&resolved)?;
+                if !rag::path_is_within_roots(&resolved, allowed_roots) {
+                    bail!(
+                        "文件路径超出允许范围，只能读取当前 workspace 或显式配置的 RAG 目录: {}",
+                        resolved.display()
+                    );
+                }
+                if !resolved_matches
+                    .iter()
+                    .any(|existing| existing == &resolved)
+                {
+                    resolved_matches.push(resolved);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                last_not_found = Some(candidate);
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("无法解析文件路径: {}", candidate.display()));
+            }
         }
-    };
-    let resolved = candidate
-        .canonicalize()
-        .with_context(|| format!("无法解析文件路径: {}", candidate.display()))?;
-    ensure_file(&resolved)?;
-    if !rag::path_is_within_roots(&resolved, allowed_roots) {
-        bail!(
-            "文件路径超出允许范围，只能读取当前 workspace 或显式配置的 RAG 目录: {}",
-            resolved.display()
-        );
     }
-    Ok(resolved)
+
+    if resolved_matches.len() == 1 {
+        return Ok(resolved_matches.remove(0));
+    }
+
+    if enforce_unique_match && resolved_matches.len() > 1 {
+        let matches = resolved_matches
+            .iter()
+            .map(|resolved| resolved.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        bail!("相对路径命中多个允许目录中的文件，请改用绝对路径或更精确路径: {matches}");
+    }
+
+    let missing_path = last_not_found
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| path.to_string());
+    bail!("无法解析文件路径: {missing_path}")
+}
+
+fn candidate_document_paths(path: &str, allowed_roots: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    if let Some(remainder) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
+        let candidate = dirs::home_dir()
+            .map(|home| home.join(remainder))
+            .context("无法展开 ~/ 路径，因为 HOME 不可用")?;
+        return Ok(vec![candidate]);
+    }
+
+    let candidate = PathBuf::from(path);
+    if candidate.is_absolute() {
+        return Ok(vec![candidate]);
+    }
+
+    if allowed_roots.is_empty() {
+        bail!("当前没有可访问的文档根目录");
+    }
+
+    let mut seen = HashSet::new();
+    Ok(allowed_roots
+        .iter()
+        .filter(|root| seen.insert(normalize_allowed_root_key(root)))
+        .map(|root| root.join(&candidate))
+        .collect())
+}
+
+fn normalize_allowed_root_key(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn ensure_file(path: &Path) -> Result<()> {
@@ -415,4 +476,162 @@ fn value_as_i32(arguments: &Value, key: &str) -> Result<i32> {
         .and_then(Value::as_i64)
         .and_then(|value| i32::try_from(value).ok())
         .with_context(|| format!("{key} 必须是整数"))
+}
+
+fn ensure_document_size_limit(
+    metadata: &std::fs::Metadata,
+    tool_name: &str,
+    target_label: &str,
+    max_bytes: Option<u64>,
+) -> Result<()> {
+    let Some(max_bytes) = max_bytes else {
+        return Ok(());
+    };
+    if metadata.len() > max_bytes {
+        bail!(
+            "文件过大，{tool_name} 只允许读取不超过 {} KB 的{target_label}",
+            max_bytes / 1024
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::{
+        candidate_document_paths, ensure_document_size_limit, resolve_readable_file_path,
+        MAX_READ_FILE_BYTES,
+    };
+
+    fn write_temp_file(size: usize) -> std::path::PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("wabity-builtin-mcp-document-{unique}.txt"));
+        fs::write(&path, vec![b'a'; size]).expect("failed to write temp file");
+        path
+    }
+
+    #[test]
+    fn read_document_excerpt_rejects_oversized_files() {
+        let path = write_temp_file((MAX_READ_FILE_BYTES as usize) + 1);
+        let metadata = fs::metadata(&path).expect("failed to read temp file metadata");
+
+        let error = ensure_document_size_limit(
+            &metadata,
+            "read_document_excerpt",
+            "已索引文档",
+            Some(MAX_READ_FILE_BYTES),
+        )
+        .expect_err("document excerpt should keep the size limit");
+        assert!(error.to_string().contains("文件过大"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn read_file_lines_still_rejects_oversized_files() {
+        let path = write_temp_file((MAX_READ_FILE_BYTES as usize) + 1);
+        let metadata = fs::metadata(&path).expect("failed to read temp file metadata");
+
+        let error = ensure_document_size_limit(
+            &metadata,
+            "read_file_lines",
+            "文本文件",
+            Some(MAX_READ_FILE_BYTES),
+        )
+        .expect_err("raw file read should keep the size limit");
+        assert!(error.to_string().contains("文件过大"));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn relative_candidates_cover_all_allowed_roots() {
+        let allowed_roots = vec![PathBuf::from("/workspace"), PathBuf::from("/docs")];
+
+        let candidates = candidate_document_paths("guides/intro.md", &allowed_roots)
+            .expect("paths should build");
+
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from("/workspace/guides/intro.md"),
+                PathBuf::from("/docs/guides/intro.md"),
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_style_home_prefix_is_expanded() {
+        let home = dirs::home_dir().expect("home directory should exist");
+        let candidates = candidate_document_paths("~\\guides\\intro.md", &[])
+            .expect("windows-style home path should expand");
+
+        assert_eq!(candidates, vec![home.join("guides\\intro.md")]);
+    }
+
+    #[test]
+    fn equivalent_allowed_roots_do_not_create_false_ambiguity() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("wabity-builtin-mcp-document-dedup-{unique}"));
+        let workspace_root = root.join("workspace");
+        let file_path = workspace_root.join("guides/intro.md");
+        fs::create_dir_all(file_path.parent().expect("guides parent")).expect("create guides");
+        fs::write(&file_path, "workspace").expect("write workspace file");
+        let workspace_root = workspace_root
+            .canonicalize()
+            .expect("canonicalize workspace root");
+        let dotted_workspace_root = workspace_root.join(".");
+        let file_path = file_path
+            .canonicalize()
+            .expect("canonicalize workspace file");
+
+        let resolved =
+            resolve_readable_file_path("guides/intro.md", &[workspace_root, dotted_workspace_root])
+                .expect("equivalent roots should resolve uniquely");
+
+        assert_eq!(resolved, file_path);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn resolve_readable_file_path_rejects_ambiguous_relative_matches() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("wabity-builtin-mcp-document-roots-{unique}"));
+        let workspace_root = root.join("workspace");
+        let docs_root = root.join("docs");
+        fs::create_dir_all(workspace_root.join("guides")).expect("create workspace guides");
+        fs::create_dir_all(docs_root.join("guides")).expect("create docs guides");
+        fs::write(workspace_root.join("guides/intro.md"), "workspace")
+            .expect("write workspace file");
+        fs::write(docs_root.join("guides/intro.md"), "docs").expect("write docs file");
+        let workspace_root = workspace_root
+            .canonicalize()
+            .expect("canonicalize workspace root");
+        let docs_root = docs_root.canonicalize().expect("canonicalize docs root");
+
+        let error = resolve_readable_file_path("guides/intro.md", &[workspace_root, docs_root])
+            .expect_err("ambiguous relative path should be rejected");
+
+        assert!(error
+            .to_string()
+            .contains("相对路径命中多个允许目录中的文件"));
+
+        let _ = fs::remove_dir_all(root);
+    }
 }

@@ -16,19 +16,21 @@ use crate::{
     services::document_extract::DocumentKind,
 };
 
-pub(crate) const RAG_DB_DIR_NAME: &str = "rag-lancedb";
+pub(crate) const RAG_DB_DIR_NAME: &str = "rag-index";
 pub(crate) const RAG_METADATA_DB_FILE_NAME: &str = "rag-metadata.sqlite3";
-pub(crate) const RAG_TABLE_NAME: &str = "chunks";
 pub(crate) const RAG_LEXICAL_TABLE_NAME: &str = "rag_chunk_fts";
-pub(crate) const MAX_TEXT_FILE_BYTES: u64 = 50 * 1024 * 1024;
+pub(crate) const MAX_TEXT_FILE_BYTES_PLAIN_TEXT: u64 = 20 * 1024 * 1024;
+pub(crate) const MAX_TEXT_FILE_BYTES_MARKDOWN: u64 = 20 * 1024 * 1024;
+pub(crate) const MAX_TEXT_FILE_BYTES_DOCX: u64 = 16 * 1024 * 1024;
+pub(crate) const MAX_TEXT_FILE_BYTES_PDF: u64 = 8 * 1024 * 1024;
 pub(crate) const CHUNK_MAX_CHARS: usize = 1_200;
 pub(crate) const CHUNK_OVERLAP_CHARS: usize = 200;
 pub(crate) const MARKDOWN_CHUNK_TARGET_CHARS: usize = 350;
 pub(crate) const MARKDOWN_CHUNK_HARD_MAX_CHARS: usize = 550;
 pub(crate) const MARKDOWN_CHUNK_OVERLAP_CHARS: usize = 80;
 pub(crate) const EMBEDDING_BATCH_SIZE_MIN: usize = 1;
-pub(crate) const EMBEDDING_BATCH_SIZE_DEFAULT: usize = 8;
-pub(crate) const EMBEDDING_BATCH_SIZE_MAX: usize = 128;
+pub(crate) const EMBEDDING_BATCH_SIZE_DEFAULT: usize = 4;
+pub(crate) const EMBEDDING_BATCH_SIZE_MAX: usize = 32;
 pub(crate) const EMBEDDING_BATCH_CHAR_BUDGET: usize =
     CHUNK_MAX_CHARS * EMBEDDING_BATCH_SIZE_DEFAULT;
 pub(crate) const EMBEDDING_BATCH_GROWTH_SUCCESS_STREAK: usize = 3;
@@ -39,9 +41,7 @@ pub(crate) const WATCH_DEBOUNCE_WINDOW: Duration = Duration::from_millis(250);
 pub(crate) const MAX_DELETE_FILTER_PATHS: usize = 128;
 pub(crate) const MAX_METADATA_BATCH_PATHS: usize = 256;
 pub(crate) const MAX_TEXT_FINGERPRINT_FILTERS: usize = 256;
-pub(crate) const MAX_STREAMING_REINDEX_CONCURRENCY: usize = 4;
-pub(crate) const VECTOR_INDEX_REBUILD_MIN_DIRTY_CHUNKS: usize = 256;
-pub(crate) const VECTOR_INDEX_REBUILD_MIN_DIRTY_DELETES: usize = 8;
+pub(crate) const MAX_STREAMING_REINDEX_CONCURRENCY: usize = 2;
 
 #[derive(Debug, Clone)]
 pub(crate) struct RagChunk {
@@ -129,9 +129,12 @@ pub(crate) struct RagIndexedFileVersion {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedRagFile {
+    pub(crate) path: PathBuf,
     pub(crate) record: RagIndexedFileRecord,
-    pub(crate) chunks: Vec<PreparedRagChunk>,
+    pub(crate) prepared_chunks: Vec<PreparedRagChunk>,
     pub(crate) version_id: String,
+    pub(crate) chunk_count: usize,
+    pub(crate) warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

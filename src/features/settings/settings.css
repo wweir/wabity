@@ -290,6 +290,15 @@
 	border-top: 1px solid var(--border-soft);
 }
 
+.settings-rag-warning-panel {
+	display: grid;
+	gap: 6px;
+	padding: 10px 12px;
+	border: 1px solid color-mix(in srgb, var(--warning-strong) 24%, var(--border-soft));
+	border-radius: 12px;
+	background: color-mix(in srgb, var(--warning-soft) 28%, var(--surface-card));
+}
+
 .settings-rag-summary-section-header {
 	display: grid;
 	gap: 3px;
@@ -312,6 +321,20 @@
 .settings-rag-scan-value-path {
 	font-size: 12px;
 	line-height: 1.45;
+	overflow-wrap: anywhere;
+}
+
+.settings-rag-warning-list {
+	display: grid;
+	gap: 6px;
+	margin: 0;
+	padding-left: 18px;
+	color: var(--text-strong);
+	font-size: 12px;
+	line-height: 1.45;
+}
+
+.settings-rag-warning-item {
 	overflow-wrap: anywhere;
 }
 

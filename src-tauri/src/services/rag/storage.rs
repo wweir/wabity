@@ -1,42 +1,40 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::Arc,
     time::Duration,
 };
 
-use anyhow::{Context, Result};
-use arrow_array::{
-    types::Float32Type, Array, FixedSizeListArray, Float32Array, Int32Array, RecordBatch,
-    RecordBatchIterator, RecordBatchReader, StringArray,
-};
-use arrow_schema::{DataType, Field, Schema};
-use futures::TryStreamExt;
-use lancedb::{
-    connect,
-    index::Index,
-    query::{ExecutableQuery, QueryBase, Select},
-    table::Table,
-    Connection as LanceConnection,
-};
-use rusqlite::{params, Connection};
+use anyhow::{bail, Context, Result};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
 use super::{
     config::{now_unix_ms, parse_document_kind, parse_heading_path},
     embedding::text_fingerprint,
     model::{
-        PreparedRagFile, RagChunk, RagChunkState, RagIndexedFileRecord, RagIndexedFileVersion,
+        PreparedRagChunk, RagChunk, RagChunkState, RagIndexedFileRecord, RagIndexedFileVersion,
         RagLexicalSearchHit, ResolvedRagConfig, MAX_DELETE_FILTER_PATHS, MAX_METADATA_BATCH_PATHS,
-        MAX_TEXT_FINGERPRINT_FILTERS, RAG_LEXICAL_TABLE_NAME, RAG_TABLE_NAME,
-        VECTOR_INDEX_REBUILD_MIN_DIRTY_CHUNKS, VECTOR_INDEX_REBUILD_MIN_DIRTY_DELETES,
+        MAX_TEXT_FINGERPRINT_FILTERS, RAG_LEXICAL_TABLE_NAME,
     },
 };
 use crate::services::rag_query;
 
-#[derive(Debug, Clone)]
-struct StoredChunkVector {
-    chunk_reuse_key: String,
-    vector: Vec<f32>,
+#[cfg(test)]
+use super::config::normalize_path_string;
+#[cfg(test)]
+use crate::services::document_extract::extractor_fingerprint_for_path;
+
+pub(super) const RAG_CHUNK_DB_FILE_NAME: &str = "rag-chunks.sqlite3";
+pub(super) const RAG_VECTOR_INDEX_FILE_NAME: &str = "rag-chunks.usearch";
+const RAG_VECTOR_INDEX_DIRTY_FILE_NAME: &str = "rag-chunks.dirty";
+
+pub(crate) fn build_usearch_index_options(dimensions: usize) -> IndexOptions {
+    IndexOptions {
+        dimensions: dimensions.max(1),
+        metric: MetricKind::Cos,
+        quantization: ScalarKind::F32,
+        ..Default::default()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -46,47 +44,57 @@ struct CachedTextVector {
     vector: Vec<f32>,
 }
 
+#[derive(Debug, Clone)]
+struct ActiveVectorRow {
+    vector_key: u64,
+    vector: Vec<f32>,
+}
+
 #[derive(Clone)]
 pub(super) struct RagVectorStore {
-    db: LanceConnection,
-    table: Option<Table>,
+    database_path: PathBuf,
     pub(super) created_table: bool,
     pub(super) index_dirty: bool,
-    dirty_chunk_count: usize,
-    dirty_delete_count: usize,
 }
 
 impl RagVectorStore {
     pub(super) async fn open(database_path: &Path) -> Result<Self> {
-        let db = connect(database_path.to_string_lossy().as_ref())
-            .execute()
+        tokio::fs::create_dir_all(database_path)
             .await
-            .context("failed to open LanceDB database")?;
-        let table = open_existing_rag_table(&db).await?;
+            .with_context(|| {
+                format!(
+                    "failed to create RAG database directory: {}",
+                    database_path.display()
+                )
+            })?;
+
+        let has_active_chunks = chunk_store_has_active_chunks(database_path)?;
+        let index_dirty = has_active_chunks
+            && (vector_index_is_marked_dirty(database_path)
+                || !vector_index_is_usable(database_path)?);
         Ok(Self {
-            db,
-            table,
+            database_path: database_path.to_path_buf(),
             created_table: false,
-            index_dirty: false,
-            dirty_chunk_count: 0,
-            dirty_delete_count: 0,
+            index_dirty,
         })
     }
 
-    pub(super) fn mark_index_dirty_for_chunks(&mut self, chunk_count: usize) {
+    pub(super) fn mark_index_dirty_for_chunks(&mut self, _chunk_count: usize) {
+        if let Err(error) = mark_vector_index_dirty(&self.database_path) {
+            tracing::warn!(?error, "failed to persist RAG vector index dirty marker");
+        }
         self.index_dirty = true;
-        self.dirty_chunk_count = self.dirty_chunk_count.saturating_add(chunk_count);
     }
 
     pub(super) fn mark_index_dirty_for_delete(&mut self) {
+        if let Err(error) = mark_vector_index_dirty(&self.database_path) {
+            tracing::warn!(?error, "failed to persist RAG vector index dirty marker");
+        }
         self.index_dirty = true;
-        self.dirty_delete_count = self.dirty_delete_count.saturating_add(1);
     }
 
     pub(super) fn should_rebuild_index(&self) -> bool {
-        self.created_table
-            || self.dirty_chunk_count >= VECTOR_INDEX_REBUILD_MIN_DIRTY_CHUNKS
-            || self.dirty_delete_count >= VECTOR_INDEX_REBUILD_MIN_DIRTY_DELETES
+        self.index_dirty
     }
 
     pub(super) async fn add_chunks(
@@ -97,20 +105,88 @@ impl RagVectorStore {
         if chunks.is_empty() {
             return Ok(());
         }
+        if chunks.len() != vectors.len() {
+            bail!(
+                "chunk/vector length mismatch: {} chunks vs {} vectors",
+                chunks.len(),
+                vectors.len()
+            );
+        }
 
-        let batch_reader = build_record_batch_reader(chunks, vectors)?;
-        if let Some(table) = &self.table {
-            table.add(batch_reader).execute().await.with_context(|| {
-                format!("failed to append {} chunk(s) into LanceDB", chunks.len())
-            })?;
-        } else {
-            let created = self
-                .db
-                .create_table(RAG_TABLE_NAME, batch_reader)
-                .execute()
-                .await
-                .context("failed to create RAG LanceDB table")?;
-            self.table = Some(created);
+        let mut connection = open_chunk_store_connection(&self.database_path)?;
+        let was_empty = chunk_store_row_count(&connection)? == 0;
+        let transaction = connection
+            .transaction()
+            .context("failed to open rag chunk insert transaction")?;
+        {
+            let mut statement = transaction
+                .prepare(
+                    "
+                    INSERT INTO rag_chunks (
+                        id,
+                        source_root,
+                        absolute_path,
+                        version_id,
+                        embedding_fingerprint,
+                        document_kind,
+                        chunk_state,
+                        chunk_index,
+                        line_start,
+                        line_end,
+                        paragraph_line_start,
+                        page_start,
+                        page_end,
+                        heading_path_json,
+                        anchor_label,
+                        chunk_reuse_key,
+                        text_fingerprint,
+                        text,
+                        vector_blob,
+                        vector_dimensions
+                    ) VALUES (
+                        ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                        ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20
+                    )
+                    ",
+                )
+                .context("failed to prepare rag chunk insert statement")?;
+
+            for (chunk, vector) in chunks.iter().zip(vectors.iter()) {
+                let heading_path_json = serde_json::to_string(&chunk.heading_path)
+                    .context("failed to serialize heading path metadata")?;
+                statement
+                    .execute(params![
+                        &chunk.id,
+                        &chunk.source_root,
+                        &chunk.absolute_path,
+                        &chunk.version_id,
+                        &chunk.embedding_fingerprint,
+                        chunk.document_kind.as_str(),
+                        chunk.chunk_state.as_str(),
+                        chunk.chunk_index,
+                        chunk.line_start,
+                        chunk.line_end,
+                        chunk.paragraph_line_start,
+                        chunk.page_start,
+                        chunk.page_end,
+                        heading_path_json,
+                        chunk.anchor_label.as_deref(),
+                        &chunk.chunk_reuse_key,
+                        &chunk.text_fingerprint,
+                        &chunk.text,
+                        serialize_vector(vector),
+                        i64::try_from(vector.len()).unwrap_or(i64::MAX),
+                    ])
+                    .with_context(|| {
+                        format!("failed to insert RAG chunk row: {}", chunk.absolute_path)
+                    })?;
+            }
+        }
+        transaction
+            .commit()
+            .context("failed to commit rag chunk insert transaction")?;
+
+        if was_empty {
             self.created_table = true;
         }
         self.mark_index_dirty_for_chunks(chunks.len());
@@ -118,14 +194,13 @@ impl RagVectorStore {
     }
 
     pub(super) async fn delete_where(&mut self, filter: &str) -> Result<()> {
-        let Some(table) = &self.table else {
-            return Ok(());
-        };
-        table
-            .delete(filter)
-            .await
-            .with_context(|| format!("failed to delete LanceDB rows with filter: {filter}"))?;
-        self.mark_index_dirty_for_delete();
+        let connection = open_chunk_store_connection(&self.database_path)?;
+        let affected_rows = connection
+            .execute(&format!("DELETE FROM rag_chunks WHERE {filter}"), [])
+            .with_context(|| format!("failed to delete rag chunk rows with filter: {filter}"))?;
+        if affected_rows > 0 {
+            self.mark_index_dirty_for_delete();
+        }
         Ok(())
     }
 
@@ -134,21 +209,24 @@ impl RagVectorStore {
         filter: &str,
         chunk_state: RagChunkState,
     ) -> Result<()> {
-        let Some(table) = &self.table else {
-            return Ok(());
-        };
-        table
-            .update()
-            .only_if(filter)
-            .column("chunk_state", format!("'{}'", chunk_state.as_str()))
-            .execute()
-            .await
+        let connection = open_chunk_store_connection(&self.database_path)?;
+        let affected_rows = connection
+            .execute(
+                &format!(
+                    "UPDATE rag_chunks SET chunk_state = '{}' WHERE {filter}",
+                    chunk_state.as_str()
+                ),
+                [],
+            )
             .with_context(|| {
                 format!(
-                    "failed to update LanceDB chunk_state to {} with filter: {filter}",
+                    "failed to update rag chunk_state to {} with filter: {filter}",
                     chunk_state.as_str()
                 )
             })?;
+        if affected_rows > 0 {
+            self.mark_index_dirty_for_delete();
+        }
         Ok(())
     }
 
@@ -157,34 +235,35 @@ impl RagVectorStore {
         absolute_path: &str,
         chunk_state: RagChunkState,
     ) -> Result<HashMap<String, Vec<f32>>> {
-        let Some(table) = &self.table else {
-            return Ok(HashMap::new());
-        };
-
-        let filter = format!(
-            "absolute_path = '{}' AND chunk_state = '{}'",
-            escape_sql_literal(absolute_path),
-            chunk_state.as_str()
-        );
-        let stream = table
-            .query()
-            .only_if(filter.as_str())
-            .select(Select::columns(&["chunk_reuse_key", "vector"]))
-            .execute()
-            .await
+        let connection = open_chunk_store_connection(&self.database_path)?;
+        let mut statement = connection
+            .prepare(
+                "
+                SELECT chunk_reuse_key, vector_blob, vector_dimensions
+                FROM rag_chunks
+                WHERE absolute_path = ?1 AND chunk_state = ?2
+                ",
+            )
             .with_context(|| {
-                format!("failed to load existing chunk vectors for path: {absolute_path}")
+                format!("failed to prepare chunk vector query for path: {absolute_path}")
             })?;
-        let batches = stream
-            .try_collect::<Vec<_>>()
-            .await
-            .context("failed to collect chunk reuse batches")?;
+        let mut rows = statement
+            .query(params![absolute_path, chunk_state.as_str()])
+            .with_context(|| {
+                format!("failed to execute chunk vector query for path: {absolute_path}")
+            })?;
 
         let mut vectors = HashMap::new();
-        for batch in batches {
-            for chunk in parse_chunk_vector_batch(&batch)? {
-                vectors.entry(chunk.chunk_reuse_key).or_insert(chunk.vector);
-            }
+        while let Some(row) = rows
+            .next()
+            .context("failed to step rag chunk vector rows")?
+        {
+            let chunk_reuse_key: String = row.get(0)?;
+            let vector_blob: Vec<u8> = row.get(1)?;
+            let vector_dimensions = read_vector_dimensions(row, 2)?;
+            vectors
+                .entry(chunk_reuse_key)
+                .or_insert(deserialize_vector(&vector_blob, vector_dimensions)?);
         }
         Ok(vectors)
     }
@@ -194,9 +273,6 @@ impl RagVectorStore {
         embedding_fingerprint: &str,
         texts: &[String],
     ) -> Result<HashMap<String, Vec<f32>>> {
-        let Some(table) = &self.table else {
-            return Ok(HashMap::new());
-        };
         if texts.is_empty() {
             return Ok(HashMap::new());
         }
@@ -208,44 +284,52 @@ impl RagVectorStore {
             .collect::<HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
+        let connection = open_chunk_store_connection(&self.database_path)?;
         let mut cached_vectors = HashMap::new();
 
-        for text_fingerprint_batch in text_fingerprints.chunks(MAX_TEXT_FINGERPRINT_FILTERS) {
-            let filter = format!(
-                "embedding_fingerprint = '{}' AND text_fingerprint IN ({})",
-                escape_sql_literal(embedding_fingerprint),
-                text_fingerprint_batch
-                    .iter()
-                    .map(|fingerprint| format!("'{}'", escape_sql_literal(fingerprint)))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+        for batch in text_fingerprints.chunks(MAX_TEXT_FINGERPRINT_FILTERS) {
+            let placeholders = repeat_sql_placeholders(batch.len(), 2);
+            let sql = format!(
+                "
+                SELECT text_fingerprint, text, vector_blob, vector_dimensions
+                FROM rag_chunks
+                WHERE embedding_fingerprint = ?1
+                  AND text_fingerprint IN ({placeholders})
+                "
             );
-            let stream = table
-                .query()
-                .only_if(filter.as_str())
-                .select(Select::columns(&["text_fingerprint", "text", "vector"]))
-                .execute()
-                .await
+            let mut statement = connection
+                .prepare(&sql)
+                .context("failed to prepare cached rag vector query")?;
+            let params = rusqlite::params_from_iter(
+                std::iter::once(embedding_fingerprint).chain(batch.iter().map(String::as_str)),
+            );
+            let mut rows = statement
+                .query(params)
                 .with_context(|| {
                     format!(
-                        "failed to load cached RAG vectors for embedding fingerprint: {embedding_fingerprint}"
+                        "failed to execute cached rag vector query for embedding fingerprint: {embedding_fingerprint}"
                     )
                 })?;
-            let batches = stream
-                .try_collect::<Vec<_>>()
-                .await
-                .context("failed to collect cached RAG vector batches")?;
 
-            for batch in batches {
-                for cached in parse_text_vector_batch(&batch)? {
-                    if text_fingerprint(&cached.text) != cached.text_fingerprint {
-                        continue;
-                    }
-                    if !requested_texts.contains(&cached.text) {
-                        continue;
-                    }
-                    cached_vectors.entry(cached.text).or_insert(cached.vector);
+            while let Some(row) = rows
+                .next()
+                .context("failed to step cached rag vector rows")?
+            {
+                let cached = CachedTextVector {
+                    text_fingerprint: row.get(0)?,
+                    text: row.get(1)?,
+                    vector: deserialize_vector(
+                        &row.get::<_, Vec<u8>>(2)?,
+                        read_vector_dimensions(row, 3)?,
+                    )?,
+                };
+                if text_fingerprint(&cached.text) != cached.text_fingerprint {
+                    continue;
                 }
+                if !requested_texts.contains(&cached.text) {
+                    continue;
+                }
+                cached_vectors.entry(cached.text).or_insert(cached.vector);
             }
         }
 
@@ -259,63 +343,41 @@ impl RagVectorStore {
         if !self.should_rebuild_index() {
             return Ok(());
         }
-        if let Some(table) = &self.table {
-            if let Err(error) = table.create_index(&["vector"], Index::Auto).execute().await {
-                let error =
-                    anyhow::Error::new(error).context("failed to create LanceDB vector index");
-                if can_skip_vector_index_build(&error) {
-                    tracing::info!(
-                        ?error,
-                        "skipping LanceDB vector index build because current corpus is too small"
-                    );
-                } else {
-                    return Err(error);
-                }
-            }
-        }
+
+        let database_path = self.database_path.clone();
+        tokio::task::spawn_blocking(move || rebuild_vector_index(&database_path))
+            .await
+            .context("failed to join vector index rebuild task")??;
+        rag_query::invalidate_rag_query_db_cache(&self.database_path).await;
+        clear_vector_index_dirty_marker(&self.database_path)?;
         self.created_table = false;
         self.index_dirty = false;
-        self.dirty_chunk_count = 0;
-        self.dirty_delete_count = 0;
         Ok(())
     }
 }
 
-pub(super) fn can_skip_vector_index_build(error: &anyhow::Error) -> bool {
-    error.chain().any(|source| {
-        let message = source.to_string();
-        message.contains("Not enough rows to train PQ")
-            || (message.contains("Requires 256 rows") && message.contains("available"))
-    })
-}
-
 pub(super) async fn clear_index(database_path: &Path) -> Result<()> {
     rag_query::invalidate_rag_query_db_cache(database_path).await;
+    match tokio::fs::remove_dir_all(database_path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "failed to remove RAG database directory: {}",
+                    database_path.display()
+                )
+            });
+        }
+    }
     tokio::fs::create_dir_all(database_path)
         .await
         .with_context(|| {
             format!(
-                "failed to create RAG database directory: {}",
+                "failed to recreate RAG database directory: {}",
                 database_path.display()
             )
         })?;
-    let db = connect(database_path.to_string_lossy().as_ref())
-        .execute()
-        .await
-        .context("failed to open LanceDB database for cleanup")?;
-    if db
-        .table_names()
-        .execute()
-        .await
-        .context("failed to list LanceDB tables for cleanup")?
-        .iter()
-        .any(|name| name == RAG_TABLE_NAME)
-    {
-        db.drop_table(RAG_TABLE_NAME, &[])
-            .await
-            .context("failed to drop existing RAG table")?;
-    }
-
     Ok(())
 }
 
@@ -327,25 +389,6 @@ pub(super) async fn clear_metadata_store(metadata_path: &Path) -> Result<()> {
     .await
     .context("failed to join RAG metadata cleanup task")??;
     Ok(())
-}
-
-async fn open_existing_rag_table(db: &LanceConnection) -> Result<Option<Table>> {
-    let table_exists = db
-        .table_names()
-        .execute()
-        .await
-        .context("failed to list LanceDB tables")?
-        .iter()
-        .any(|name| name == RAG_TABLE_NAME);
-    if !table_exists {
-        return Ok(None);
-    }
-    Ok(Some(
-        db.open_table(RAG_TABLE_NAME)
-            .execute()
-            .await
-            .context("failed to open existing RAG table")?,
-    ))
 }
 
 pub(super) async fn delete_vectors_with_filter(
@@ -382,6 +425,17 @@ pub(super) async fn delete_vectors_for_exact_paths_in_state(
     Ok(())
 }
 
+pub(super) async fn delete_vectors_for_prefix_paths(
+    vector_store: &mut RagVectorStore,
+    prefixes: &[String],
+) -> Result<()> {
+    for chunk in prefixes.chunks(MAX_DELETE_FILTER_PATHS) {
+        let filter = build_prefix_path_filter(chunk);
+        delete_vectors_with_filter(vector_store, &filter).await?;
+    }
+    Ok(())
+}
+
 fn build_exact_path_filter(paths: &[String]) -> String {
     let escaped = paths
         .iter()
@@ -391,115 +445,63 @@ fn build_exact_path_filter(paths: &[String]) -> String {
     format!("absolute_path IN ({escaped})")
 }
 
-pub(super) async fn load_rag_table_schema(database_path: &Path) -> Result<Option<Arc<Schema>>> {
-    let db = connect(database_path.to_string_lossy().as_ref())
-        .execute()
-        .await
-        .context("failed to open LanceDB database")?;
-    let table_exists = db
-        .table_names()
-        .execute()
-        .await
-        .context("failed to list LanceDB tables")?
+fn build_prefix_path_filter(prefixes: &[String]) -> String {
+    prefixes
         .iter()
-        .any(|name| name == RAG_TABLE_NAME);
-    if !table_exists {
-        return Ok(None);
-    }
-
-    let schema = db
-        .open_table(RAG_TABLE_NAME)
-        .execute()
-        .await
-        .context("failed to open RAG table for schema inspection")?
-        .schema()
-        .await
-        .context("failed to read RAG table schema")?;
-    Ok(Some(schema))
-}
-
-pub(super) fn rag_table_schema_is_compatible(schema: &Schema) -> bool {
-    let fields = schema.fields();
-    let expected_fields = [
-        ("id", DataType::Utf8, false),
-        ("source_root", DataType::Utf8, false),
-        ("absolute_path", DataType::Utf8, false),
-        ("version_id", DataType::Utf8, false),
-        ("embedding_fingerprint", DataType::Utf8, false),
-        ("document_kind", DataType::Utf8, false),
-        ("chunk_state", DataType::Utf8, false),
-        ("chunk_index", DataType::Int32, false),
-        ("line_start", DataType::Int32, true),
-        ("line_end", DataType::Int32, true),
-        ("paragraph_line_start", DataType::Int32, true),
-        ("page_start", DataType::Int32, true),
-        ("page_end", DataType::Int32, true),
-        ("heading_path", DataType::Utf8, false),
-        ("anchor_label", DataType::Utf8, true),
-        ("chunk_reuse_key", DataType::Utf8, false),
-        ("text_fingerprint", DataType::Utf8, false),
-        ("text", DataType::Utf8, false),
-    ];
-
-    if fields.len() != expected_fields.len() + 1 {
-        return false;
-    }
-
-    for (field, (name, data_type, nullable)) in fields.iter().zip(expected_fields.iter()) {
-        if field.name() != *name
-            || field.data_type() != data_type
-            || field.is_nullable() != *nullable
-        {
-            return false;
-        }
-    }
-
-    let vector_field = &fields[expected_fields.len()];
-    if vector_field.name() != "vector" || !vector_field.is_nullable() {
-        return false;
-    }
-
-    match vector_field.data_type() {
-        DataType::FixedSizeList(item, dimension) => {
-            *dimension > 0
-                && item.name() == "item"
-                && item.data_type() == &DataType::Float32
-                && item.is_nullable()
-        }
-        _ => false,
-    }
-}
-
-fn rag_storage_requires_fingerprint_reset(
-    stored_records: &HashMap<String, RagIndexedFileRecord>,
-    current_embedding_fingerprint: &str,
-    current_extractor_fingerprint: Option<&str>,
-) -> bool {
-    !stored_records.is_empty()
-        && stored_records.values().any(|record| {
-            record.embedding_fingerprint != current_embedding_fingerprint
-                || current_extractor_fingerprint
-                    .is_some_and(|fingerprint| record.extractor_fingerprint != fingerprint)
+        .map(|prefix| {
+            let escaped = escape_sql_literal(prefix);
+            let like_pattern = escape_sql_literal(&descendant_like_pattern(prefix));
+            format!(
+                "(absolute_path = '{escaped}' OR absolute_path LIKE '{like_pattern}' ESCAPE '\\')"
+            )
         })
+        .collect::<Vec<_>>()
+        .join(" OR ")
 }
 
-pub(super) async fn metadata_store_has_active_records(metadata_path: &Path) -> Result<bool> {
-    let stored_records = tokio::task::spawn_blocking({
-        let metadata_path = metadata_path.to_path_buf();
-        move || load_metadata_records(&metadata_path)
-    })
-    .await
-    .context("failed to join RAG metadata state task")??;
+fn descendant_like_pattern(prefix: &str) -> String {
+    let mut escaped = String::with_capacity(prefix.len() + 2);
+    for character in prefix.chars() {
+        match character {
+            '\\' | '%' | '_' => {
+                escaped.push('\\');
+                escaped.push(character);
+            }
+            _ => escaped.push(character),
+        }
+    }
+    escaped.push('/');
+    escaped.push('%');
+    escaped
+}
 
-    Ok(stored_records
-        .values()
-        .any(|record| record.active.is_some()))
+#[cfg(test)]
+pub(super) fn metadata_records_require_rebuild(
+    stored_records: &HashMap<String, RagIndexedFileRecord>,
+    resolved: &ResolvedRagConfig,
+) -> bool {
+    if stored_records.is_empty() {
+        return false;
+    }
+
+    let normalized_source_roots = resolved
+        .source_roots
+        .iter()
+        .map(|path| normalize_path_string(path))
+        .collect::<HashSet<_>>();
+
+    stored_records.values().any(|record| {
+        record.embedding_fingerprint != resolved.embedding_fingerprint
+            || extractor_fingerprint_for_path(Path::new(&record.absolute_path))
+                .is_some_and(|fingerprint| fingerprint != record.extractor_fingerprint)
+            || !normalized_source_roots.contains(&record.source_root)
+    })
 }
 
 pub(super) async fn prepare_index_storage(
     database_path: &Path,
     metadata_path: &Path,
-    resolved: &ResolvedRagConfig,
+    _resolved: &ResolvedRagConfig,
     reset_on_embedding_target_mismatch: bool,
 ) -> Result<()> {
     tokio::fs::create_dir_all(database_path)
@@ -510,32 +512,37 @@ pub(super) async fn prepare_index_storage(
                 database_path.display()
             )
         })?;
-    let table_schema = load_rag_table_schema(database_path).await?;
+
     let metadata_schema_is_compatible = tokio::task::spawn_blocking({
         let metadata_path = metadata_path.to_path_buf();
         move || metadata_store_has_compatible_schema(&metadata_path)
     })
     .await
     .context("failed to join RAG metadata schema task")??;
-    let vector_table_exists = table_schema.is_some();
+    let chunk_store_exists = chunk_store_database_file(database_path).exists();
+    let vector_index_exists = vector_index_file_path(database_path).exists();
+    let vector_index_dirty_marker_exists = vector_index_dirty_marker_path(database_path).exists();
+    let vector_schema_is_compatible = chunk_store_has_compatible_schema(database_path)?;
+    let vector_table_exists = chunk_store_has_table(database_path)?;
+    let vector_artifacts_exist = vector_table_exists
+        || chunk_store_exists
+        || vector_index_exists
+        || vector_index_dirty_marker_exists;
 
-    if let Some(schema) = table_schema.as_deref() {
-        if !rag_table_schema_is_compatible(schema) {
-            tracing::warn!(
-                field_count = schema.fields().len(),
-                "resetting RAG storage because LanceDB schema is incompatible with current code"
-            );
-            clear_index(database_path).await?;
-            clear_metadata_store(metadata_path).await?;
-            return Ok(());
-        }
+    if vector_artifacts_exist && !vector_schema_is_compatible {
+        tracing::warn!(
+            "resetting RAG storage because vector storage schema is incompatible with current code"
+        );
+        clear_index(database_path).await?;
+        clear_metadata_store(metadata_path).await?;
+        return Ok(());
     }
 
     if !metadata_schema_is_compatible {
         tracing::warn!(
             "resetting RAG storage because SQLite metadata schema is incompatible with current code"
         );
-        if vector_table_exists {
+        if vector_artifacts_exist {
             clear_index(database_path).await?;
         }
         clear_metadata_store(metadata_path).await?;
@@ -549,23 +556,21 @@ pub(super) async fn prepare_index_storage(
     .await
     .context("failed to join RAG metadata state task")??;
     let metadata_has_rows = !stored_records.is_empty();
-    let current_embedding_fingerprint = resolved.embedding_fingerprint.as_str();
+    let metadata_has_active_rows = stored_records
+        .values()
+        .any(|record| record.active.is_some());
+    let vector_has_active_chunks = chunk_store_has_active_chunks(database_path)?;
+    let chunk_store_artifacts_exist = vector_table_exists || chunk_store_exists;
+    let _ = reset_on_embedding_target_mismatch;
 
-    if reset_on_embedding_target_mismatch
-        && rag_storage_requires_fingerprint_reset(
-            &stored_records,
-            current_embedding_fingerprint,
-            None,
-        )
-    {
-        tracing::info!(
-            embedding_fingerprint = current_embedding_fingerprint,
-            "resetting RAG storage because indexed embedding target changed"
+    if !chunk_store_artifacts_exist && (vector_index_exists || vector_index_dirty_marker_exists) {
+        tracing::warn!(
+            "resetting RAG storage because vector index artifacts exist without a chunk store"
         );
-        if vector_table_exists {
-            clear_index(database_path).await?;
+        clear_index(database_path).await?;
+        if metadata_has_rows {
+            clear_metadata_store(metadata_path).await?;
         }
-        clear_metadata_store(metadata_path).await?;
         return Ok(());
     }
 
@@ -575,296 +580,396 @@ pub(super) async fn prepare_index_storage(
         _ => {}
     }
 
+    match (vector_has_active_chunks, metadata_has_active_rows) {
+        (true, false) => clear_index(database_path).await?,
+        (false, true) => clear_metadata_store(metadata_path).await?,
+        _ => {}
+    }
+
     Ok(())
 }
 
-pub(super) fn build_record_batch_reader(
-    chunks: &[RagChunk],
-    vectors: &[Vec<f32>],
-) -> Result<Box<dyn RecordBatchReader + Send>> {
-    let dimension = vectors
+pub(crate) fn vector_index_file_path(database_path: &Path) -> PathBuf {
+    database_path.join(RAG_VECTOR_INDEX_FILE_NAME)
+}
+
+fn vector_index_dirty_marker_path(database_path: &Path) -> PathBuf {
+    database_path.join(RAG_VECTOR_INDEX_DIRTY_FILE_NAME)
+}
+
+pub(crate) fn open_vector_chunk_connection(database_path: &Path) -> Result<Connection> {
+    open_chunk_store_connection(database_path)
+}
+
+fn chunk_store_database_file(database_path: &Path) -> PathBuf {
+    database_path.join(RAG_CHUNK_DB_FILE_NAME)
+}
+
+fn vector_index_is_marked_dirty(database_path: &Path) -> bool {
+    vector_index_dirty_marker_path(database_path).exists()
+}
+
+fn mark_vector_index_dirty(database_path: &Path) -> Result<()> {
+    std::fs::create_dir_all(database_path).with_context(|| {
+        format!(
+            "failed to create RAG database directory for dirty marker: {}",
+            database_path.display()
+        )
+    })?;
+    std::fs::write(vector_index_dirty_marker_path(database_path), b"dirty")
+        .context("failed to write RAG vector index dirty marker")?;
+    Ok(())
+}
+
+fn clear_vector_index_dirty_marker(database_path: &Path) -> Result<()> {
+    let marker_path = vector_index_dirty_marker_path(database_path);
+    match std::fs::remove_file(&marker_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed to clear RAG vector index dirty marker: {}",
+                marker_path.display()
+            )
+        }),
+    }
+}
+
+fn repeat_sql_placeholders(count: usize, start_index: usize) -> String {
+    (0..count)
+        .map(|offset| format!("?{}", start_index + offset))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn serialize_vector(vector: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(vector.len().saturating_mul(std::mem::size_of::<f32>()));
+    for value in vector {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
+}
+
+fn deserialize_vector(bytes: &[u8], dimensions: usize) -> Result<Vec<f32>> {
+    let expected_len = dimensions.saturating_mul(std::mem::size_of::<f32>());
+    if bytes.len() != expected_len {
+        bail!(
+            "vector blob length mismatch: expected {} bytes, got {}",
+            expected_len,
+            bytes.len()
+        );
+    }
+
+    Ok(bytes
+        .chunks_exact(std::mem::size_of::<f32>())
+        .map(|chunk| {
+            let mut raw = [0_u8; std::mem::size_of::<f32>()];
+            raw.copy_from_slice(chunk);
+            f32::from_le_bytes(raw)
+        })
+        .collect())
+}
+
+fn read_vector_dimensions(row: &rusqlite::Row<'_>, index: usize) -> Result<usize> {
+    let value = row.get::<_, i64>(index)?;
+    usize::try_from(value).context("vector_dimensions is negative or too large")
+}
+
+fn open_chunk_store_connection(database_path: &Path) -> Result<Connection> {
+    if let Some(parent) = database_path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create RAG database parent directory: {}",
+                parent.display()
+            )
+        })?;
+    }
+    std::fs::create_dir_all(database_path).with_context(|| {
+        format!(
+            "failed to create RAG database directory: {}",
+            database_path.display()
+        )
+    })?;
+
+    let db_path = chunk_store_database_file(database_path);
+    let connection = Connection::open(&db_path)
+        .with_context(|| format!("failed to open RAG chunk database: {}", db_path.display()))?;
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .context("failed to configure RAG chunk busy timeout")?;
+    initialize_chunk_store_schema(&connection)?;
+    Ok(connection)
+}
+
+fn initialize_chunk_store_schema(connection: &Connection) -> Result<()> {
+    connection
+        .execute_batch(
+            "
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
+            CREATE TABLE IF NOT EXISTS rag_chunks (
+                vector_key INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT NOT NULL UNIQUE,
+                source_root TEXT NOT NULL,
+                absolute_path TEXT NOT NULL,
+                version_id TEXT NOT NULL,
+                embedding_fingerprint TEXT NOT NULL,
+                document_kind TEXT NOT NULL,
+                chunk_state TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                line_start INTEGER,
+                line_end INTEGER,
+                paragraph_line_start INTEGER,
+                page_start INTEGER,
+                page_end INTEGER,
+                heading_path_json TEXT NOT NULL,
+                anchor_label TEXT,
+                chunk_reuse_key TEXT NOT NULL,
+                text_fingerprint TEXT NOT NULL,
+                text TEXT NOT NULL,
+                vector_blob BLOB NOT NULL,
+                vector_dimensions INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_rag_chunks_path_state
+                ON rag_chunks(absolute_path, chunk_state);
+            CREATE INDEX IF NOT EXISTS idx_rag_chunks_version_state
+                ON rag_chunks(absolute_path, version_id, chunk_state);
+            CREATE INDEX IF NOT EXISTS idx_rag_chunks_chunk_reuse
+                ON rag_chunks(absolute_path, chunk_state, chunk_reuse_key);
+            CREATE INDEX IF NOT EXISTS idx_rag_chunks_embedding_text
+                ON rag_chunks(embedding_fingerprint, text_fingerprint);
+            ",
+        )
+        .context("failed to initialize rag chunk schema")?;
+    Ok(())
+}
+
+fn chunk_store_has_table(database_path: &Path) -> Result<bool> {
+    let db_path = chunk_store_database_file(database_path);
+    if !db_path.exists() {
+        return Ok(false);
+    }
+    let connection = Connection::open(&db_path)
+        .with_context(|| format!("failed to open RAG chunk database: {}", db_path.display()))?;
+    let exists = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'rag_chunks' LIMIT 1",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .context("failed to inspect rag chunk table existence")?
+        .is_some();
+    Ok(exists)
+}
+
+fn chunk_store_has_compatible_schema(database_path: &Path) -> Result<bool> {
+    let db_path = chunk_store_database_file(database_path);
+    if !db_path.exists() {
+        return Ok(false);
+    }
+    let connection = Connection::open(&db_path)
+        .with_context(|| format!("failed to open RAG chunk database: {}", db_path.display()))?;
+    chunk_table_schema_is_compatible(&connection)
+}
+
+fn chunk_store_has_active_chunks(database_path: &Path) -> Result<bool> {
+    if !chunk_store_has_compatible_schema(database_path)? {
+        return Ok(false);
+    }
+    let connection = open_chunk_store_connection(database_path)?;
+    let count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM rag_chunks WHERE chunk_state = 'active'",
+            [],
+            |row| row.get(0),
+        )
+        .context("failed to count active rag chunks")?;
+    Ok(count > 0)
+}
+
+fn chunk_store_row_count(connection: &Connection) -> Result<i64> {
+    connection
+        .query_row("SELECT COUNT(*) FROM rag_chunks", [], |row| row.get(0))
+        .context("failed to count rag chunk rows")
+}
+
+fn chunk_table_schema_is_compatible(connection: &Connection) -> Result<bool> {
+    let expected_columns = [
+        ("vector_key", "INTEGER"),
+        ("id", "TEXT"),
+        ("source_root", "TEXT"),
+        ("absolute_path", "TEXT"),
+        ("version_id", "TEXT"),
+        ("embedding_fingerprint", "TEXT"),
+        ("document_kind", "TEXT"),
+        ("chunk_state", "TEXT"),
+        ("chunk_index", "INTEGER"),
+        ("line_start", "INTEGER"),
+        ("line_end", "INTEGER"),
+        ("paragraph_line_start", "INTEGER"),
+        ("page_start", "INTEGER"),
+        ("page_end", "INTEGER"),
+        ("heading_path_json", "TEXT"),
+        ("anchor_label", "TEXT"),
+        ("chunk_reuse_key", "TEXT"),
+        ("text_fingerprint", "TEXT"),
+        ("text", "TEXT"),
+        ("vector_blob", "BLOB"),
+        ("vector_dimensions", "INTEGER"),
+    ];
+    let mut statement = connection
+        .prepare("PRAGMA table_info(rag_chunks)")
+        .context("failed to inspect rag chunk schema")?;
+    let columns = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })
+        .context("failed to query rag chunk schema")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to collect rag chunk schema rows")?;
+
+    if columns.len() != expected_columns.len() {
+        return Ok(false);
+    }
+
+    Ok(columns.iter().zip(expected_columns.iter()).all(
+        |((name, data_type), (expected_name, expected_type))| {
+            name == expected_name && data_type.eq_ignore_ascii_case(expected_type)
+        },
+    ))
+}
+
+fn rebuild_vector_index(database_path: &Path) -> Result<()> {
+    let rows = load_active_vectors(database_path)?;
+    let index_path = vector_index_file_path(database_path);
+    if rows.is_empty() {
+        match std::fs::remove_file(&index_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to remove empty vector index file: {}",
+                        index_path.display()
+                    )
+                });
+            }
+        }
+        return Ok(());
+    }
+
+    let dimensions = rows
         .first()
-        .map(|vector| vector.len())
-        .context("cannot build LanceDB batch without vectors")?;
-
-    if vectors.iter().any(|vector| vector.len() != dimension) {
-        anyhow::bail!("embedding provider returned inconsistent vector dimensions");
+        .map(|row| row.vector.len())
+        .context("missing dimensions for active vector index rebuild")?;
+    if rows.iter().any(|row| row.vector.len() != dimensions) {
+        bail!("active rag chunks contain inconsistent vector dimensions");
     }
 
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Utf8, false),
-        Field::new("source_root", DataType::Utf8, false),
-        Field::new("absolute_path", DataType::Utf8, false),
-        Field::new("version_id", DataType::Utf8, false),
-        Field::new("embedding_fingerprint", DataType::Utf8, false),
-        Field::new("document_kind", DataType::Utf8, false),
-        Field::new("chunk_state", DataType::Utf8, false),
-        Field::new("chunk_index", DataType::Int32, false),
-        Field::new("line_start", DataType::Int32, true),
-        Field::new("line_end", DataType::Int32, true),
-        Field::new("paragraph_line_start", DataType::Int32, true),
-        Field::new("page_start", DataType::Int32, true),
-        Field::new("page_end", DataType::Int32, true),
-        Field::new("heading_path", DataType::Utf8, false),
-        Field::new("anchor_label", DataType::Utf8, true),
-        Field::new("chunk_reuse_key", DataType::Utf8, false),
-        Field::new("text_fingerprint", DataType::Utf8, false),
-        Field::new("text", DataType::Utf8, false),
-        Field::new(
-            "vector",
-            DataType::FixedSizeList(
-                Arc::new(Field::new("item", DataType::Float32, true)),
-                dimension as i32,
-            ),
-            true,
-        ),
-    ]));
+    let options = build_usearch_index_options(dimensions);
+    let index = Index::new(&options).context("failed to create USearch index")?;
+    index
+        .reserve(rows.len())
+        .context("failed to reserve USearch index capacity")?;
+    for row in &rows {
+        index
+            .add(row.vector_key, row.vector.as_slice())
+            .with_context(|| format!("failed to add vector key {} into USearch", row.vector_key))?;
+    }
 
-    let ids = StringArray::from(
-        chunks
-            .iter()
-            .map(|chunk| chunk.id.clone())
-            .collect::<Vec<_>>(),
-    );
-    let source_roots = StringArray::from(
-        chunks
-            .iter()
-            .map(|chunk| chunk.source_root.clone())
-            .collect::<Vec<_>>(),
-    );
-    let absolute_paths = StringArray::from(
-        chunks
-            .iter()
-            .map(|chunk| chunk.absolute_path.clone())
-            .collect::<Vec<_>>(),
-    );
-    let version_ids = StringArray::from(
-        chunks
-            .iter()
-            .map(|chunk| chunk.version_id.clone())
-            .collect::<Vec<_>>(),
-    );
-    let embedding_fingerprints = StringArray::from(
-        chunks
-            .iter()
-            .map(|chunk| chunk.embedding_fingerprint.clone())
-            .collect::<Vec<_>>(),
-    );
-    let document_kinds = StringArray::from(
-        chunks
-            .iter()
-            .map(|chunk| chunk.document_kind.as_str())
-            .collect::<Vec<_>>(),
-    );
-    let chunk_states = StringArray::from(
-        chunks
-            .iter()
-            .map(|chunk| chunk.chunk_state.as_str())
-            .collect::<Vec<_>>(),
-    );
-    let chunk_indexes = Int32Array::from(
-        chunks
-            .iter()
-            .map(|chunk| chunk.chunk_index)
-            .collect::<Vec<_>>(),
-    );
-    let line_starts = Int32Array::from(
-        chunks
-            .iter()
-            .map(|chunk| chunk.line_start)
-            .collect::<Vec<_>>(),
-    );
-    let line_ends = Int32Array::from(
-        chunks
-            .iter()
-            .map(|chunk| chunk.line_end)
-            .collect::<Vec<_>>(),
-    );
-    let paragraph_line_starts = Int32Array::from(
-        chunks
-            .iter()
-            .map(|chunk| chunk.paragraph_line_start)
-            .collect::<Vec<_>>(),
-    );
-    let page_starts = Int32Array::from(
-        chunks
-            .iter()
-            .map(|chunk| chunk.page_start)
-            .collect::<Vec<_>>(),
-    );
-    let page_ends = Int32Array::from(
-        chunks
-            .iter()
-            .map(|chunk| chunk.page_end)
-            .collect::<Vec<_>>(),
-    );
-    let heading_paths = StringArray::from(
-        chunks
-            .iter()
-            .map(|chunk| serde_json::to_string(&chunk.heading_path))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .context("failed to serialize heading path metadata")?,
-    );
-    let anchor_labels = StringArray::from(
-        chunks
-            .iter()
-            .map(|chunk| chunk.anchor_label.clone())
-            .collect::<Vec<_>>(),
-    );
-    let chunk_reuse_keys = StringArray::from(
-        chunks
-            .iter()
-            .map(|chunk| chunk.chunk_reuse_key.clone())
-            .collect::<Vec<_>>(),
-    );
-    let text_fingerprints = StringArray::from(
-        chunks
-            .iter()
-            .map(|chunk| chunk.text_fingerprint.clone())
-            .collect::<Vec<_>>(),
-    );
-    let texts = StringArray::from(
-        chunks
-            .iter()
-            .map(|chunk| chunk.text.clone())
-            .collect::<Vec<_>>(),
-    );
-    let vector_array = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-        vectors
-            .iter()
-            .map(|vector| Some(vector.iter().copied().map(Some))),
-        dimension as i32,
-    );
-
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(ids),
-            Arc::new(source_roots),
-            Arc::new(absolute_paths),
-            Arc::new(version_ids),
-            Arc::new(embedding_fingerprints),
-            Arc::new(document_kinds),
-            Arc::new(chunk_states),
-            Arc::new(chunk_indexes),
-            Arc::new(line_starts),
-            Arc::new(line_ends),
-            Arc::new(paragraph_line_starts),
-            Arc::new(page_starts),
-            Arc::new(page_ends),
-            Arc::new(heading_paths),
-            Arc::new(anchor_labels),
-            Arc::new(chunk_reuse_keys),
-            Arc::new(text_fingerprints),
-            Arc::new(texts),
-            Arc::new(vector_array),
-        ],
-    )
-    .context("failed to build LanceDB record batch")?;
-
-    Ok(Box::new(RecordBatchIterator::new(
-        vec![Ok(batch)].into_iter(),
-        schema,
-    )))
+    std::fs::create_dir_all(database_path).with_context(|| {
+        format!(
+            "failed to create RAG database directory for index save: {}",
+            database_path.display()
+        )
+    })?;
+    let temp_path = index_path.with_extension("usearch.tmp");
+    index
+        .save(temp_path.to_string_lossy().as_ref())
+        .with_context(|| format!("failed to save USearch index: {}", temp_path.display()))?;
+    std::fs::rename(&temp_path, &index_path).with_context(|| {
+        format!(
+            "failed to replace USearch index {} -> {}",
+            temp_path.display(),
+            index_path.display()
+        )
+    })?;
+    Ok(())
 }
 
-fn parse_chunk_vector_batch(batch: &RecordBatch) -> Result<Vec<StoredChunkVector>> {
-    if batch.num_rows() == 0 {
-        return Ok(Vec::new());
+fn vector_index_is_usable(database_path: &Path) -> Result<bool> {
+    let index_path = vector_index_file_path(database_path);
+    if !index_path.exists() {
+        return Ok(false);
     }
 
-    let chunk_reuse_keys = batch
-        .column(
-            batch
-                .schema()
-                .index_of("chunk_reuse_key")
-                .context("chunk_reuse_key column missing from LanceDB batch")?,
-        )
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .context("chunk_reuse_key column is not a StringArray")?;
-    let vectors = batch
-        .column(
-            batch
-                .schema()
-                .index_of("vector")
-                .context("vector column missing from LanceDB batch")?,
-        )
-        .as_any()
-        .downcast_ref::<FixedSizeListArray>()
-        .context("vector column is not a FixedSizeListArray")?;
-    let values = vectors
-        .values()
-        .as_any()
-        .downcast_ref::<Float32Array>()
-        .context("vector values are not Float32Array")?;
-    let dimension = usize::try_from(vectors.value_length()).unwrap_or_default();
-
-    let mut stored = Vec::with_capacity(batch.num_rows());
-    for row_index in 0..batch.num_rows() {
-        let start = row_index.saturating_mul(dimension);
-        let end = start.saturating_add(dimension);
-        stored.push(StoredChunkVector {
-            chunk_reuse_key: chunk_reuse_keys.value(row_index).to_string(),
-            vector: (start..end).map(|offset| values.value(offset)).collect(),
-        });
+    let dimensions = load_active_vector_dimensions(database_path)?.unwrap_or(1);
+    let options = build_usearch_index_options(dimensions);
+    let index = Index::new(&options).context("failed to create USearch index validator")?;
+    match index.load(index_path.to_string_lossy().as_ref()) {
+        Ok(()) => Ok(true),
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                path = %index_path.display(),
+                "marking cached USearch index dirty because it failed to load"
+            );
+            Ok(false)
+        }
     }
-    Ok(stored)
 }
 
-fn parse_text_vector_batch(batch: &RecordBatch) -> Result<Vec<CachedTextVector>> {
-    if batch.num_rows() == 0 {
-        return Ok(Vec::new());
-    }
-
-    let text_fingerprints = batch
-        .column(
-            batch
-                .schema()
-                .index_of("text_fingerprint")
-                .context("text_fingerprint column missing from LanceDB batch")?,
+fn load_active_vectors(database_path: &Path) -> Result<Vec<ActiveVectorRow>> {
+    let connection = open_chunk_store_connection(database_path)?;
+    let mut statement = connection
+        .prepare(
+            "
+            SELECT vector_key, vector_blob, vector_dimensions
+            FROM rag_chunks
+            WHERE chunk_state = 'active'
+            ORDER BY vector_key
+            ",
         )
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .context("text_fingerprint column is not a StringArray")?;
-    let texts = batch
-        .column(
-            batch
-                .schema()
-                .index_of("text")
-                .context("text column missing from LanceDB batch")?,
-        )
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .context("text column is not a StringArray")?;
-    let vectors = batch
-        .column(
-            batch
-                .schema()
-                .index_of("vector")
-                .context("vector column missing from LanceDB batch")?,
-        )
-        .as_any()
-        .downcast_ref::<FixedSizeListArray>()
-        .context("vector column is not a FixedSizeListArray")?;
-    let values = vectors
-        .values()
-        .as_any()
-        .downcast_ref::<Float32Array>()
-        .context("vector values are not Float32Array")?;
-    let dimension = usize::try_from(vectors.value_length()).unwrap_or_default();
-
-    let mut stored = Vec::with_capacity(batch.num_rows());
-    for row_index in 0..batch.num_rows() {
-        let start = row_index.saturating_mul(dimension);
-        let end = start.saturating_add(dimension);
-        stored.push(CachedTextVector {
-            text_fingerprint: text_fingerprints.value(row_index).to_string(),
-            text: texts.value(row_index).to_string(),
-            vector: (start..end).map(|offset| values.value(offset)).collect(),
+        .context("failed to prepare active rag vector query")?;
+    let mut rows = statement
+        .query([])
+        .context("failed to execute active rag vector query")?;
+    let mut vectors = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .context("failed to step active rag vector rows")?
+    {
+        let vector_key_i64: i64 = row.get(0)?;
+        let vector_key = u64::try_from(vector_key_i64).context("vector_key is negative")?;
+        let vector_blob: Vec<u8> = row.get(1)?;
+        let vector_dimensions = read_vector_dimensions(row, 2)?;
+        vectors.push(ActiveVectorRow {
+            vector_key,
+            vector: deserialize_vector(&vector_blob, vector_dimensions)?,
         });
     }
-    Ok(stored)
+    Ok(vectors)
+}
+
+pub(crate) fn load_active_vector_dimensions(database_path: &Path) -> Result<Option<usize>> {
+    let connection = open_chunk_store_connection(database_path)?;
+    let dimensions = connection
+        .query_row(
+            "
+            SELECT vector_dimensions
+            FROM rag_chunks
+            WHERE chunk_state = 'active'
+            LIMIT 1
+            ",
+            [],
+            |row: &rusqlite::Row<'_>| row.get::<_, i64>(0),
+        )
+        .optional()
+        .context("failed to query active vector dimensions")?;
+    dimensions
+        .map(|value| usize::try_from(value).context("vector_dimensions is negative or too large"))
+        .transpose()
 }
 
 fn open_metadata_connection(metadata_path: &Path) -> Result<Connection> {
@@ -934,82 +1039,22 @@ fn open_metadata_connection(metadata_path: &Path) -> Result<Connection> {
     Ok(connection)
 }
 
-pub(super) fn replace_lexical_chunks_for_file(
+pub(super) fn finalize_metadata_and_replace_lexical_chunks(
     metadata_path: &Path,
-    file: &PreparedRagFile,
+    record: &RagIndexedFileRecord,
+    chunk_count: usize,
+    chunks: &[PreparedRagChunk],
 ) -> Result<()> {
     let mut connection = open_metadata_connection(metadata_path)?;
     let transaction = connection
         .transaction()
-        .context("failed to open RAG lexical replace transaction")?;
-    transaction
-        .execute(
-            &format!("DELETE FROM {RAG_LEXICAL_TABLE_NAME} WHERE absolute_path = ?1"),
-            [&file.record.absolute_path],
-        )
-        .with_context(|| {
-            format!(
-                "failed to clear stale RAG lexical rows for {}",
-                file.record.absolute_path
-            )
-        })?;
-
-    {
-        let mut statement = transaction
-            .prepare(&format!(
-                "
-                INSERT INTO {RAG_LEXICAL_TABLE_NAME} (
-                    source_root,
-                    absolute_path,
-                    path,
-                    document_kind,
-                    chunk_index,
-                    line_start,
-                    line_end,
-                    paragraph_line_start,
-                    page_start,
-                    page_end,
-                    heading_path_json,
-                    heading_text,
-                    anchor_label,
-                    text
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
-                "
-            ))
-            .context("failed to prepare RAG lexical chunk insert statement")?;
-
-        for chunk in &file.chunks {
-            let heading_path_json = serde_json::to_string(&chunk.heading_path)
-                .context("failed to serialize heading path")?;
-            statement
-                .execute(params![
-                    &file.record.source_root,
-                    &file.record.absolute_path,
-                    &file.record.relative_path,
-                    chunk.document_kind.as_str(),
-                    chunk.chunk_index,
-                    chunk.line_start,
-                    chunk.line_end,
-                    chunk.paragraph_line_start,
-                    chunk.page_start,
-                    chunk.page_end,
-                    heading_path_json,
-                    chunk.heading_path.join(" "),
-                    chunk.anchor_label.as_deref(),
-                    &chunk.text,
-                ])
-                .with_context(|| {
-                    format!(
-                        "failed to insert RAG lexical chunk {}#{}",
-                        file.record.absolute_path, chunk.chunk_index
-                    )
-                })?;
-        }
-    }
-
+        .context("failed to open RAG metadata finalize transaction")?;
+    let finalized_record = finalize_metadata_record(record, chunk_count);
+    upsert_metadata_records_in_transaction(&transaction, &[finalized_record])?;
+    replace_lexical_chunks_in_transaction(&transaction, record, chunks)?;
     transaction
         .commit()
-        .context("failed to commit RAG lexical replace transaction")?;
+        .context("failed to commit RAG metadata finalize transaction")?;
     Ok(())
 }
 
@@ -1020,34 +1065,30 @@ pub(super) fn metadata_store_has_compatible_schema(metadata_path: &Path) -> Resu
 
 fn metadata_table_schema_is_compatible(connection: &Connection) -> Result<bool> {
     let expected_columns = [
-        ("absolute_path", "TEXT", true),
-        ("source_root", "TEXT", true),
-        ("relative_path", "TEXT", true),
-        ("embedding_fingerprint", "TEXT", true),
-        ("extractor_fingerprint", "TEXT", true),
-        ("active_version_id", "TEXT", false),
-        ("active_content_md5", "TEXT", false),
-        ("active_modified_at_ms", "INTEGER", false),
-        ("active_size_bytes", "INTEGER", false),
-        ("active_chunk_count", "INTEGER", false),
-        ("active_indexed_at_ms", "INTEGER", false),
-        ("pending_version_id", "TEXT", false),
-        ("pending_content_md5", "TEXT", false),
-        ("pending_modified_at_ms", "INTEGER", false),
-        ("pending_size_bytes", "INTEGER", false),
-        ("pending_chunk_count", "INTEGER", false),
-        ("pending_started_at_ms", "INTEGER", false),
+        ("absolute_path", "TEXT"),
+        ("source_root", "TEXT"),
+        ("relative_path", "TEXT"),
+        ("embedding_fingerprint", "TEXT"),
+        ("extractor_fingerprint", "TEXT"),
+        ("active_version_id", "TEXT"),
+        ("active_content_md5", "TEXT"),
+        ("active_modified_at_ms", "INTEGER"),
+        ("active_size_bytes", "INTEGER"),
+        ("active_chunk_count", "INTEGER"),
+        ("active_indexed_at_ms", "INTEGER"),
+        ("pending_version_id", "TEXT"),
+        ("pending_content_md5", "TEXT"),
+        ("pending_modified_at_ms", "INTEGER"),
+        ("pending_size_bytes", "INTEGER"),
+        ("pending_chunk_count", "INTEGER"),
+        ("pending_started_at_ms", "INTEGER"),
     ];
     let mut statement = connection
         .prepare("PRAGMA table_info(rag_files)")
         .context("failed to inspect RAG metadata schema")?;
     let columns = statement
         .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)? != 0,
-            ))
+            Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
         })
         .context("failed to query RAG metadata schema")?
         .collect::<rusqlite::Result<Vec<_>>>()
@@ -1058,10 +1099,8 @@ fn metadata_table_schema_is_compatible(connection: &Connection) -> Result<bool> 
     }
 
     Ok(columns.iter().zip(expected_columns.iter()).all(
-        |((name, data_type, not_null), (expected_name, expected_type, expected_not_null))| {
-            name == expected_name
-                && data_type.eq_ignore_ascii_case(expected_type)
-                && not_null == expected_not_null
+        |((name, data_type), (expected_name, expected_type))| {
+            name == expected_name && data_type.eq_ignore_ascii_case(expected_type)
         },
     ))
 }
@@ -1164,6 +1203,7 @@ pub(super) fn load_metadata_records_for_paths(
     Ok(records)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn load_metadata_paths_for_prefixes(
     metadata_path: &Path,
     prefixes: &[String],
@@ -1178,14 +1218,14 @@ pub(super) fn load_metadata_paths_for_prefixes(
             "
             SELECT absolute_path
             FROM rag_files
-            WHERE absolute_path = ?1 OR absolute_path LIKE ?2
+            WHERE absolute_path = ?1 OR absolute_path LIKE ?2 ESCAPE '\\'
             ",
         )
         .context("failed to prepare descendant RAG metadata query")?;
     let mut resolved_paths = BTreeSet::new();
 
     for prefix in prefixes {
-        let like_pattern = format!("{prefix}/%");
+        let like_pattern = descendant_like_pattern(prefix);
         let rows = statement
             .query_map(params![prefix, like_pattern], |row| row.get::<_, String>(0))
             .with_context(|| format!("failed to query descendant RAG metadata rows: {prefix}"))?;
@@ -1226,6 +1266,23 @@ fn read_metadata_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<RagIndexedF
     })
 }
 
+fn missing_metadata_value<T>(
+    field_name: &'static str,
+    sql_type: rusqlite::types::Type,
+    value: Option<T>,
+) -> rusqlite::Result<T> {
+    value.ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            0,
+            sql_type,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("missing {field_name} for indexed metadata version"),
+            )),
+        )
+    })
+}
+
 fn read_metadata_version(
     version_id: Option<String>,
     content_md5: Option<String>,
@@ -1240,43 +1297,31 @@ fn read_metadata_version(
 
     Ok(Some(RagIndexedFileVersion {
         version_id,
-        content_md5: content_md5.ok_or_else(|| {
-            rusqlite::Error::FromSqlConversionFailure(
-                0,
-                rusqlite::types::Type::Text,
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "missing content_md5 for indexed metadata version",
-                )),
-            )
-        })?,
+        content_md5: missing_metadata_value(
+            "content_md5",
+            rusqlite::types::Type::Text,
+            content_md5,
+        )?,
         modified_at_ms,
-        size_bytes: size_bytes.ok_or_else(|| {
-            rusqlite::Error::FromSqlConversionFailure(
-                0,
-                rusqlite::types::Type::Integer,
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "missing size_bytes for indexed metadata version",
-                )),
-            )
-        })?,
-        chunk_count: chunk_count.ok_or_else(|| {
-            rusqlite::Error::FromSqlConversionFailure(
-                0,
-                rusqlite::types::Type::Integer,
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "missing chunk_count for indexed metadata version",
-                )),
-            )
-        })?,
+        size_bytes: missing_metadata_value(
+            "size_bytes",
+            rusqlite::types::Type::Integer,
+            size_bytes,
+        )?,
+        chunk_count: missing_metadata_value(
+            "chunk_count",
+            rusqlite::types::Type::Integer,
+            chunk_count,
+        )?,
         indexed_at_ms: indexed_at_ms.unwrap_or_default(),
     }))
 }
 
-pub(super) fn finalize_metadata_record(file: &PreparedRagFile) -> RagIndexedFileRecord {
-    let mut finalized = file.record.clone();
+pub(super) fn finalize_metadata_record(
+    record: &RagIndexedFileRecord,
+    chunk_count: usize,
+) -> RagIndexedFileRecord {
+    let mut finalized = record.clone();
     finalized.active = finalized
         .pending
         .as_ref()
@@ -1285,7 +1330,7 @@ pub(super) fn finalize_metadata_record(file: &PreparedRagFile) -> RagIndexedFile
             content_md5: pending.content_md5.clone(),
             modified_at_ms: pending.modified_at_ms,
             size_bytes: pending.size_bytes,
-            chunk_count: pending.chunk_count,
+            chunk_count: i64::try_from(chunk_count).unwrap_or(i64::MAX),
             indexed_at_ms: now_unix_ms(),
         });
     finalized.pending = None;
@@ -1327,6 +1372,26 @@ fn metadata_store_file_paths(metadata_path: &Path) -> [PathBuf; 3] {
     [base, wal, shm]
 }
 
+struct MetadataVersionFields<'a> {
+    version_id: Option<&'a str>,
+    content_md5: Option<&'a str>,
+    modified_at_ms: Option<i64>,
+    size_bytes: Option<i64>,
+    chunk_count: Option<i64>,
+    indexed_at_ms: Option<i64>,
+}
+
+fn metadata_version_fields(version: Option<&RagIndexedFileVersion>) -> MetadataVersionFields<'_> {
+    MetadataVersionFields {
+        version_id: version.map(|value| value.version_id.as_str()),
+        content_md5: version.map(|value| value.content_md5.as_str()),
+        modified_at_ms: version.and_then(|value| value.modified_at_ms),
+        size_bytes: version.map(|value| value.size_bytes),
+        chunk_count: version.map(|value| value.chunk_count),
+        indexed_at_ms: version.map(|value| value.indexed_at_ms),
+    }
+}
+
 pub(super) fn upsert_metadata_records(
     metadata_path: &Path,
     records: &[RagIndexedFileRecord],
@@ -1339,6 +1404,17 @@ pub(super) fn upsert_metadata_records(
     let transaction = connection
         .transaction()
         .context("failed to open RAG metadata transaction")?;
+    upsert_metadata_records_in_transaction(&transaction, records)?;
+    transaction
+        .commit()
+        .context("failed to commit RAG metadata transaction")?;
+    Ok(())
+}
+
+fn upsert_metadata_records_in_transaction(
+    transaction: &Transaction<'_>,
+    records: &[RagIndexedFileRecord],
+) -> Result<()> {
     {
         let mut statement = transaction
             .prepare(
@@ -1384,6 +1460,8 @@ pub(super) fn upsert_metadata_records(
             .context("failed to prepare RAG metadata upsert statement")?;
 
         for record in records {
+            let active = metadata_version_fields(record.active.as_ref());
+            let pending = metadata_version_fields(record.pending.as_ref());
             statement
                 .execute(params![
                     &record.source_root,
@@ -1391,36 +1469,18 @@ pub(super) fn upsert_metadata_records(
                     &record.relative_path,
                     &record.embedding_fingerprint,
                     &record.extractor_fingerprint,
-                    record
-                        .active
-                        .as_ref()
-                        .map(|version| version.version_id.as_str()),
-                    record
-                        .active
-                        .as_ref()
-                        .map(|version| version.content_md5.as_str()),
-                    record
-                        .active
-                        .as_ref()
-                        .and_then(|version| version.modified_at_ms),
-                    record.active.as_ref().map(|version| version.size_bytes),
-                    record.active.as_ref().map(|version| version.chunk_count),
-                    record.active.as_ref().map(|version| version.indexed_at_ms),
-                    record
-                        .pending
-                        .as_ref()
-                        .map(|version| version.version_id.as_str()),
-                    record
-                        .pending
-                        .as_ref()
-                        .map(|version| version.content_md5.as_str()),
-                    record
-                        .pending
-                        .as_ref()
-                        .and_then(|version| version.modified_at_ms),
-                    record.pending.as_ref().map(|version| version.size_bytes),
-                    record.pending.as_ref().map(|version| version.chunk_count),
-                    record.pending.as_ref().map(|version| version.indexed_at_ms),
+                    active.version_id,
+                    active.content_md5,
+                    active.modified_at_ms,
+                    active.size_bytes,
+                    active.chunk_count,
+                    active.indexed_at_ms,
+                    pending.version_id,
+                    pending.content_md5,
+                    pending.modified_at_ms,
+                    pending.size_bytes,
+                    pending.chunk_count,
+                    pending.indexed_at_ms,
                 ])
                 .with_context(|| {
                     format!(
@@ -1430,9 +1490,77 @@ pub(super) fn upsert_metadata_records(
                 })?;
         }
     }
+    Ok(())
+}
+
+fn replace_lexical_chunks_in_transaction(
+    transaction: &Transaction<'_>,
+    record: &RagIndexedFileRecord,
+    chunks: &[PreparedRagChunk],
+) -> Result<()> {
     transaction
-        .commit()
-        .context("failed to commit RAG metadata transaction")?;
+        .execute(
+            &format!("DELETE FROM {RAG_LEXICAL_TABLE_NAME} WHERE absolute_path = ?1"),
+            [&record.absolute_path],
+        )
+        .with_context(|| {
+            format!(
+                "failed to clear stale RAG lexical rows for {}",
+                record.absolute_path
+            )
+        })?;
+
+    let mut statement = transaction
+        .prepare(&format!(
+            "
+            INSERT INTO {RAG_LEXICAL_TABLE_NAME} (
+                source_root,
+                absolute_path,
+                path,
+                document_kind,
+                chunk_index,
+                line_start,
+                line_end,
+                paragraph_line_start,
+                page_start,
+                page_end,
+                heading_path_json,
+                heading_text,
+                anchor_label,
+                text
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            "
+        ))
+        .context("failed to prepare RAG lexical chunk insert statement")?;
+
+    for chunk in chunks {
+        let heading_path_json = serde_json::to_string(&chunk.heading_path)
+            .context("failed to serialize heading path")?;
+        statement
+            .execute(params![
+                &record.source_root,
+                &record.absolute_path,
+                &record.relative_path,
+                chunk.document_kind.as_str(),
+                chunk.chunk_index,
+                chunk.line_start,
+                chunk.line_end,
+                chunk.paragraph_line_start,
+                chunk.page_start,
+                chunk.page_end,
+                heading_path_json,
+                chunk.heading_path.join(" "),
+                chunk.anchor_label.as_deref(),
+                &chunk.text,
+            ])
+            .with_context(|| {
+                format!(
+                    "failed to insert RAG lexical chunk {}#{}",
+                    record.absolute_path, chunk.chunk_index
+                )
+            })?;
+    }
+
     Ok(())
 }
 
@@ -1454,7 +1582,9 @@ pub(super) fn delete_metadata_for_paths(
             .prepare("DELETE FROM rag_files WHERE absolute_path = ?1")
             .context("failed to prepare RAG metadata exact delete statement")?;
         let mut descendant_statement = transaction
-            .prepare("DELETE FROM rag_files WHERE absolute_path = ?1 OR absolute_path LIKE ?2")
+            .prepare(
+                "DELETE FROM rag_files WHERE absolute_path = ?1 OR absolute_path LIKE ?2 ESCAPE '\\'",
+            )
             .context("failed to prepare RAG metadata descendant delete statement")?;
         let mut lexical_exact_statement = transaction
             .prepare(&format!(
@@ -1463,13 +1593,13 @@ pub(super) fn delete_metadata_for_paths(
             .context("failed to prepare RAG lexical exact delete statement")?;
         let mut lexical_descendant_statement = transaction
             .prepare(&format!(
-                "DELETE FROM {RAG_LEXICAL_TABLE_NAME} WHERE absolute_path = ?1 OR absolute_path LIKE ?2"
+                "DELETE FROM {RAG_LEXICAL_TABLE_NAME} WHERE absolute_path = ?1 OR absolute_path LIKE ?2 ESCAPE '\\'"
             ))
             .context("failed to prepare RAG lexical descendant delete statement")?;
 
         for path in paths {
             if delete_descendants {
-                let like_pattern = format!("{path}/%");
+                let like_pattern = descendant_like_pattern(path);
                 descendant_statement
                     .execute(params![path, like_pattern])
                     .with_context(|| format!("failed to delete RAG metadata rows: {path}"))?;
@@ -1489,6 +1619,69 @@ pub(super) fn delete_metadata_for_paths(
     transaction
         .commit()
         .context("failed to commit RAG metadata delete transaction")?;
+    Ok(())
+}
+
+pub(super) fn refresh_projection_metadata_for_records(
+    database_path: &Path,
+    metadata_path: &Path,
+    records: &[RagIndexedFileRecord],
+) -> Result<()> {
+    if records.is_empty() {
+        return Ok(());
+    }
+
+    let mut chunk_connection = open_chunk_store_connection(database_path)?;
+    let chunk_transaction = chunk_connection
+        .transaction()
+        .context("failed to open RAG chunk projection refresh transaction")?;
+    {
+        let mut chunk_statement = chunk_transaction
+            .prepare("UPDATE rag_chunks SET source_root = ?1 WHERE absolute_path = ?2")
+            .context("failed to prepare RAG chunk projection refresh statement")?;
+        for record in records {
+            chunk_statement
+                .execute(params![&record.source_root, &record.absolute_path])
+                .with_context(|| {
+                    format!(
+                        "failed to refresh RAG chunk projection metadata: {}",
+                        record.absolute_path
+                    )
+                })?;
+        }
+    }
+    chunk_transaction
+        .commit()
+        .context("failed to commit RAG chunk projection refresh transaction")?;
+
+    let mut metadata_connection = open_metadata_connection(metadata_path)?;
+    let metadata_transaction = metadata_connection
+        .transaction()
+        .context("failed to open RAG lexical projection refresh transaction")?;
+    {
+        let mut lexical_statement = metadata_transaction
+            .prepare(&format!(
+                "UPDATE {RAG_LEXICAL_TABLE_NAME} SET source_root = ?1, path = ?2 WHERE absolute_path = ?3"
+            ))
+            .context("failed to prepare RAG lexical projection refresh statement")?;
+        for record in records {
+            lexical_statement
+                .execute(params![
+                    &record.source_root,
+                    &record.relative_path,
+                    &record.absolute_path,
+                ])
+                .with_context(|| {
+                    format!(
+                        "failed to refresh RAG lexical projection metadata: {}",
+                        record.absolute_path
+                    )
+                })?;
+        }
+    }
+    metadata_transaction
+        .commit()
+        .context("failed to commit RAG lexical projection refresh transaction")?;
     Ok(())
 }
 

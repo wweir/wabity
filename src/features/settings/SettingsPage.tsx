@@ -1170,6 +1170,7 @@ export function SettingsPage({
 				{ label: "已索引文件", value: String(ragScanResult.indexedFileCount) },
 				{ label: "跳过文件", value: String(ragScanResult.skippedFileCount) },
 				{ label: "向量块", value: String(ragScanResult.chunkCount) },
+				{ label: "警告", value: String(ragScanResult.warningCount) },
 			]
 		: [];
 	const selectedLlmProviderUsedByPersistedRag =

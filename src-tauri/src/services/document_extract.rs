@@ -17,9 +17,14 @@ const MARKDOWN_DOCUMENT_EXTENSIONS: &[&str] = &["md", "mdx", "markdown"];
 const PLAIN_TEXT_DOCUMENT_EXTENSIONS: &[&str] = &["txt", "rst", "adoc"];
 const PLAIN_TEXT_EXTRACTOR_FINGERPRINT: &str = "plain-text/v1";
 const DOCX_EXTRACTOR_FINGERPRINT: &str = "docx/v1";
-const PDF_EXTRACTOR_FINGERPRINT: &str = "pdf-text/v2";
+const PDF_EXTRACTOR_FINGERPRINT: &str = "pdf-text/v3";
 const PDF_BLOCK_TARGET_CHARS: usize = 700;
 const PDF_BLOCK_MIN_SENTENCE_CHARS: usize = 280;
+const PDF_MIN_INDEXABLE_NON_WHITESPACE_CHARS: usize = 24;
+const PDF_MIN_WORDLIKE_CHAR_RATIO_PERCENT: usize = 45;
+const PDF_MAX_SUSPICIOUS_CHAR_RATIO_PERCENT: usize = 10;
+const PDF_SIGNIFICANT_SCRIPT_CHAR_COUNT: usize = 6;
+const PDF_SIGNIFICANT_SCRIPT_RATIO_PERCENT: usize = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -54,23 +59,45 @@ pub(crate) struct ExtractedBlock {
 struct ExtractedPdfPage {
     page_number: u32,
     lines: Vec<String>,
-    extraction_warning: Option<String>,
+    extraction_warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct PdfTextQualityStats {
+    non_whitespace_chars: usize,
+    wordlike_chars: usize,
+    suspicious_chars: usize,
+    latin_chars: usize,
+    cjk_chars: usize,
+    cyrillic_chars: usize,
+    arabic_chars: usize,
+    hebrew_chars: usize,
+    greek_chars: usize,
+    other_letter_chars: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PdfScriptBucket {
+    Latin,
+    Cjk,
+    Cyrillic,
+    Arabic,
+    Hebrew,
+    Greek,
+    OtherLetter,
 }
 
 impl ExtractedPdfPage {
-    fn from_text(page_number: u32, text: String) -> Self {
+    fn from_chunks(
+        page_number: u32,
+        text_chunks: Vec<String>,
+        extraction_warnings: Vec<String>,
+    ) -> Self {
+        let page_text = text_chunks.join("\n");
         Self {
             page_number,
-            lines: normalize_pdf_page_lines(&text),
-            extraction_warning: None,
-        }
-    }
-
-    fn from_error(page_number: u32, error: String) -> Self {
-        Self {
-            page_number,
-            lines: Vec::new(),
-            extraction_warning: Some(error),
+            lines: normalize_pdf_page_lines(&page_text),
+            extraction_warnings,
         }
     }
 }
@@ -89,6 +116,17 @@ pub(crate) fn classify_document_kind(path: &Path) -> Option<DocumentKind> {
         return Some(DocumentKind::Pdf);
     }
     None
+}
+
+pub(crate) fn extractor_fingerprint_for_path(path: &Path) -> Option<&'static str> {
+    match classify_document_kind(path) {
+        Some(DocumentKind::PlainText) | Some(DocumentKind::Markdown) => {
+            Some(PLAIN_TEXT_EXTRACTOR_FINGERPRINT)
+        }
+        Some(DocumentKind::Docx) => Some(DOCX_EXTRACTOR_FINGERPRINT),
+        Some(DocumentKind::Pdf) => Some(PDF_EXTRACTOR_FINGERPRINT),
+        None => None,
+    }
 }
 
 pub(crate) fn is_supported_document_file(path: &Path) -> bool {
@@ -175,19 +213,29 @@ fn extract_pdf_document(path: &Path, bytes: &[u8]) -> Result<ExtractedDocument> 
     let mut warnings = Vec::new();
     for (page, lines) in pages.iter().zip(stripped_pages) {
         let page_number = page.page_number;
-        if let Some(warning) = page.extraction_warning.as_ref() {
-            warnings.push(warning.clone());
+        let had_extraction_warning = !page.extraction_warnings.is_empty();
+        warnings.extend(page.extraction_warnings.iter().cloned());
+        if !page_contains_any_text(&lines) {
+            if !had_extraction_warning {
+                warnings.push(format!("page {page_number} did not produce readable text"));
+            }
             continue;
         }
         if !page_contains_readable_text(&lines) {
-            warnings.push(format!("page {page_number} did not produce readable text"));
+            warnings.push(format!(
+                "page {page_number} text looked corrupted and was skipped"
+            ));
             continue;
         }
 
         blocks.extend(split_pdf_page_into_blocks(page_number, &lines));
     }
     if blocks.is_empty() {
-        bail!("PDF 文档没有可提取的文本内容: {}", path.display());
+        let detail = warnings
+            .last()
+            .map(|warning| format!(" ({warning})"))
+            .unwrap_or_default();
+        bail!("PDF 文档没有可提取的文本内容: {}{}", path.display(), detail);
     }
 
     let normalized_text = blocks
@@ -224,13 +272,21 @@ fn extract_pdf_pages(path: &Path, bytes: &[u8]) -> Result<Vec<ExtractedPdfPage>>
 }
 
 fn extract_pdf_page(document: &PdfDocument, page_number: u32) -> ExtractedPdfPage {
-    match document.extract_text(&[page_number]) {
-        Ok(text) => ExtractedPdfPage::from_text(page_number, text),
-        Err(error) => ExtractedPdfPage::from_error(
-            page_number,
-            format!("page {page_number} text extraction failed: {error}"),
-        ),
+    let mut text_chunks = Vec::new();
+    let mut extraction_warnings = Vec::new();
+    for chunk in document.extract_text_chunks(&[page_number]) {
+        match chunk {
+            Ok(text) => {
+                if !text.trim().is_empty() {
+                    text_chunks.push(text);
+                }
+            }
+            Err(error) => extraction_warnings.push(format!(
+                "page {page_number} text extraction warning: {error}"
+            )),
+        }
     }
+    ExtractedPdfPage::from_chunks(page_number, text_chunks, extraction_warnings)
 }
 
 fn normalize_pdf_page_lines(page_text: &str) -> Vec<String> {
@@ -296,8 +352,175 @@ fn should_drop_repeated_pdf_edge(
     !line.is_empty() && counts.get(line).copied().unwrap_or(0) >= required_repeats
 }
 
-fn page_contains_readable_text(lines: &[String]) -> bool {
+fn page_contains_any_text(lines: &[String]) -> bool {
     lines.iter().any(|line| !line.trim().is_empty())
+}
+
+fn page_contains_readable_text(lines: &[String]) -> bool {
+    let stats = collect_pdf_text_quality_stats(lines);
+    if stats.non_whitespace_chars == 0 {
+        return false;
+    }
+    if stats.non_whitespace_chars < PDF_MIN_INDEXABLE_NON_WHITESPACE_CHARS {
+        return stats.wordlike_chars > 0 && stats.suspicious_chars == 0;
+    }
+
+    stats.wordlike_chars * 100 >= stats.non_whitespace_chars * PDF_MIN_WORDLIKE_CHAR_RATIO_PERCENT
+        && stats.suspicious_chars * 100
+            <= stats.non_whitespace_chars * PDF_MAX_SUSPICIOUS_CHAR_RATIO_PERCENT
+        && !has_suspicious_pdf_script_mix(&stats)
+}
+
+fn collect_pdf_text_quality_stats(lines: &[String]) -> PdfTextQualityStats {
+    let mut stats = PdfTextQualityStats::default();
+    for character in lines.iter().flat_map(|line| line.chars()) {
+        if character.is_whitespace() {
+            continue;
+        }
+        stats.non_whitespace_chars += 1;
+        if is_wordlike_pdf_char(character) {
+            stats.wordlike_chars += 1;
+        }
+        if is_suspicious_pdf_char(character) {
+            stats.suspicious_chars += 1;
+        }
+        match classify_pdf_script_bucket(character) {
+            Some(PdfScriptBucket::Latin) => stats.latin_chars += 1,
+            Some(PdfScriptBucket::Cjk) => stats.cjk_chars += 1,
+            Some(PdfScriptBucket::Cyrillic) => stats.cyrillic_chars += 1,
+            Some(PdfScriptBucket::Arabic) => stats.arabic_chars += 1,
+            Some(PdfScriptBucket::Hebrew) => stats.hebrew_chars += 1,
+            Some(PdfScriptBucket::Greek) => stats.greek_chars += 1,
+            Some(PdfScriptBucket::OtherLetter) => stats.other_letter_chars += 1,
+            None => {}
+        }
+    }
+    stats
+}
+
+fn has_suspicious_pdf_script_mix(stats: &PdfTextQualityStats) -> bool {
+    let script_chars = stats.latin_chars
+        + stats.cjk_chars
+        + stats.cyrillic_chars
+        + stats.arabic_chars
+        + stats.hebrew_chars
+        + stats.greek_chars
+        + stats.other_letter_chars;
+    if script_chars == 0 {
+        return false;
+    }
+
+    let cjk_is_significant = is_significant_pdf_script_bucket(stats.cjk_chars, script_chars);
+    let other_letter_is_significant =
+        is_significant_pdf_script_bucket(stats.other_letter_chars, script_chars);
+    let significant_named_unexpected_bucket_count = [
+        stats.cyrillic_chars,
+        stats.arabic_chars,
+        stats.hebrew_chars,
+        stats.greek_chars,
+    ]
+    .into_iter()
+    .filter(|count| is_significant_pdf_script_bucket(*count, script_chars))
+    .count();
+
+    cjk_is_significant
+        && (other_letter_is_significant || significant_named_unexpected_bucket_count >= 2)
+}
+
+fn is_significant_pdf_script_bucket(bucket_chars: usize, total_script_chars: usize) -> bool {
+    bucket_chars >= PDF_SIGNIFICANT_SCRIPT_CHAR_COUNT
+        && bucket_chars * 100 >= total_script_chars * PDF_SIGNIFICANT_SCRIPT_RATIO_PERCENT
+}
+
+fn classify_pdf_script_bucket(character: char) -> Option<PdfScriptBucket> {
+    let code_point = character as u32;
+    if is_cjk_script_char(character) {
+        return Some(PdfScriptBucket::Cjk);
+    }
+    if matches!(
+        code_point,
+        0x0041..=0x024F | 0x1E00..=0x1EFF | 0x2C60..=0x2C7F | 0xA720..=0xA7FF | 0xAB30..=0xAB6F
+    ) {
+        return Some(PdfScriptBucket::Latin);
+    }
+    if matches!(code_point, 0x0370..=0x03FF | 0x1F00..=0x1FFF) {
+        return Some(PdfScriptBucket::Greek);
+    }
+    if matches!(
+        code_point,
+        0x0400..=0x052F | 0x1C80..=0x1C8F | 0x2DE0..=0x2DFF | 0xA640..=0xA69F
+    ) {
+        return Some(PdfScriptBucket::Cyrillic);
+    }
+    if matches!(
+        code_point,
+        0x0590..=0x05FF | 0xFB1D..=0xFB4F
+    ) {
+        return Some(PdfScriptBucket::Hebrew);
+    }
+    if matches!(
+        code_point,
+        0x0600..=0x06FF
+            | 0x0750..=0x077F
+            | 0x0870..=0x089F
+            | 0x08A0..=0x08FF
+            | 0xFB50..=0xFDFF
+            | 0xFE70..=0xFEFF
+    ) {
+        return Some(PdfScriptBucket::Arabic);
+    }
+    character
+        .is_alphabetic()
+        .then_some(PdfScriptBucket::OtherLetter)
+}
+
+fn is_wordlike_pdf_char(character: char) -> bool {
+    character.is_alphanumeric() || is_cjk_unified_ideograph(character)
+}
+
+fn is_suspicious_pdf_char(character: char) -> bool {
+    character == '\u{fffd}'
+        || character.is_control()
+        || matches!(
+            character as u32,
+            0x200B..=0x200F
+                | 0x202A..=0x202E
+                | 0x2060..=0x206F
+                | 0xFFF0..=0xFFFF
+                | 0xE000..=0xF8FF
+        )
+}
+
+fn is_cjk_unified_ideograph(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0x20000..=0x2A6DF
+            | 0x2A700..=0x2B73F
+            | 0x2B740..=0x2B81F
+            | 0x2B820..=0x2CEAF
+            | 0x2CEB0..=0x2EBEF
+            | 0x30000..=0x3134F
+    )
+}
+
+fn is_cjk_script_char(character: char) -> bool {
+    is_cjk_unified_ideograph(character)
+        || matches!(
+            character as u32,
+            0x3040..=0x30FF
+                | 0x31A0..=0x31BF
+                | 0x31F0..=0x31FF
+                | 0x3400..=0x4DBF
+                | 0xAC00..=0xD7AF
+                | 0x1100..=0x11FF
+                | 0x3130..=0x318F
+                | 0xA960..=0xA97F
+                | 0xD7B0..=0xD7FF
+                | 0xFF66..=0xFF9D
+        )
 }
 
 fn split_pdf_page_into_blocks(page_number: u32, lines: &[String]) -> Vec<ExtractedBlock> {
@@ -687,47 +910,16 @@ mod tests {
     }
 
     fn simple_test_pdf_bytes() -> Vec<u8> {
-        let content_stream = "\
+        build_single_page_pdf(
+            "\
 BT
 /F1 12 Tf
 72 100 Td
 (Hello PDF extraction.) Tj
 0 -18 Td
 (Second line on page one.) Tj
-ET";
-        let objects = [
-            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".to_string(),
-            "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n".to_string(),
-            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 144] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj\n".to_string(),
-            format!(
-                "4 0 obj\n<< /Length {} >>\nstream\n{}\nendstream\nendobj\n",
-                content_stream.len(),
-                content_stream
-            ),
-            "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n"
-                .to_string(),
-        ];
-
-        let mut pdf = String::from("%PDF-1.4\n");
-        let mut object_offsets = Vec::with_capacity(objects.len() + 1);
-        object_offsets.push(0usize);
-        for object in objects {
-            object_offsets.push(pdf.len());
-            pdf.push_str(&object);
-        }
-
-        let startxref = pdf.len();
-        pdf.push_str(&format!("xref\n0 {}\n", object_offsets.len()));
-        pdf.push_str("0000000000 65535 f \n");
-        for offset in object_offsets.iter().skip(1) {
-            pdf.push_str(&format!("{offset:010} 00000 n \n"));
-        }
-        pdf.push_str(&format!(
-            "trailer\n<< /Root 1 0 R /Size {} >>\nstartxref\n{}\n%%EOF",
-            object_offsets.len(),
-            startxref
-        ));
-        pdf.into_bytes()
+ET",
+        )
     }
 
     #[test]
@@ -817,10 +1009,61 @@ ET";
     }
 
     fn invalid_content_stream_pdf_bytes() -> Vec<u8> {
-        let content_stream = "\
+        build_single_page_pdf(
+            "\
 BT
 Tf
+ET",
+        )
+    }
+
+    fn partially_invalid_content_stream_pdf_bytes() -> Vec<u8> {
+        let content_stream = "\
+BT
+/F1 12 Tf
+72 100 Td
+(Recovered text before invalid font.) Tj
+/FB 12 Tf
+0 -18 Td
+(This fragment should be skipped.) Tj
 ET";
+        let objects = [
+            "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".to_string(),
+            "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n".to_string(),
+            "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 144] /Contents 4 0 R /Resources << /Font << /F1 5 0 R /FB 6 0 R >> >> >>\nendobj\n".to_string(),
+            format!(
+                "4 0 obj\n<< /Length {} >>\nstream\n{}\nendstream\nendobj\n",
+                content_stream.len(),
+                content_stream
+            ),
+            "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n"
+                .to_string(),
+            "6 0 obj\n<< /Type /Font /Subtype /Type0 /BaseFont /HeiseiKakuGo-W5 /Encoding /Identity-H >>\nendobj\n".to_string(),
+        ];
+
+        let mut pdf = String::from("%PDF-1.4\n");
+        let mut object_offsets = Vec::with_capacity(objects.len() + 1);
+        object_offsets.push(0usize);
+        for object in objects {
+            object_offsets.push(pdf.len());
+            pdf.push_str(&object);
+        }
+
+        let startxref = pdf.len();
+        pdf.push_str(&format!("xref\n0 {}\n", object_offsets.len()));
+        pdf.push_str("0000000000 65535 f \n");
+        for offset in object_offsets.iter().skip(1) {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Root 1 0 R /Size {} >>\nstartxref\n{}\n%%EOF",
+            object_offsets.len(),
+            startxref
+        ));
+        pdf.into_bytes()
+    }
+
+    fn build_single_page_pdf(content_stream: &str) -> Vec<u8> {
         let objects = [
             "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".to_string(),
             "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n".to_string(),
@@ -866,6 +1109,7 @@ ET";
 
         let message = extracted.to_string();
         assert!(message.contains("PDF 文档没有可提取的文本内容"));
+        assert!(message.contains("page 1 text extraction warning"));
     }
 
     #[test]
@@ -879,9 +1123,56 @@ ET";
         assert_eq!(pages.len(), 1);
         assert_eq!(pages[0].page_number, 1);
         assert!(pages[0].lines.is_empty());
-        assert!(pages[0]
-            .extraction_warning
-            .as_deref()
-            .is_some_and(|warning| warning.contains("page 1 text extraction failed")));
+        assert_eq!(pages[0].extraction_warnings.len(), 1);
+        assert!(pages[0].extraction_warnings[0].contains("page 1 text extraction warning"));
+    }
+
+    #[test]
+    fn pdf_page_extraction_keeps_readable_chunks_when_one_chunk_fails() {
+        let extracted = extract_pdf_document(
+            Path::new("/tmp/partially-invalid.pdf"),
+            &partially_invalid_content_stream_pdf_bytes(),
+        )
+        .expect("partially invalid content stream should still yield readable text");
+
+        assert!(extracted
+            .normalized_text
+            .contains("Recovered text before invalid font."));
+        assert_eq!(extracted.blocks.len(), 1);
+        assert_eq!(extracted.warnings.len(), 1);
+        assert!(extracted.warnings[0].contains("page 1 text extraction warning"));
+    }
+
+    #[test]
+    fn pdf_quality_gate_rejects_suspicious_control_heavy_text() {
+        assert!(!page_contains_readable_text(&[
+            "\u{0001}\u{0002}\u{0003}\u{0004}broken".to_string(),
+            "\u{0005}\u{0006}\u{0007}\u{0008}text".to_string(),
+        ]));
+        assert!(page_contains_readable_text(&[
+            "Readable ASCII text for indexing.".to_string(),
+            "Second readable line.".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn pdf_quality_gate_rejects_script_mojibake_mix() {
+        assert!(!page_contains_readable_text(&[
+            "ᵜҖሩᰙᵏ Linux ᫽֌㌫㔏 研究 内核 设计".to_string(),
+            "䘉ᱟ ᇂޞ ተҘሯ㍒ 并非 正常 中文 内容".to_string(),
+            "ᵜҫӵ֌ ㌖䠽 机制 分析 与 实现 过程".to_string(),
+        ]));
+    }
+
+    #[test]
+    fn pdf_quality_gate_keeps_single_script_documents_indexable() {
+        assert!(page_contains_readable_text(&[
+            "Нормальный русский текст для PDF индексации.".to_string(),
+            "Вторая строка содержит осмысленное описание.".to_string(),
+        ]));
+        assert!(page_contains_readable_text(&[
+            "هذا نص عربي قابل للفهرسة داخل ملف PDF.".to_string(),
+            "السطر الثاني يحتوي على محتوى واضح ومقروء.".to_string(),
+        ]));
     }
 }

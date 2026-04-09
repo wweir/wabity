@@ -7,7 +7,11 @@ import {
 	browserPublicSkillCatalog,
 	defaultRagIgnoreGlobs,
 } from "./defaults";
-import { beginTransientWindowInteraction, endTransientWindowInteraction } from "./launcher";
+import {
+	beginTransientWindowInteraction,
+	endTransientWindowInteraction,
+	getWorkspace,
+} from "./launcher";
 import { invokeIfDesktop, invokeOrDefault, listenIfDesktop } from "./runtime";
 import type {
 	AcpAgentCatalog,
@@ -28,6 +32,7 @@ import type {
 } from "../types";
 
 export { defaultRagIgnoreGlobs };
+export { getWorkspace };
 
 export async function getShortcut(): Promise<ShortcutConfig> {
 	return invokeOrDefault("get_shortcut", {
@@ -106,6 +111,8 @@ export async function scanRagSources(
 			indexedFileCount: 0,
 			skippedFileCount: 0,
 			chunkCount: 0,
+			warningCount: 0,
+			recentWarnings: [],
 			finishedAtMs: Date.now(),
 		},
 		{ ragSettings, llmSettings },

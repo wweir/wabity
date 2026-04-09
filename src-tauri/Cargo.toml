@@ -9,6 +9,12 @@ edition = "2021"
 members = ["crates/openai-compatible"]
 resolver = "2"
 
+[workspace.dependencies]
+anyhow = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
 [lib]
 name = "wabity_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
@@ -18,12 +24,10 @@ tauri-build = { version = "2", features = ["codegen"] }
 
 [dependencies]
 agent-client-protocol = "0.10.4"
-anyhow = "1"
+anyhow.workspace = true
 arboard = "3"
 async-trait = "0.1"
 axum = { version = "0.8.6", features = ["http1", "json", "tokio"] }
-arrow-array = "57.2"
-arrow-schema = "57.2"
 base64 = "0.22"
 dirs = "5"
 enigo = "0.3"
@@ -32,33 +36,33 @@ fuzzy-matcher = "0.3.7"
 globset = "0.4.18"
 ignore = "0.4.25"
 libc = "0.2"
-lancedb = "0.26.2"
 lopdf = { version = "0.38", default-features = false }
 md5 = "0.7"
 notify = "8.2.0"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest.workspace = true
 roxmltree = "0.20"
 rusqlite = { version = "0.37", features = ["bundled"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde.workspace = true
+serde_json.workspace = true
 shlex = "1"
 sysinfo = "0.38.4"
-wabity-openai-compatible = { path = "crates/openai-compatible" }
-text-splitter = { version = "0.29.3", features = ["markdown"] }
-toml = "0.8"
 tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
+tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"
+text-splitter = { version = "0.29.3", features = ["markdown"] }
 time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "time"] }
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["compat"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "time"] }
+usearch = "2.24.0"
+wabity-openai-compatible = { path = "crates/openai-compatible" }
 zip = { version = "2", default-features = false, features = ["deflate"] }
-tauri-plugin-notification = "2"
 
-[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+[target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
 

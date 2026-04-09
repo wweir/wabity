@@ -148,6 +148,8 @@ export interface RagScanResult {
 	indexedFileCount: number;
 	skippedFileCount: number;
 	chunkCount: number;
+	warningCount: number;
+	recentWarnings: string[];
 	finishedAtMs: number;
 }
 
@@ -159,6 +161,8 @@ export interface RagRuntimeStatus {
 	completedFileCount: number;
 	totalFileCount: number;
 	pendingFileCount: number;
+	warningCount: number;
+	recentWarnings: string[];
 	lastError: string | null;
 	updatedAtMs: number;
 }

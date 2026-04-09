@@ -345,6 +345,13 @@ struct ChatCompletionsAnswerRequest<'a> {
     runtime: &'a QuestionToolRuntime<'a>,
 }
 
+fn ensure_tool_round_limit(round: usize) -> Result<()> {
+    if round > MAX_TOOL_ROUNDS {
+        bail!("问答工具调用轮数超过限制，模型没有稳定收敛");
+    }
+    Ok(())
+}
+
 async fn answer_with_responses(
     request: ResponsesAnswerRequest<'_>,
 ) -> Result<(AnswerOutcome, ToolCatalog)> {
@@ -460,12 +467,12 @@ async fn answer_with_responses(
                     &error,
                 ) =>
             {
-                previous_response_id = None;
-                pending_input = json!(build_initial_responses_input(
+                reset_responses_retry_chain_state(
                     request.conversation,
                     request.question,
-                    false,
-                ));
+                    &mut previous_response_id,
+                    &mut pending_input,
+                );
                 round = round.saturating_sub(1);
                 continue;
             }
@@ -487,6 +494,12 @@ async fn answer_with_responses(
                     request.runtime.progress_event_tx.as_ref(),
                     "文档问答 · 当前 provider 不兼容 MCP tools，已回退到内置工具重试",
                 );
+                reset_responses_retry_chain_state(
+                    request.conversation,
+                    request.question,
+                    &mut previous_response_id,
+                    &mut pending_input,
+                );
                 round = round.saturating_sub(1);
                 continue;
             }
@@ -507,6 +520,12 @@ async fn answer_with_responses(
                 emit_question_progress(
                     request.runtime.progress_event_tx.as_ref(),
                     "文档问答 · 当前 provider 不兼容 function tools，已回退到无工具请求",
+                );
+                reset_responses_retry_chain_state(
+                    request.conversation,
+                    request.question,
+                    &mut previous_response_id,
+                    &mut pending_input,
                 );
                 round = round.saturating_sub(1);
                 continue;
@@ -584,9 +603,7 @@ async fn answer_with_responses(
                 .context("LLM provider responses 未返回可识别的回答")?;
         }
 
-        if tool_calls.len() + local_calls.len() > MAX_TOOL_ROUNDS {
-            bail!("问答工具调用轮数超过限制，模型没有稳定收敛");
-        }
+        ensure_tool_round_limit(round)?;
 
         emit_question_progress(
             request.runtime.progress_event_tx.as_ref(),
@@ -642,6 +659,16 @@ async fn answer_with_responses(
         },
         effective_tool_catalog,
     ))
+}
+
+fn reset_responses_retry_chain_state(
+    conversation: &[ExecutionConversationTurn],
+    question: &str,
+    previous_response_id: &mut Option<String>,
+    pending_input: &mut Value,
+) {
+    *previous_response_id = None;
+    *pending_input = json!(build_initial_responses_input(conversation, question, false));
 }
 
 async fn answer_with_chat_completions(
@@ -775,9 +802,7 @@ async fn answer_with_chat_completions(
             break (final_answer, reasoning);
         }
 
-        if tool_calls.len() + local_calls.len() > MAX_TOOL_ROUNDS {
-            bail!("问答工具调用轮数超过限制，模型没有稳定收敛");
-        }
+        ensure_tool_round_limit(round)?;
 
         emit_question_progress(
             request.runtime.progress_event_tx.as_ref(),
@@ -971,11 +996,12 @@ mod tests {
     };
 
     use super::{
-        build_initial_responses_input, build_round_action, extract_rag_answer_payload,
+        build_initial_responses_input, build_round_action, ensure_tool_round_limit,
+        extract_rag_answer_payload, reset_responses_retry_chain_state,
         summarize_local_tool_progress, HostSystemContext, LocalToolCall, QuestionAnswerProtocol,
-        QuestionToolRuntime, ResponsesToolCompatibilityMode, OPEN_TARGET_TOOL_NAME,
-        RAG_ANSWER_COMMAND_ALIASES, RAG_QUERY_TOOL_NAME, READ_DOCUMENT_EXCERPT_TOOL_NAME,
-        READ_FILE_TOOL_NAME,
+        QuestionToolRuntime, ResponsesToolCompatibilityMode, MAX_TOOL_ROUNDS,
+        OPEN_TARGET_TOOL_NAME, RAG_ANSWER_COMMAND_ALIASES, RAG_QUERY_TOOL_NAME,
+        READ_DOCUMENT_EXCERPT_TOOL_NAME, READ_FILE_TOOL_NAME,
     };
     use super::{
         conversation_state::{
@@ -999,7 +1025,7 @@ mod tests {
         },
         tool_execute::{
             execute_open_target_tool, execute_read_file_tool, execute_with_timeout,
-            resolve_readable_file_path,
+            rag_query_trace_status, resolve_readable_file_path,
         },
     };
     use crate::domain::{
@@ -1013,6 +1039,8 @@ mod tests {
     };
     use crate::infrastructure::openai_compatible::{body_preview, parse_json_or_sse_payload};
     use crate::services::builtin_mcp;
+    use crate::services::rag_query::RagSearchResult;
+    use serde_json::json;
     use zip::{write::SimpleFileOptions, ZipWriter};
 
     fn test_provider() -> LlmProviderConfig {
@@ -1164,6 +1192,43 @@ mod tests {
         assert_eq!(
             previous_response_id_for_follow_up(Some(&state), true).as_deref(),
             Some("resp_123")
+        );
+    }
+
+    #[test]
+    fn responses_retry_chain_reset_clears_previous_response_id_and_rebuilds_full_input() {
+        let conversation = vec![
+            ExecutionConversationTurn {
+                role: ExecutionConversationRole::User,
+                content: "first question".to_string(),
+            },
+            ExecutionConversationTurn {
+                role: ExecutionConversationRole::Assistant,
+                content: "first answer".to_string(),
+            },
+        ];
+        let mut previous_response_id = Some("resp_123".to_string());
+        let mut pending_input = json!(build_initial_responses_input(
+            &conversation,
+            "follow up",
+            true,
+        ));
+
+        reset_responses_retry_chain_state(
+            &conversation,
+            "follow up",
+            &mut previous_response_id,
+            &mut pending_input,
+        );
+
+        assert_eq!(previous_response_id, None);
+        assert_eq!(
+            pending_input,
+            json!(build_initial_responses_input(
+                &conversation,
+                "follow up",
+                false,
+            ))
         );
     }
 
@@ -1411,6 +1476,7 @@ mod tests {
         assert!(filtered.request_tools.is_empty());
         assert!(filtered.available_names.is_empty());
         assert_eq!(filtered.skipped_mcp_servers, vec!["WebMCP".to_string()]);
+        assert_eq!(filtered.compatibility_fingerprint, "builtin=;mcp=");
     }
 
     #[test]
@@ -1434,7 +1500,7 @@ mod tests {
     }
 
     #[test]
-    fn responses_tool_compatibility_cache_only_degrades() {
+    fn responses_tool_compatibility_cache_accepts_recovered_full_mode() {
         let cache_key = responses_tool_compatibility_cache_key(
             "https://example.com/v1",
             &format!("gpt-test-{}", std::process::id()),
@@ -1448,7 +1514,7 @@ mod tests {
         store_cached_responses_tool_compatibility(&cache_key, ResponsesToolCompatibilityMode::Full);
         assert_eq!(
             load_cached_responses_tool_compatibility(&cache_key),
-            ResponsesToolCompatibilityMode::NoMcp
+            ResponsesToolCompatibilityMode::Full
         );
 
         store_cached_responses_tool_compatibility(
@@ -1459,6 +1525,18 @@ mod tests {
             load_cached_responses_tool_compatibility(&cache_key),
             ResponsesToolCompatibilityMode::NoTools
         );
+    }
+
+    #[test]
+    fn tool_round_limit_allows_eight_rounds() {
+        ensure_tool_round_limit(MAX_TOOL_ROUNDS).expect("eight tool rounds should be allowed");
+    }
+
+    #[test]
+    fn tool_round_limit_rejects_ninth_round() {
+        let error = ensure_tool_round_limit(MAX_TOOL_ROUNDS + 1)
+            .expect_err("ninth tool round should be rejected");
+        assert!(error.to_string().contains("工具调用轮数超过限制"));
     }
 
     #[test]
@@ -1525,6 +1603,25 @@ mod tests {
     }
 
     #[test]
+    fn responses_tool_compatibility_cache_key_changes_when_all_tools_are_removed() {
+        let full_catalog = build_tool_catalog(&[], QuestionAnswerProtocol::Responses);
+        let tool_free_catalog = tool_catalog_without_all_tools(&full_catalog);
+
+        let full_key = responses_tool_compatibility_cache_key(
+            "https://example.com/v1",
+            "gpt-test",
+            &full_catalog,
+        );
+        let tool_free_key = responses_tool_compatibility_cache_key(
+            "https://example.com/v1",
+            "gpt-test",
+            &tool_free_catalog,
+        );
+
+        assert_ne!(full_key, tool_free_key);
+    }
+
+    #[test]
     fn retry_without_mcp_tools_only_triggers_for_provider_5xx_with_mcp_tools() {
         let tool_catalog = build_tool_catalog(
             &[AcpMcpServerConfig::Http(AcpMcpServerHttpConfig {
@@ -1570,6 +1667,28 @@ mod tests {
     }
 
     #[test]
+    fn retry_without_mcp_tools_triggers_for_provider_400_tool_compatibility_errors() {
+        let tool_catalog = build_tool_catalog(
+            &[AcpMcpServerConfig::Http(AcpMcpServerHttpConfig {
+                name: "WebMCP".to_string(),
+                url: "https://example.com/mcp".to_string(),
+                headers: Vec::new(),
+            })],
+            QuestionAnswerProtocol::Responses,
+        );
+        let provider_error = anyhow::anyhow!(
+            "LLM provider responses 请求失败 (400 Bad Request): unsupported field parallel_tool_calls for mcp tools"
+        );
+
+        assert!(should_retry_without_mcp_tools(
+            false,
+            false,
+            &tool_catalog,
+            &provider_error
+        ));
+    }
+
+    #[test]
     fn retry_without_all_tools_triggers_for_provider_5xx_with_function_tools() {
         let tool_catalog = build_tool_catalog(&[], QuestionAnswerProtocol::Responses);
         let provider_error = anyhow::anyhow!(
@@ -1592,6 +1711,20 @@ mod tests {
             false,
             &tool_catalog,
             &client_error
+        ));
+    }
+
+    #[test]
+    fn retry_without_all_tools_triggers_for_provider_400_tool_compatibility_errors() {
+        let tool_catalog = build_tool_catalog(&[], QuestionAnswerProtocol::Responses);
+        let provider_error = anyhow::anyhow!(
+            "LLM provider responses 请求失败 (400 Bad Request): model does not support tools or function calling"
+        );
+
+        assert!(should_retry_without_all_tools(
+            false,
+            &tool_catalog,
+            &provider_error
         ));
     }
 
@@ -1713,6 +1846,30 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn read_file_tool_accepts_relative_paths_inside_secondary_allowed_root() {
+        let root = temp_test_root("relative-secondary-root");
+        let workspace_root = root.join("workspace");
+        let docs_root = root.join("docs");
+        std::fs::create_dir_all(&workspace_root).expect("create workspace root");
+        std::fs::create_dir_all(docs_root.join("guides")).expect("create docs root");
+        let file_path = docs_root.join("guides").join("note.md");
+        std::fs::write(&file_path, "hello").expect("write docs file");
+
+        let workspace_root = workspace_root
+            .canonicalize()
+            .expect("canonicalize workspace root");
+        let docs_root = docs_root.canonicalize().expect("canonicalize docs root");
+        let file_path = file_path.canonicalize().expect("canonicalize docs file");
+
+        let resolved = resolve_readable_file_path("guides/note.md", &[workspace_root, docs_root])
+            .expect("relative file inside secondary allowed root should resolve");
+
+        assert_eq!(normalize_path(&resolved), normalize_path(&file_path));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[tokio::test]
     async fn read_file_tool_reads_normalized_docx_text() {
         let root = temp_test_root("read-docx");
@@ -1803,6 +1960,30 @@ mod tests {
 
         assert_eq!(payload["id"], "resp_123");
         assert_eq!(payload["output"][0]["type"], "message");
+    }
+
+    #[test]
+    fn rag_query_trace_status_marks_pending_indexing_without_false_error() {
+        let result = RagSearchResult {
+            query: "test".to_string(),
+            hit_count: 1,
+            pending_indexing: true,
+            hits: Vec::new(),
+        };
+
+        assert_eq!(rag_query_trace_status(&result), "pending");
+    }
+
+    #[test]
+    fn rag_query_trace_status_marks_stable_index_as_ok() {
+        let result = RagSearchResult {
+            query: "test".to_string(),
+            hit_count: 1,
+            pending_indexing: false,
+            hits: Vec::new(),
+        };
+
+        assert_eq!(rag_query_trace_status(&result), "ok");
     }
 
     #[test]

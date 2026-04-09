@@ -16,7 +16,10 @@ use tokio::{
 
 use crate::{
     domain::rag::{RagRuntimePhase, RagRuntimeStatus, RagScanResult},
-    services::document_extract::{extract_document_from_bytes, is_supported_document_file},
+    services::document_extract::{
+        classify_document_kind, extract_document_from_bytes, extractor_fingerprint_for_path,
+        is_supported_document_file, DocumentKind,
+    },
 };
 
 use super::{
@@ -30,19 +33,30 @@ use super::{
         EmbeddingBatchPlanner,
     },
     model::{
-        PreparedRagFile, RagChunk, RagChunkState, RagIndexedFileRecord, RagIndexedFileVersion,
-        RagRuntimeStartMode, ResolvedRagConfig, RuntimeProgress, CHUNK_MAX_CHARS,
-        CHUNK_OVERLAP_CHARS, MAX_STREAMING_REINDEX_CONCURRENCY, MAX_TEXT_FILE_BYTES,
+        PreparedRagChunk, PreparedRagFile, RagChunk, RagChunkState, RagIndexedFileRecord,
+        RagIndexedFileVersion, RagRuntimeStartMode, ResolvedRagConfig, RuntimeProgress,
+        CHUNK_MAX_CHARS, CHUNK_OVERLAP_CHARS, MAX_STREAMING_REINDEX_CONCURRENCY,
+        MAX_TEXT_FILE_BYTES_DOCX, MAX_TEXT_FILE_BYTES_MARKDOWN, MAX_TEXT_FILE_BYTES_PDF,
+        MAX_TEXT_FILE_BYTES_PLAIN_TEXT,
     },
-    status::set_runtime_status,
+    status::{set_runtime_status, RuntimeStatusUpdate},
     storage::{
         delete_metadata_for_paths, delete_vectors_for_exact_paths,
-        delete_vectors_for_exact_paths_in_state, delete_vectors_with_filter, escape_sql_literal,
-        finalize_metadata_record, load_metadata_paths_for_prefixes, load_metadata_records,
-        metadata_store_has_active_records, prepare_index_storage, replace_lexical_chunks_for_file,
-        upsert_metadata_records, RagVectorStore,
+        delete_vectors_for_exact_paths_in_state, delete_vectors_for_prefix_paths,
+        delete_vectors_with_filter, escape_sql_literal,
+        finalize_metadata_and_replace_lexical_chunks, load_metadata_records, prepare_index_storage,
+        refresh_projection_metadata_for_records, upsert_metadata_records, RagVectorStore,
     },
 };
+
+#[derive(Clone, Copy)]
+pub(super) struct PathUpdateRuntimeContext<'a> {
+    pub(super) app_handle: Option<&'a AppHandle>,
+    pub(super) runtime_status: &'a Arc<AsyncRwLock<RagRuntimeStatus>>,
+    pub(super) runtime_guard: Option<(&'a Arc<AtomicU64>, u64)>,
+}
+
+const MAX_REPORTED_RAG_WARNINGS: usize = 5;
 
 #[derive(Debug, Default)]
 struct RebuildPlan {
@@ -50,6 +64,8 @@ struct RebuildPlan {
     indexed_file_count: usize,
     skipped_file_count: usize,
     chunk_count: usize,
+    warning_count: usize,
+    recent_warnings: Vec<String>,
     staged_cleanup_paths: BTreeSet<String>,
     stale_paths: BTreeSet<String>,
 }
@@ -60,9 +76,12 @@ pub(super) struct RebuildScanEvent {
     pub(super) indexed_file_count: usize,
     pub(super) skipped_file_count: usize,
     pub(super) chunk_count: usize,
+    pub(super) warning_count: usize,
+    pub(super) recent_warnings: Vec<String>,
     pub(super) staged_cleanup_paths: Vec<String>,
     pub(super) stale_paths: Vec<String>,
     pub(super) metadata_refresh: Option<RagIndexedFileRecord>,
+    pub(super) projection_refresh: Option<RagIndexedFileRecord>,
     pub(super) file_to_index: Option<PreparedRagFile>,
 }
 
@@ -73,6 +92,47 @@ struct IndexedPreparedFile {
     vectors: Vec<Vec<f32>>,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct RagFileObservation {
+    bytes_read: usize,
+    extracted_text_bytes: usize,
+    prepared_chunk_count: usize,
+    prepared_chunk_text_bytes: usize,
+    vector_count: usize,
+    vector_bytes_estimate: usize,
+}
+
+pub(super) fn push_recent_rag_warning(recent_warnings: &mut Vec<String>, warning: String) {
+    if warning.trim().is_empty() {
+        return;
+    }
+    if recent_warnings.len() == MAX_REPORTED_RAG_WARNINGS {
+        recent_warnings.remove(0);
+    }
+    recent_warnings.push(warning);
+}
+
+pub(super) fn extend_recent_rag_warnings(
+    recent_warnings: &mut Vec<String>,
+    warnings: impl IntoIterator<Item = String>,
+) {
+    for warning in warnings {
+        push_recent_rag_warning(recent_warnings, warning);
+    }
+}
+
+pub(super) fn format_rag_warning_for_path(path: &Path, warning: &str) -> String {
+    format!("{}: {warning}", path.display())
+}
+
+pub(super) fn format_error_chain(error: &anyhow::Error) -> String {
+    error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(" -> ")
+}
+
 #[derive(Debug)]
 pub(super) enum InspectPathOutcome {
     Skip,
@@ -80,6 +140,7 @@ pub(super) enum InspectPathOutcome {
         record: RagIndexedFileRecord,
         refresh_metadata: bool,
         clear_staged: bool,
+        refresh_projection: bool,
     },
     Reindex(PreparedRagFile),
 }
@@ -93,6 +154,7 @@ pub(super) enum PathUpdatePlan {
     RefreshMetadata {
         record: RagIndexedFileRecord,
         clear_staged: bool,
+        refresh_projection: bool,
     },
     Reindex(PreparedRagFile),
 }
@@ -100,7 +162,7 @@ pub(super) enum PathUpdatePlan {
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn initialize_runtime_storage(
     data_dir: &Path,
-    metadata_path: &Path,
+    _metadata_path: &Path,
     resolved: &ResolvedRagConfig,
     app_handle: Option<&AppHandle>,
     runtime_status: &Arc<AsyncRwLock<RagRuntimeStatus>>,
@@ -108,33 +170,8 @@ pub(super) async fn initialize_runtime_storage(
     storage_lock: &Arc<AsyncMutex<()>>,
     start_mode: RagRuntimeStartMode,
 ) -> Result<()> {
-    if start_mode == RagRuntimeStartMode::RebuildIndex {
-        let _storage_guard = storage_lock.lock().await;
-        rebuild_index_locked(
-            app_handle,
-            data_dir,
-            resolved,
-            runtime_status,
-            runtime_guard,
-        )
-        .await?;
-        return Ok(());
-    }
-
-    let database_path = rag_database_path(data_dir);
-    prepare_index_storage(&database_path, metadata_path, resolved, true).await?;
-
-    if metadata_store_has_active_records(metadata_path).await? {
-        set_runtime_status(
-            app_handle,
-            runtime_status,
-            runtime_guard,
-            RagRuntimePhase::Idle,
-            RuntimeProgress::default(),
-            None,
-        )
-        .await;
-        return Ok(());
+    if start_mode == RagRuntimeStartMode::ReuseIndex {
+        tracing::info!("running incremental RAG startup scan to reconcile offline file changes");
     }
 
     let _storage_guard = storage_lock.lock().await;
@@ -163,7 +200,7 @@ pub(super) async fn rebuild_index_locked(
         runtime_guard,
         RagRuntimePhase::Scanning,
         RuntimeProgress::default(),
-        None,
+        RuntimeStatusUpdate::default(),
     )
     .await;
     tokio::fs::create_dir_all(data_dir).await.with_context(|| {
@@ -194,7 +231,7 @@ pub(super) async fn rebuild_index_locked(
     let client = build_embedding_client()?;
     let mut vector_store = RagVectorStore::open(&database_path).await?;
     let (scan_tx, mut scan_rx) =
-        mpsc::channel::<RebuildScanEvent>(streaming_reindex_concurrency().saturating_mul(4));
+        mpsc::channel::<RebuildScanEvent>(streaming_reindex_concurrency().saturating_mul(2));
     let resolved_for_scan = resolved.clone();
     let scan_handle = tokio::task::spawn_blocking(move || {
         stream_rebuild_scan(&resolved_for_scan, &stored_records, scan_tx)
@@ -240,6 +277,11 @@ pub(super) async fn rebuild_index_locked(
                     .skipped_file_count
                     .saturating_add(event.skipped_file_count);
                 plan.chunk_count = plan.chunk_count.saturating_add(event.chunk_count);
+                plan.warning_count = plan.warning_count.saturating_add(event.warning_count);
+                extend_recent_rag_warnings(
+                    &mut plan.recent_warnings,
+                    event.recent_warnings,
+                );
                 plan.staged_cleanup_paths.extend(event.staged_cleanup_paths);
                 plan.stale_paths.extend(event.stale_paths);
 
@@ -251,10 +293,18 @@ pub(super) async fn rebuild_index_locked(
                     )
                     .await?;
                 }
+                if let Some(record) = event.projection_refresh {
+                    refresh_projection_records(&database_path, &metadata_path, vec![record]).await?;
+                }
 
                 if let Some(file) = event.file_to_index {
                     pending_file_count = pending_file_count.saturating_add(1);
                     pending_files.push_back(file);
+                    tracing::info!(
+                        pending_files_len = pending_files.len(),
+                        pending_file_count,
+                        "rag pending file queue updated"
+                    );
                 } else {
                     completed_file_count =
                         completed_file_count.saturating_add(event.indexed_file_count);
@@ -267,6 +317,11 @@ pub(super) async fn rebuild_index_locked(
                     plan.scanned_file_count,
                     completed_file_count,
                     pending_file_count,
+                    RuntimeStatusUpdate {
+                        warning_count: plan.warning_count,
+                        recent_warnings: plan.recent_warnings.clone(),
+                        ..RuntimeStatusUpdate::default()
+                    },
                 )
                 .await;
             }
@@ -284,6 +339,11 @@ pub(super) async fn rebuild_index_locked(
                     plan.scanned_file_count,
                     completed_file_count,
                     pending_file_count,
+                    RuntimeStatusUpdate {
+                        warning_count: plan.warning_count,
+                        recent_warnings: plan.recent_warnings.clone(),
+                        ..RuntimeStatusUpdate::default()
+                    },
                 )
                 .await;
             }
@@ -327,7 +387,11 @@ pub(super) async fn rebuild_index_locked(
         runtime_guard,
         RagRuntimePhase::Idle,
         RuntimeProgress::default(),
-        None,
+        RuntimeStatusUpdate {
+            warning_count: plan.warning_count,
+            recent_warnings: plan.recent_warnings.clone(),
+            ..RuntimeStatusUpdate::default()
+        },
     )
     .await;
     tracing::info!(
@@ -375,6 +439,8 @@ pub(super) fn stream_rebuild_scan(
                     if scan_tx
                         .blocking_send(RebuildScanEvent {
                             skipped_file_count: 1,
+                            warning_count: 1,
+                            recent_warnings: vec![format!("walk source entry failed: {error}")],
                             ..RebuildScanEvent::default()
                         })
                         .is_err()
@@ -399,9 +465,18 @@ pub(super) fn stream_rebuild_scan(
                 Ok(path) => path,
                 Err(error) => {
                     tracing::warn!(?error, path = %path.display(), "failed to canonicalize RAG file path");
+                    let fallback_path = normalize_path_string(path);
+                    if stored_records.contains_key(&fallback_path) {
+                        visited_paths.insert(fallback_path);
+                    }
                     if scan_tx
                         .blocking_send(RebuildScanEvent {
                             skipped_file_count: 1,
+                            warning_count: 1,
+                            recent_warnings: vec![format_rag_warning_for_path(
+                                path,
+                                &format!("failed to canonicalize path: {error}"),
+                            )],
                             ..RebuildScanEvent::default()
                         })
                         .is_err()
@@ -432,11 +507,15 @@ pub(super) fn stream_rebuild_scan(
                     record,
                     refresh_metadata,
                     clear_staged,
+                    refresh_projection,
                 }) => {
                     event.indexed_file_count = 1;
                     event.chunk_count = record.current_chunk_count();
                     if refresh_metadata {
-                        event.metadata_refresh = Some(record);
+                        event.metadata_refresh = Some(record.clone());
+                    }
+                    if refresh_projection {
+                        event.projection_refresh = Some(record);
                     }
                     if clear_staged {
                         event.staged_cleanup_paths.push(normalized_path);
@@ -444,15 +523,24 @@ pub(super) fn stream_rebuild_scan(
                 }
                 Ok(InspectPathOutcome::Reindex(file)) => {
                     event.indexed_file_count = 1;
-                    event.chunk_count = file.chunks.len();
+                    event.chunk_count = file.chunk_count;
+                    event.warning_count = file.warnings.len();
+                    extend_recent_rag_warnings(
+                        &mut event.recent_warnings,
+                        file.warnings
+                            .iter()
+                            .map(|warning| format_rag_warning_for_path(&canonical_path, warning)),
+                    );
                     event.file_to_index = Some(file);
                 }
                 Err(error) => {
                     tracing::warn!(?error, path = %canonical_path.display(), "failed to inspect RAG file");
                     event.skipped_file_count = 1;
-                    if stored_record.is_some() {
-                        event.stale_paths.push(normalized_path);
-                    }
+                    event.warning_count = 1;
+                    push_recent_rag_warning(
+                        &mut event.recent_warnings,
+                        format_rag_warning_for_path(&canonical_path, &format_error_chain(&error)),
+                    );
                 }
             }
 
@@ -516,6 +604,7 @@ async fn set_rebuild_runtime_status(
     scanned_file_count: usize,
     completed_file_count: usize,
     pending_file_count: usize,
+    update: RuntimeStatusUpdate,
 ) {
     let total_file_count = completed_file_count.saturating_add(pending_file_count);
     set_runtime_status(
@@ -533,7 +622,7 @@ async fn set_rebuild_runtime_status(
             total_file_count,
             pending_file_count,
         },
-        None,
+        update,
     )
     .await;
 }
@@ -563,25 +652,43 @@ async fn write_metadata_records(
     Ok(())
 }
 
-pub(super) async fn execute_path_update_plans(
-    app_handle: Option<&AppHandle>,
+async fn refresh_projection_records(
     database_path: &Path,
     metadata_path: &Path,
-    resolved: &ResolvedRagConfig,
-    runtime_status: &Arc<AsyncRwLock<RagRuntimeStatus>>,
-    runtime_guard: Option<(&Arc<AtomicU64>, u64)>,
-    plans: Vec<(PathBuf, PathUpdatePlan)>,
+    records: Vec<RagIndexedFileRecord>,
 ) -> Result<()> {
-    if plans.is_empty() {
+    if records.is_empty() {
         return Ok(());
     }
 
-    let client = build_embedding_client()?;
+    tokio::task::spawn_blocking({
+        let database_path = database_path.to_path_buf();
+        let metadata_path = metadata_path.to_path_buf();
+        move || refresh_projection_metadata_for_records(&database_path, &metadata_path, &records)
+    })
+    .await
+    .context("failed to join RAG projection metadata refresh task")??;
+    Ok(())
+}
+
+pub(super) async fn execute_path_update_plans(
+    runtime_context: PathUpdateRuntimeContext<'_>,
+    database_path: &Path,
+    metadata_path: &Path,
+    resolved: &ResolvedRagConfig,
+    plans: Vec<(PathBuf, PathUpdatePlan)>,
+    mut status_update: RuntimeStatusUpdate,
+) -> Result<RuntimeStatusUpdate> {
+    if plans.is_empty() {
+        return Ok(status_update);
+    }
+
     let mut vector_store = RagVectorStore::open(database_path).await?;
     let mut delete_exact_paths = Vec::new();
     let mut delete_prefix_paths = Vec::new();
     let mut staged_cleanup_paths = Vec::new();
     let mut metadata_refreshes = Vec::new();
+    let mut projection_refreshes = Vec::new();
     let mut files_to_index = Vec::new();
 
     for (path, plan) in plans {
@@ -597,9 +704,13 @@ pub(super) async fn execute_path_update_plans(
             PathUpdatePlan::RefreshMetadata {
                 record,
                 clear_staged,
+                refresh_projection,
             } => {
                 if clear_staged {
                     staged_cleanup_paths.push(record.absolute_path.clone());
+                }
+                if refresh_projection {
+                    projection_refreshes.push(record.clone());
                 }
                 metadata_refreshes.push(record);
             }
@@ -619,17 +730,11 @@ pub(super) async fn execute_path_update_plans(
     }
 
     if !delete_prefix_paths.is_empty() {
-        let resolved_delete_paths = tokio::task::spawn_blocking({
-            let metadata_path = metadata_path.to_path_buf();
-            let delete_prefix_paths = delete_prefix_paths.clone();
-            move || load_metadata_paths_for_prefixes(&metadata_path, &delete_prefix_paths)
-        })
-        .await
-        .context("failed to join descendant RAG metadata lookup task")??;
-        delete_vectors_for_exact_paths(&mut vector_store, &resolved_delete_paths).await?;
+        delete_vectors_for_prefix_paths(&mut vector_store, &delete_prefix_paths).await?;
         tokio::task::spawn_blocking({
             let metadata_path = metadata_path.to_path_buf();
-            move || delete_metadata_for_paths(&metadata_path, &resolved_delete_paths, false)
+            let delete_prefix_paths = delete_prefix_paths.clone();
+            move || delete_metadata_for_paths(&metadata_path, &delete_prefix_paths, true)
         })
         .await
         .context("failed to join descendant RAG metadata delete task")??;
@@ -654,11 +759,28 @@ pub(super) async fn execute_path_update_plans(
         .context("failed to join batched RAG metadata refresh task")??;
     }
 
+    if !projection_refreshes.is_empty() {
+        refresh_projection_records(database_path, metadata_path, projection_refreshes).await?;
+    }
+
+    for file in &files_to_index {
+        status_update.warning_count = status_update
+            .warning_count
+            .saturating_add(file.warnings.len());
+        extend_recent_rag_warnings(
+            &mut status_update.recent_warnings,
+            file.warnings
+                .iter()
+                .map(|warning| format_rag_warning_for_path(&file.path, warning)),
+        );
+    }
+
     if !files_to_index.is_empty() {
+        let client = build_embedding_client()?;
         set_runtime_status(
-            app_handle,
-            runtime_status,
-            runtime_guard,
+            runtime_context.app_handle,
+            runtime_context.runtime_status,
+            runtime_context.runtime_guard,
             RagRuntimePhase::Indexing,
             RuntimeProgress {
                 scanned_file_count: files_to_index.len(),
@@ -666,7 +788,7 @@ pub(super) async fn execute_path_update_plans(
                 pending_file_count: files_to_index.len(),
                 ..RuntimeProgress::default()
             },
-            None,
+            status_update.clone(),
         )
         .await;
         for (index, file) in files_to_index.iter().enumerate() {
@@ -680,9 +802,9 @@ pub(super) async fn execute_path_update_plans(
                 .await?;
             let remaining = files_to_index.len().saturating_sub(index + 1);
             set_runtime_status(
-                app_handle,
-                runtime_status,
-                runtime_guard,
+                runtime_context.app_handle,
+                runtime_context.runtime_status,
+                runtime_context.runtime_guard,
                 if remaining == 0 {
                     RagRuntimePhase::Scanning
                 } else {
@@ -694,14 +816,14 @@ pub(super) async fn execute_path_update_plans(
                     total_file_count: files_to_index.len(),
                     pending_file_count: remaining,
                 },
-                None,
+                status_update.clone(),
             )
             .await;
         }
     }
 
     vector_store.ensure_index().await?;
-    Ok(())
+    Ok(status_update)
 }
 
 async fn reindex_prepared_file(
@@ -742,9 +864,21 @@ async fn build_indexed_file_output(
     let reusable_vectors = vector_store
         .load_chunk_vectors_for_file(&file.record.absolute_path, RagChunkState::Active)
         .await?;
-    let chunks = build_chunks_for_prepared_file(&file);
+    let observation = observe_prepared_file(&file);
+    let chunks = build_chunks_for_prepared_file(&file, &file.prepared_chunks);
     let vectors =
         resolve_chunk_vectors(resolved, client, vector_store, &chunks, &reusable_vectors).await?;
+    log_rag_file_observation(
+        &file,
+        RagFileObservation {
+            vector_count: vectors.len(),
+            vector_bytes_estimate: vectors
+                .iter()
+                .map(|vector| vector.len().saturating_mul(std::mem::size_of::<f32>()))
+                .sum(),
+            ..observation
+        },
+    );
     Ok(IndexedPreparedFile {
         file,
         chunks,
@@ -803,9 +937,12 @@ async fn persist_indexed_file(
     tokio::task::spawn_blocking({
         let metadata_path = metadata_path.to_path_buf();
         move || {
-            let finalized_record = finalize_metadata_record(&file);
-            upsert_metadata_records(&metadata_path, &[finalized_record])?;
-            replace_lexical_chunks_for_file(&metadata_path, &file)
+            finalize_metadata_and_replace_lexical_chunks(
+                &metadata_path,
+                &file.record,
+                file.prepared_chunks.len(),
+                &file.prepared_chunks,
+            )
         }
     })
     .await
@@ -904,11 +1041,13 @@ pub(super) fn build_path_update_plan(
             record,
             refresh_metadata,
             clear_staged,
+            refresh_projection,
         } => {
             if refresh_metadata {
                 Ok(PathUpdatePlan::RefreshMetadata {
                     record,
                     clear_staged,
+                    refresh_projection,
                 })
             } else {
                 Ok(PathUpdatePlan::Noop)
@@ -937,10 +1076,13 @@ pub(super) fn inspect_path_for_index(
     if !is_supported_document_file(path) {
         return Ok(InspectPathOutcome::Skip);
     }
+    let Some(document_kind) = classify_document_kind(path) else {
+        return Ok(InspectPathOutcome::Skip);
+    };
 
     let file_metadata = std::fs::metadata(path)
         .with_context(|| format!("failed to read file metadata: {}", path.display()))?;
-    if file_metadata.len() > MAX_TEXT_FILE_BYTES {
+    if file_metadata.len() > max_indexable_file_bytes(document_kind) {
         return Ok(InspectPathOutcome::Skip);
     }
 
@@ -955,9 +1097,56 @@ pub(super) fn inspect_path_for_index(
         .ok()
         .and_then(system_time_to_unix_ms);
     let active_version = stored_record.and_then(|record| record.active.as_ref());
+    let extractor_fingerprint = extractor_fingerprint_for_path(path)
+        .map(str::to_string)
+        .context("unsupported document type for extractor fingerprint")?;
+    let same_embedding_and_extractor = stored_record
+        .map(|record| {
+            record.embedding_fingerprint == resolved.embedding_fingerprint
+                && record.extractor_fingerprint == extractor_fingerprint
+        })
+        .unwrap_or(false);
+    let same_projection = stored_record
+        .map(|record| {
+            record.source_root == source_root_string && record.relative_path == relative_path
+        })
+        .unwrap_or(false);
+
+    if let Some(stored_record) = stored_record {
+        if same_embedding_and_extractor
+            && active_version
+                .map(|version| {
+                    version.size_bytes == size_bytes && version.modified_at_ms == modified_at_ms
+                })
+                .unwrap_or(false)
+        {
+            let clear_staged = stored_record.has_pending();
+            let refresh_projection = !same_projection;
+            return Ok(InspectPathOutcome::Unchanged {
+                record: refreshed_record_with_current_path(
+                    stored_record,
+                    &source_root_string,
+                    &relative_path,
+                    modified_at_ms,
+                    size_bytes,
+                ),
+                refresh_metadata: clear_staged || refresh_projection,
+                clear_staged,
+                refresh_projection,
+            });
+        }
+    }
+
     let bytes =
         std::fs::read(path).with_context(|| format!("failed to read file: {}", path.display()))?;
     let extracted = extract_document_from_bytes(path, &bytes)?;
+    tracing::info!(
+        path = %path.display(),
+        document_kind = document_kind.as_str(),
+        bytes_read = bytes.len(),
+        extracted_text_bytes = extracted.normalized_text.len(),
+        "rag file extracted for indexing"
+    );
     let same_index_target = stored_record
         .map(|record| {
             record.source_root == source_root_string
@@ -984,6 +1173,7 @@ pub(super) fn inspect_path_for_index(
                 },
                 refresh_metadata: clear_staged,
                 clear_staged,
+                refresh_projection: false,
             });
         }
     }
@@ -991,25 +1181,36 @@ pub(super) fn inspect_path_for_index(
     let content_md5 = format!("{:x}", md5::compute(&bytes));
 
     if let Some(stored_record) = stored_record {
-        if same_index_target
+        if same_embedding_and_extractor
             && active_version
                 .map(|version| version.content_md5 == content_md5)
                 .unwrap_or(false)
         {
             let clear_staged = stored_record.has_pending();
+            let refresh_projection = !same_projection;
             return Ok(InspectPathOutcome::Unchanged {
-                record: stored_record.refresh_active_metadata(modified_at_ms, size_bytes),
+                record: refreshed_record_with_current_path(
+                    stored_record,
+                    &source_root_string,
+                    &relative_path,
+                    modified_at_ms,
+                    size_bytes,
+                ),
                 refresh_metadata: true,
                 clear_staged,
+                refresh_projection,
             });
         }
     }
-
-    let chunks =
-        split_extracted_document_for_path(path, &extracted, CHUNK_MAX_CHARS, CHUNK_OVERLAP_CHARS)?;
-    if chunks.is_empty() {
+    if extracted.normalized_text.trim().is_empty() && extracted.blocks.is_empty() {
         return Ok(InspectPathOutcome::Skip);
     }
+    let prepared_chunks =
+        split_extracted_document_for_path(path, &extracted, CHUNK_MAX_CHARS, CHUNK_OVERLAP_CHARS)?;
+    if prepared_chunks.is_empty() {
+        return Ok(InspectPathOutcome::Skip);
+    }
+    let chunk_count = prepared_chunks.len();
 
     let version_id = make_chunk_version_id(path);
     let pending_version = RagIndexedFileVersion {
@@ -1017,11 +1218,12 @@ pub(super) fn inspect_path_for_index(
         content_md5,
         modified_at_ms,
         size_bytes,
-        chunk_count: i64::try_from(chunks.len()).context("chunk count exceeds i64 range")?,
+        chunk_count: i64::try_from(chunk_count).context("chunk count exceeds i64 range")?,
         indexed_at_ms: now_unix_ms(),
     };
 
     Ok(InspectPathOutcome::Reindex(PreparedRagFile {
+        path: path.to_path_buf(),
         record: RagIndexedFileRecord {
             source_root: source_root_string,
             absolute_path: normalize_path_string(path),
@@ -1031,9 +1233,24 @@ pub(super) fn inspect_path_for_index(
             active: stored_record.and_then(|record| record.active.clone()),
             pending: Some(pending_version),
         },
-        chunks,
+        prepared_chunks,
         version_id,
+        chunk_count,
+        warnings: extracted.warnings,
     }))
+}
+
+fn refreshed_record_with_current_path(
+    stored_record: &RagIndexedFileRecord,
+    source_root: &str,
+    relative_path: &str,
+    modified_at_ms: Option<i64>,
+    size_bytes: i64,
+) -> RagIndexedFileRecord {
+    let mut refreshed = stored_record.refresh_active_metadata(modified_at_ms, size_bytes);
+    refreshed.source_root = source_root.to_string();
+    refreshed.relative_path = relative_path.to_string();
+    refreshed
 }
 
 #[cfg(test)]
@@ -1044,12 +1261,38 @@ pub(super) fn collect_chunks_for_path(
     match inspect_path_for_index(resolved, path, None)? {
         InspectPathOutcome::Skip => Ok(Vec::new()),
         InspectPathOutcome::Unchanged { .. } => Ok(Vec::new()),
-        InspectPathOutcome::Reindex(file) => Ok(build_chunks_for_prepared_file(&file)),
+        InspectPathOutcome::Reindex(file) => {
+            Ok(build_chunks_for_prepared_file(&file, &file.prepared_chunks))
+        }
     }
 }
 
-fn build_chunks_for_prepared_file(file: &PreparedRagFile) -> Vec<RagChunk> {
-    file.chunks
+fn observe_prepared_file(file: &PreparedRagFile) -> RagFileObservation {
+    let bytes_read = file
+        .record
+        .pending
+        .as_ref()
+        .map(|version| version.size_bytes.max(0) as usize)
+        .unwrap_or_default();
+    let prepared_chunk_text_bytes = file
+        .prepared_chunks
+        .iter()
+        .map(|chunk| chunk.text.len())
+        .sum();
+    RagFileObservation {
+        bytes_read,
+        extracted_text_bytes: prepared_chunk_text_bytes,
+        prepared_chunk_count: file.prepared_chunks.len(),
+        prepared_chunk_text_bytes,
+        ..RagFileObservation::default()
+    }
+}
+
+pub(super) fn build_chunks_for_prepared_file(
+    file: &PreparedRagFile,
+    prepared_chunks: &[PreparedRagChunk],
+) -> Vec<RagChunk> {
+    prepared_chunks
         .iter()
         .map(|chunk| RagChunk {
             id: format!(
@@ -1083,9 +1326,35 @@ fn build_chunks_for_prepared_file(file: &PreparedRagFile) -> Vec<RagChunk> {
         .collect()
 }
 
+fn max_indexable_file_bytes(document_kind: DocumentKind) -> u64 {
+    match document_kind {
+        DocumentKind::PlainText => MAX_TEXT_FILE_BYTES_PLAIN_TEXT,
+        DocumentKind::Markdown => MAX_TEXT_FILE_BYTES_MARKDOWN,
+        DocumentKind::Docx => MAX_TEXT_FILE_BYTES_DOCX,
+        DocumentKind::Pdf => MAX_TEXT_FILE_BYTES_PDF,
+    }
+}
+
+fn log_rag_file_observation(file: &PreparedRagFile, observation: RagFileObservation) {
+    tracing::info!(
+        path = %file.path.display(),
+        bytes_read = observation.bytes_read,
+        extracted_text_bytes = observation.extracted_text_bytes,
+        prepared_chunk_count = observation.prepared_chunk_count,
+        prepared_chunk_text_bytes = observation.prepared_chunk_text_bytes,
+        vector_count = observation.vector_count,
+        vector_bytes_estimate = observation.vector_bytes_estimate,
+        "rag file indexing observation"
+    );
+}
+
 fn make_chunk_version_id(path: &Path) -> String {
     let path_hash = format!("{:x}", md5::compute(normalize_path_string(path)));
-    format!("{:x}-{path_hash}", now_unix_ms().max(0))
+    let timestamp_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{timestamp_nanos:x}-{path_hash}")
 }
 
 fn build_scan_result(
@@ -1100,6 +1369,8 @@ fn build_scan_result(
         indexed_file_count: plan.indexed_file_count,
         skipped_file_count: plan.skipped_file_count,
         chunk_count: plan.chunk_count,
+        warning_count: plan.warning_count,
+        recent_warnings: plan.recent_warnings.clone(),
         finished_at_ms: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()

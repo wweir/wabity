@@ -58,14 +58,12 @@ pub(super) async fn request_chat_completions_turn(
         request_args.api_key,
         "LLM provider base URL",
     )?;
-    let body = json!({
-        "model": request_args.model,
-        "messages": request_args.messages,
-        "tools": request_args.tool_catalog.request_tools,
-        "tool_choice": "auto",
-        "parallel_tool_calls": true,
-        "stream": on_text_delta.is_some(),
-    });
+    let body = build_chat_completions_request_body(
+        request_args.model,
+        request_args.messages,
+        &request_args.tool_catalog.request_tools,
+        on_text_delta.is_some(),
+    );
     if let Some(on_text_delta) = on_text_delta {
         client
             .post_json_with_text_stream(
@@ -86,6 +84,25 @@ pub(super) async fn request_chat_completions_turn(
             )
             .await
     }
+}
+
+fn build_chat_completions_request_body(
+    model: &str,
+    messages: &[Value],
+    request_tools: &[Value],
+    stream: bool,
+) -> Value {
+    let mut body = json!({
+        "model": model,
+        "messages": messages,
+        "stream": stream,
+    });
+    if !request_tools.is_empty() {
+        body["tools"] = Value::Array(request_tools.to_vec());
+        body["tool_choice"] = Value::String("auto".to_string());
+        body["parallel_tool_calls"] = Value::Bool(true);
+    }
+    body
 }
 
 pub(super) fn extract_chat_completion_message(payload: &Value) -> Result<Value> {
@@ -137,4 +154,42 @@ pub(super) fn extract_chat_local_tool_calls(message: &Value) -> Result<Vec<Local
     }
 
     Ok(calls)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::build_chat_completions_request_body;
+
+    #[test]
+    fn chat_completions_request_omits_tool_fields_when_catalog_is_empty() {
+        let body = build_chat_completions_request_body(
+            "test-model",
+            &[json!({"role": "user", "content": "hello"})],
+            &[],
+            false,
+        );
+
+        assert_eq!(body["model"], json!("test-model"));
+        assert_eq!(body["stream"], json!(false));
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
+        assert!(body.get("parallel_tool_calls").is_none());
+    }
+
+    #[test]
+    fn chat_completions_request_preserves_tool_fields_when_catalog_is_present() {
+        let body = build_chat_completions_request_body(
+            "test-model",
+            &[json!({"role": "user", "content": "hello"})],
+            &[json!({"type": "function", "function": {"name": "wabity.rag.query"}})],
+            true,
+        );
+
+        assert_eq!(body["stream"], json!(true));
+        assert_eq!(body["tool_choice"], json!("auto"));
+        assert_eq!(body["parallel_tool_calls"], json!(true));
+        assert_eq!(body["tools"].as_array().map(Vec::len), Some(1));
+    }
 }

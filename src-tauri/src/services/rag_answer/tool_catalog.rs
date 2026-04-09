@@ -2,11 +2,12 @@ use std::{
     collections::HashMap,
     env,
     process::Command,
-    sync::{Mutex, OnceLock},
+    sync::{Mutex, MutexGuard, OnceLock},
     time::Instant,
 };
 
 use serde_json::{json, Value};
+use tracing::warn;
 
 use super::{
     CachedResponsesToolCompatibility, HostSystemContext, QuestionAnswerProtocol,
@@ -45,35 +46,28 @@ pub(super) fn build_tool_catalog(
         }
 
         if protocol == QuestionAnswerProtocol::ChatCompletions {
-            let name = match server {
-                AcpMcpServerConfig::Http(server) => &server.name,
-                AcpMcpServerConfig::Sse(server) => &server.name,
-                AcpMcpServerConfig::Stdio(server) => &server.name,
-            };
-            skipped_mcp_servers.push(name.clone());
+            skipped_mcp_servers.push(mcp_server_name(server).to_string());
             continue;
         }
 
         match server {
             AcpMcpServerConfig::Http(server) => {
-                available_names.push(format!("mcp:{}", server.name));
-                request_tools.push(json!({
-                    "type": "mcp",
-                    "server_label": server.name,
-                    "server_url": server.url,
-                    "headers": name_value_pairs_to_json_object(&server.headers),
-                    "require_approval": "never",
-                }));
+                let server_name = server.name.clone();
+                available_names.push(format!("mcp:{server_name}"));
+                request_tools.push(build_remote_mcp_tool_definition(
+                    &server_name,
+                    &server.url,
+                    &server.headers,
+                ));
             }
             AcpMcpServerConfig::Sse(server) => {
-                available_names.push(format!("mcp:{}", server.name));
-                request_tools.push(json!({
-                    "type": "mcp",
-                    "server_label": server.name,
-                    "server_url": server.url,
-                    "headers": name_value_pairs_to_json_object(&server.headers),
-                    "require_approval": "never",
-                }));
+                let server_name = server.name.clone();
+                available_names.push(format!("mcp:{server_name}"));
+                request_tools.push(build_remote_mcp_tool_definition(
+                    &server_name,
+                    &server.url,
+                    &server.headers,
+                ));
             }
             AcpMcpServerConfig::Stdio(server) => {
                 skipped_mcp_servers.push(server.name.clone());
@@ -133,6 +127,10 @@ pub(super) fn tool_catalog_without_all_tools(tool_catalog: &ToolCatalog) -> Tool
     let mut stripped = tool_catalog_without_mcp_tools(tool_catalog);
     stripped.request_tools.clear();
     stripped.available_names.clear();
+    stripped.compatibility_fingerprint = build_tool_catalog_compatibility_fingerprint(
+        &stripped.request_tools,
+        &stripped.available_names,
+    );
     stripped
 }
 
@@ -150,9 +148,7 @@ pub(super) fn responses_tool_compatibility_cache_key(
 pub(super) fn load_cached_responses_tool_compatibility(
     compatibility_cache_key: &str,
 ) -> ResponsesToolCompatibilityMode {
-    let mut cache = responses_tool_compatibility_cache()
-        .lock()
-        .expect("responses tool compatibility cache lock poisoned");
+    let mut cache = responses_tool_compatibility_cache_guard();
     let Some(entry) = cache.get(compatibility_cache_key).copied() else {
         return ResponsesToolCompatibilityMode::Full;
     };
@@ -173,16 +169,14 @@ pub(super) fn store_cached_responses_tool_compatibility(
     compatibility_cache_key: &str,
     mode: ResponsesToolCompatibilityMode,
 ) {
-    let mut cache = responses_tool_compatibility_cache()
-        .lock()
-        .expect("responses tool compatibility cache lock poisoned");
+    let mut cache = responses_tool_compatibility_cache_guard();
     let entry = cache.entry(compatibility_cache_key.to_string()).or_insert(
         CachedResponsesToolCompatibility {
             mode: ResponsesToolCompatibilityMode::Full,
             stored_at: Instant::now(),
         },
     );
-    if entry.stored_at.elapsed() > RESPONSES_TOOL_COMPATIBILITY_CACHE_TTL || mode >= entry.mode {
+    if entry.stored_at.elapsed() > RESPONSES_TOOL_COMPATIBILITY_CACHE_TTL || mode != entry.mode {
         *entry = CachedResponsesToolCompatibility {
             mode,
             stored_at: Instant::now(),
@@ -195,8 +189,43 @@ pub(super) fn responses_tool_compatibility_cache(
     RESPONSES_TOOL_COMPATIBILITY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn responses_tool_compatibility_cache_guard(
+) -> MutexGuard<'static, HashMap<String, CachedResponsesToolCompatibility>> {
+    match responses_tool_compatibility_cache().lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            warn!("responses tool compatibility cache lock poisoned; clearing cached entries");
+            let mut guard = poisoned.into_inner();
+            guard.clear();
+            guard
+        }
+    }
+}
+
 pub(super) fn is_mcp_tool_definition(tool: &Value) -> bool {
     tool.get("type").and_then(Value::as_str) == Some("mcp")
+}
+
+fn mcp_server_name(server: &AcpMcpServerConfig) -> &str {
+    match server {
+        AcpMcpServerConfig::Http(server) => &server.name,
+        AcpMcpServerConfig::Sse(server) => &server.name,
+        AcpMcpServerConfig::Stdio(server) => &server.name,
+    }
+}
+
+fn build_remote_mcp_tool_definition(
+    server_name: &str,
+    server_url: &str,
+    headers: &[AcpNameValuePair],
+) -> Value {
+    json!({
+        "type": "mcp",
+        "server_label": server_name,
+        "server_url": server_url,
+        "headers": name_value_pairs_to_json_object(headers),
+        "require_approval": "never",
+    })
 }
 
 #[cfg(test)]
@@ -225,9 +254,7 @@ fn age_cached_responses_tool_compatibility(
     let Some(stale_instant) = Instant::now().checked_sub(age) else {
         return;
     };
-    let mut cache = responses_tool_compatibility_cache()
-        .lock()
-        .expect("responses tool compatibility cache lock poisoned");
+    let mut cache = responses_tool_compatibility_cache_guard();
     if let Some(entry) = cache.get_mut(compatibility_cache_key) {
         entry.stored_at = stale_instant;
     }

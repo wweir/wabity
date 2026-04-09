@@ -29,7 +29,7 @@ pub(super) fn module_status() -> BuiltinMcpModuleStatus {
     BuiltinMcpModuleStatus {
         key: BuiltinMcpModuleKey::Rag,
         title: "RAG 检索".to_string(),
-        summary: "向量检索本地索引，返回命中 chunk、路径和分数。".to_string(),
+        summary: "检索本地文档索引，返回命中 chunk、路径和分数。".to_string(),
         tool_count: 1,
     }
 }
@@ -39,7 +39,7 @@ pub(super) fn tool_definitions() -> Vec<BuiltinMcpToolDefinition> {
         name: SEARCH_TOOL_NAME,
         title: "Wabity RAG Search",
         description:
-            "Search Wabity's local LanceDB vector index and return the nearest indexed chunks with path, score, and chunk text."
+            "Search Wabity's local document index and return the nearest indexed chunks with path, score, and chunk text."
                 .to_string(),
         input_schema: json!({
             "type": "object",
@@ -152,24 +152,20 @@ pub(super) async fn execute_tool(
     .await
     {
         Ok(result) => {
+            let structured_content = rag_search_result_value(&result);
             if result.pending_indexing {
-                build_tool_pending_result(
-                    json!({
-                        "error": build_pending_message(&result),
-                        "pendingIndexing": true,
-                        "partialResult": result,
-                    }),
-                    build_pending_message(&result),
-                )
+                let pending_message = build_pending_message(&result);
+                build_tool_pending_result(structured_content, pending_message)
             } else {
-                build_tool_success_result(
-                    serde_json::to_value(&result).unwrap_or_else(|_| json!({})),
-                    build_search_summary_text(&result),
-                )
+                build_tool_success_result(structured_content, build_search_summary_text(&result))
             }
         }
         Err(error) => build_tool_error_result(error),
     }
+}
+
+fn rag_search_result_value(result: &RagSearchResult) -> Value {
+    serde_json::to_value(result).unwrap_or_else(|_| json!({}))
 }
 
 fn parse_tool_input(arguments: Option<Value>) -> Result<RagSearchToolInput, String> {
@@ -253,21 +249,7 @@ fn build_search_summary_text(result: &RagSearchResult) -> String {
     }
 
     for (index, hit) in result.hits.iter().enumerate() {
-        let location = if let (Some(page_start), Some(page_end)) = (hit.page_start, hit.page_end) {
-            if page_start == page_end {
-                format!("page {page_start}")
-            } else {
-                format!("pages {page_start}-{page_end}")
-            }
-        } else if let (Some(line_start), Some(line_end)) = (hit.line_start, hit.line_end) {
-            let paragraph = hit
-                .paragraph_line_start
-                .map(|line| format!(", paragraph {line}"))
-                .unwrap_or_default();
-            format!("lines {line_start}-{line_end}{paragraph}")
-        } else {
-            format!("chunk {}", hit.chunk_index)
-        };
+        let location = rag_hit_location(hit);
         let _ = writeln!(
             text,
             "\n[{}] {} (chunk {}, {}, score {:.4}, distance {:.4})\n{}",
@@ -282,4 +264,71 @@ fn build_search_summary_text(result: &RagSearchResult) -> String {
     }
 
     text.trim().to_string()
+}
+
+fn rag_hit_location(hit: &rag_query::RagSearchHit) -> String {
+    if let (Some(page_start), Some(page_end)) = (hit.page_start, hit.page_end) {
+        if page_start == page_end {
+            return format!("page {page_start}");
+        }
+
+        return format!("pages {page_start}-{page_end}");
+    }
+
+    if let (Some(line_start), Some(line_end)) = (hit.line_start, hit.line_end) {
+        let paragraph = hit
+            .paragraph_line_start
+            .map(|line| format!(", paragraph {line}"))
+            .unwrap_or_default();
+        return format!("lines {line_start}-{line_end}{paragraph}");
+    }
+
+    format!("chunk {}", hit.chunk_index)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::rag_search_result_value;
+    use crate::services::{
+        document_extract::DocumentKind,
+        rag_query::{RagSearchHit, RagSearchResult},
+    };
+
+    #[test]
+    fn pending_rag_result_keeps_declared_output_shape() {
+        let value = rag_search_result_value(&RagSearchResult {
+            query: "test".to_string(),
+            hit_count: 1,
+            pending_indexing: true,
+            hits: vec![RagSearchHit {
+                source_root: "/tmp".to_string(),
+                absolute_path: "/tmp/doc.md".to_string(),
+                path: "doc.md".to_string(),
+                document_kind: DocumentKind::Markdown,
+                chunk_index: 0,
+                line_start: Some(1),
+                line_end: Some(3),
+                paragraph_line_start: Some(1),
+                page_start: None,
+                page_end: None,
+                heading_path: vec!["Intro".to_string()],
+                anchor_label: None,
+                text: "hello".to_string(),
+                distance: 0.1,
+                score: 0.9,
+                vector_score: 0.9,
+                lexical_score: 0.0,
+                has_vector_signal: true,
+                retrieval_boost: 0.0,
+            }],
+        });
+
+        assert_eq!(value["pendingIndexing"], json!(true));
+        assert_eq!(value["query"], json!("test"));
+        assert_eq!(value["hitCount"], json!(1));
+        assert!(value.get("partialResult").is_none());
+        assert!(value.get("error").is_none());
+    }
 }

@@ -4,14 +4,11 @@ use std::{
     time::Duration,
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use super::*;
 use crate::services::document_extract::{extract_document_from_bytes, is_supported_document_file};
-use arrow_array::{
-    types::Float32Type, FixedSizeListArray, Int32Array, RecordBatch, RecordBatchIterator,
-    StringArray,
-};
-use arrow_schema::{DataType, Field, Schema};
-use lancedb::connect;
 use text_splitter::TextSplitter;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -119,6 +116,20 @@ fn test_resolved_config(root: &Path) -> ResolvedRagConfig {
         source_roots: vec![root.to_path_buf()],
         ignore_globs: Arc::new(None),
         embedding_fingerprint: test_embedding_fingerprint(),
+        provider,
+    }
+}
+
+fn test_resolved_config_with_provider(
+    root: &Path,
+    provider: LlmProviderConfig,
+) -> ResolvedRagConfig {
+    let embedding_fingerprint =
+        embedding_fingerprint(&provider).expect("test embedding fingerprint should resolve");
+    ResolvedRagConfig {
+        source_roots: vec![root.to_path_buf()],
+        ignore_globs: Arc::new(None),
+        embedding_fingerprint,
         provider,
     }
 }
@@ -485,7 +496,7 @@ fn collect_chunks_for_path_skips_unsupported_extension() {
 }
 
 #[test]
-fn collect_chunks_for_path_supports_text_files_under_50_mb() {
+fn collect_chunks_for_path_supports_text_files_under_plain_text_limit() {
     let root = temp_test_root("large-file");
     let file_path = root.join("large.txt");
     let content = "alpha beta gamma delta epsilon zeta eta theta iota kappa\n".repeat(20_000);
@@ -496,7 +507,7 @@ fn collect_chunks_for_path_supports_text_files_under_50_mb() {
 
     let file_size = std::fs::metadata(&file_path).expect("read metadata").len();
     assert!(file_size > 1_000_000);
-    assert!(file_size < MAX_TEXT_FILE_BYTES);
+    assert!(file_size < MAX_TEXT_FILE_BYTES_PLAIN_TEXT);
 
     let chunks = collect_chunks_for_path(&resolved, &file_path)
         .expect("collecting chunks should succeed for large files");
@@ -545,12 +556,12 @@ fn collect_chunks_for_path_supports_docx_files() {
 }
 
 #[test]
-fn collect_chunks_for_path_skips_text_files_over_50_mb() {
+fn collect_chunks_for_path_skips_text_files_over_plain_text_limit() {
     let root = temp_test_root("too-large-file");
     let file_path = root.join("too-large.txt");
     std::fs::create_dir_all(&root).expect("create rag temp root");
     let file = std::fs::File::create(&file_path).expect("create oversized rag source file");
-    file.set_len(MAX_TEXT_FILE_BYTES + 1)
+    file.set_len(MAX_TEXT_FILE_BYTES_PLAIN_TEXT + 1)
         .expect("set oversized rag source length");
 
     let resolved = test_resolved_config(&root);
@@ -598,6 +609,7 @@ fn inspect_path_for_index_skips_hashing_when_size_and_mtime_match() {
             record,
             refresh_metadata,
             clear_staged,
+            ..
         } => {
             assert_eq!(record, stored_record);
             assert!(!refresh_metadata);
@@ -642,6 +654,7 @@ fn inspect_path_for_index_refreshes_metadata_when_md5_matches() {
             record,
             refresh_metadata,
             clear_staged,
+            ..
         } => {
             let active = record.active.expect("active version should exist");
             assert!(refresh_metadata);
@@ -723,6 +736,7 @@ fn inspect_path_for_index_clears_pending_record_when_active_metadata_matches() {
             record,
             refresh_metadata,
             clear_staged,
+            ..
         } => {
             assert!(refresh_metadata);
             assert!(clear_staged);
@@ -730,6 +744,58 @@ fn inspect_path_for_index_clears_pending_record_when_active_metadata_matches() {
             assert!(record.pending.is_none());
         }
         other => panic!("expected pending record to be cleared, got {other:?}"),
+    }
+
+    let _ = std::fs::remove_file(&file_path);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn inspect_path_for_index_refreshes_projection_without_reindex_when_content_is_unchanged() {
+    let root = temp_test_root("projection-refresh-without-reindex");
+    let nested_root = root.join("nested");
+    let file_path = nested_root.join("a.md");
+    std::fs::create_dir_all(&nested_root).expect("create nested rag temp root");
+    std::fs::write(&file_path, "alpha beta gamma").expect("write rag source file");
+
+    let resolved = test_resolved_config(&nested_root);
+    let file_metadata = std::fs::metadata(&file_path).expect("read metadata");
+    let modified_at_ms = file_metadata
+        .modified()
+        .ok()
+        .and_then(system_time_to_unix_ms);
+    let stored_record = test_indexed_record(
+        &root,
+        &file_path,
+        &resolved.embedding_fingerprint,
+        Some(test_active_version(
+            &format!("{:x}", md5::compute("alpha beta gamma")),
+            modified_at_ms,
+            i64::try_from(file_metadata.len()).expect("file size fits i64"),
+            1,
+            42,
+        )),
+        None,
+    );
+
+    let outcome = inspect_path_for_index(&resolved, &file_path, Some(&stored_record))
+        .expect("inspect path should succeed");
+
+    match outcome {
+        InspectPathOutcome::Unchanged {
+            record,
+            refresh_metadata,
+            clear_staged,
+            refresh_projection,
+        } => {
+            assert!(refresh_metadata);
+            assert!(!clear_staged);
+            assert!(refresh_projection);
+            assert_eq!(record.source_root, normalize_path_string(&nested_root));
+            assert_eq!(record.relative_path, "a.md");
+            assert!(record.pending.is_none());
+        }
+        other => panic!("expected unchanged projection refresh path, got {other:?}"),
     }
 
     let _ = std::fs::remove_file(&file_path);
@@ -782,6 +848,44 @@ fn inspect_path_for_index_reindexes_when_embedding_fingerprint_changes() {
 }
 
 #[test]
+fn inspect_path_for_index_keeps_chunk_snapshot_after_file_change() {
+    let root = temp_test_root("prepare-file-snapshot");
+    let file_path = root.join("notes.txt");
+    std::fs::create_dir_all(&root).expect("create rag temp root");
+    std::fs::write(&file_path, "alpha beta gamma").expect("write initial rag source file");
+
+    let resolved = test_resolved_config(&root);
+    let file = match inspect_path_for_index(&resolved, &file_path, None)
+        .expect("initial inspect should succeed")
+    {
+        InspectPathOutcome::Reindex(file) => file,
+        other => panic!("expected reindex outcome, got {other:?}"),
+    };
+    let original_version_id = file.version_id.clone();
+    let original_chunk_texts = file
+        .prepared_chunks
+        .iter()
+        .map(|chunk| chunk.text.clone())
+        .collect::<Vec<_>>();
+
+    std::fs::write(&file_path, "delta epsilon zeta eta").expect("rewrite rag source file");
+
+    let persisted_chunks = build_chunks_for_prepared_file(&file, &file.prepared_chunks);
+    assert_eq!(file.version_id, original_version_id);
+    assert_eq!(
+        file.prepared_chunks
+            .iter()
+            .map(|chunk| chunk.text.clone())
+            .collect::<Vec<_>>(),
+        original_chunk_texts
+    );
+    assert_eq!(persisted_chunks.len(), file.prepared_chunks.len());
+
+    let _ = std::fs::remove_file(&file_path);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn watcher_directory_metadata_event_does_not_force_full_rescan() {
     assert!(!should_force_full_rescan_for_existing_directory(
         EventKind::Modify(ModifyKind::Metadata(notify::event::MetadataKind::WriteTime))
@@ -793,6 +897,28 @@ fn watcher_directory_create_event_does_not_force_full_rescan() {
     assert!(!should_force_full_rescan_for_existing_directory(
         EventKind::Create(notify::event::CreateKind::Folder,)
     ));
+}
+
+#[test]
+fn watcher_directory_create_event_collects_nested_supported_files() {
+    let root = temp_test_root("watcher-directory-create-collect");
+    let nested = root.join("nested");
+    let deeper = nested.join("deeper");
+    std::fs::create_dir_all(&deeper).expect("create nested directories");
+    let markdown_file = nested.join("a.md");
+    let text_file = deeper.join("b.txt");
+    let unsupported_file = deeper.join("c.png");
+    std::fs::write(&markdown_file, "# hello").expect("write markdown file");
+    std::fs::write(&text_file, "hello").expect("write text file");
+    std::fs::write(&unsupported_file, "nope").expect("write unsupported file");
+
+    let paths = collect_indexable_paths_in_directory(&nested);
+
+    assert!(paths.contains(&markdown_file));
+    assert!(paths.contains(&text_file));
+    assert!(!paths.contains(&unsupported_file));
+
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -885,6 +1011,81 @@ fn rag_runtime_start_rebuilds_when_embedding_target_changes() {
         ),
         RagRuntimeStartMode::RebuildIndex
     );
+}
+
+#[tokio::test]
+async fn initialize_runtime_storage_reconciles_deleted_files_during_reuse_startup() {
+    let root = temp_test_root("startup-reuse-reconciles-deletions");
+    let source_root = root.join("docs");
+    let data_dir = root.join("app-data");
+    std::fs::create_dir_all(&source_root).expect("create rag source root");
+    let file_path = source_root.join("stale.md");
+    std::fs::write(&file_path, "# Indexed\n\ncontent\n").expect("write indexed rag source file");
+
+    let resolved = test_resolved_config(&source_root);
+    let runtime_status = Arc::new(AsyncRwLock::new(RagRuntimeStatus::default()));
+    let storage_lock = Arc::new(AsyncMutex::new(()));
+    let database_path = rag_database_path(&data_dir);
+    let metadata_path = rag_metadata_database_path(&data_dir);
+    let absolute_path = normalize_path_string(&file_path);
+
+    let mut chunk = test_chunk(&absolute_path, "indexed chunk");
+    chunk.source_root = normalize_path_string(&source_root);
+    chunk.absolute_path = absolute_path.clone();
+    chunk.embedding_fingerprint = resolved.embedding_fingerprint.clone();
+    let mut vector_store = RagVectorStore::open(&database_path)
+        .await
+        .expect("open seeded vector store");
+    vector_store
+        .add_chunks(&[chunk], &[vec![1.0_f32, 2.0_f32]])
+        .await
+        .expect("seed active vector");
+    upsert_metadata_records(
+        &metadata_path,
+        &[test_indexed_record(
+            &source_root,
+            &file_path,
+            &resolved.embedding_fingerprint,
+            Some(test_active_version("seeded-md5", Some(1), 18, 1, 1)),
+            None,
+        )],
+    )
+    .expect("seed metadata row");
+
+    assert_eq!(
+        load_metadata_records(&metadata_path)
+            .expect("load seeded metadata rows")
+            .len(),
+        1
+    );
+
+    std::fs::remove_file(&file_path).expect("remove source file while runtime is offline");
+
+    initialize_runtime_storage(
+        &data_dir,
+        &metadata_path,
+        &resolved,
+        None,
+        &runtime_status,
+        None,
+        &storage_lock,
+        RagRuntimeStartMode::ReuseIndex,
+    )
+    .await
+    .expect("reuse startup should reconcile deleted files");
+
+    assert!(load_metadata_records(&metadata_path)
+        .expect("load reconciled metadata rows")
+        .is_empty());
+    assert!(RagVectorStore::open(&database_path)
+        .await
+        .expect("open reconciled vector store")
+        .load_chunk_vectors_for_file(&absolute_path, RagChunkState::Active)
+        .await
+        .expect("load reconciled active vectors")
+        .is_empty());
+
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -1031,21 +1232,18 @@ fn rag_runtime_start_reuses_index_for_equivalent_source_directory_paths() {
 #[tokio::test]
 async fn run_watch_loop_preserves_existing_storage_when_config_is_invalid() {
     let root = temp_test_root("invalid-config-preserves-storage");
-    let database_path = root.join("rag-lancedb");
+    let database_path = root.join("rag-index");
     let metadata_path = root.join("rag.sqlite3");
     std::fs::create_dir_all(&root).expect("create rag temp root");
 
     let chunk = test_chunk("/tmp/docs/a.md", "current chunk");
-    let batch_reader =
-        build_record_batch_reader(&[chunk], &[vec![1.0_f32, 2.0_f32]]).expect("build batch");
-    let db = connect(database_path.to_string_lossy().as_ref())
-        .execute()
+    let mut vector_store = RagVectorStore::open(&database_path)
         .await
-        .expect("open lancedb");
-    db.create_table(RAG_TABLE_NAME, batch_reader)
-        .execute()
+        .expect("open vector store");
+    vector_store
+        .add_chunks(&[chunk], &[vec![1.0_f32, 2.0_f32]])
         .await
-        .expect("create current rag table");
+        .expect("insert current rag chunk");
 
     let indexed_record = RagIndexedFileRecord {
         source_root: "/tmp/docs".to_string(),
@@ -1096,10 +1294,17 @@ async fn run_watch_loop_preserves_existing_storage_when_config_is_invalid() {
     assert!(error
         .to_string()
         .contains("failed to resolve RAG source directory"));
-    assert!(load_rag_table_schema(&database_path)
+    let reopened = RagVectorStore::open(&database_path)
         .await
-        .expect("query rag table state")
-        .is_some());
+        .expect("reopen vector store");
+    assert_eq!(
+        reopened
+            .load_chunk_vectors_for_file("/tmp/docs/a.md", RagChunkState::Active)
+            .await
+            .expect("load preserved vectors")
+            .len(),
+        1
+    );
     assert_eq!(
         load_metadata_records(&metadata_path)
             .expect("load metadata rows")
@@ -1139,6 +1344,41 @@ async fn apply_settings_restarts_exited_error_watcher_with_same_inputs() {
     assert_eq!(service.runtime_generation.load(Ordering::SeqCst), 2);
 
     wait_for_runtime_exit(&service).await;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn apply_settings_restarts_active_error_watcher_with_same_inputs() {
+    let root = temp_test_root("restart-active-error-watcher");
+    std::fs::create_dir_all(&root).expect("create rag temp root");
+
+    let service = RagIndexService::new(root.clone());
+    let rag_settings = RagSettings {
+        source_directories: vec![root.join("missing").to_string_lossy().into_owned()],
+        ignore_globs: Vec::new(),
+        embedding_provider_id: Some("embedding".to_string()),
+    };
+    let llm_settings = LlmSettings {
+        providers: vec![test_embedding_provider()],
+        ..LlmSettings::default()
+    };
+    let next_inputs = RagRuntimeInputs::from_settings(&rag_settings, &llm_settings);
+
+    service
+        .seed_runtime_state_for_test(
+            next_inputs,
+            RagRuntimePhase::Error,
+            tokio::spawn(async {
+                std::future::pending::<()>().await;
+            }),
+        )
+        .await;
+
+    service.apply_settings(rag_settings, llm_settings).await;
+
+    assert_eq!(service.runtime_generation.load(Ordering::SeqCst), 1);
+    wait_for_runtime_exit(&service).await;
+
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -1276,6 +1516,78 @@ fn metadata_store_tracks_pending_status() {
 }
 
 #[test]
+fn finalize_metadata_and_lexical_chunks_stays_in_sync() {
+    let root = temp_test_root("metadata-lexical-finalize");
+    let metadata_path = root.join("rag.sqlite3");
+    std::fs::create_dir_all(&root).expect("create rag temp root");
+
+    let record = RagIndexedFileRecord {
+        source_root: "/tmp/source".to_string(),
+        absolute_path: "/tmp/source/a.md".to_string(),
+        relative_path: "a.md".to_string(),
+        embedding_fingerprint: test_embedding_fingerprint(),
+        extractor_fingerprint: test_extractor_fingerprint(),
+        active: Some(test_active_version("md5-old", Some(1), 10, 1, 10)),
+        pending: Some(test_pending_version("md5-new", Some(2), 20, 2, 0)),
+    };
+    let chunks = vec![
+        PreparedRagChunk {
+            document_kind: DocumentKind::Markdown,
+            chunk_index: 0,
+            line_start: Some(1),
+            line_end: Some(2),
+            paragraph_line_start: Some(1),
+            page_start: None,
+            page_end: None,
+            heading_path: vec!["Intro".to_string()],
+            anchor_label: Some("intro".to_string()),
+            chunk_reuse_key: "reuse-0".to_string(),
+            text: "hello world".to_string(),
+        },
+        PreparedRagChunk {
+            document_kind: DocumentKind::Markdown,
+            chunk_index: 1,
+            line_start: Some(3),
+            line_end: Some(4),
+            paragraph_line_start: Some(3),
+            page_start: None,
+            page_end: None,
+            heading_path: vec!["Intro".to_string(), "Next".to_string()],
+            anchor_label: None,
+            chunk_reuse_key: "reuse-1".to_string(),
+            text: "second chunk".to_string(),
+        },
+    ];
+
+    finalize_metadata_and_replace_lexical_chunks(&metadata_path, &record, chunks.len(), &chunks)
+        .expect("finalize metadata and lexical chunks");
+
+    let stored = load_metadata_records(&metadata_path)
+        .expect("load metadata records")
+        .remove(&record.absolute_path)
+        .expect("metadata row should exist");
+    let active = stored.active.expect("active version should exist");
+    assert_eq!(active.version_id, "pending-v1");
+    assert_eq!(active.content_md5, "md5-new");
+    assert_eq!(active.chunk_count, 2);
+    assert!(stored.pending.is_none());
+
+    let connection = rusqlite::Connection::open(&metadata_path)
+        .expect("open metadata database for lexical rows");
+    let lexical_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM rag_chunk_fts WHERE absolute_path = ?1",
+            [&record.absolute_path],
+            |row| row.get(0),
+        )
+        .expect("count lexical rows");
+    assert_eq!(lexical_count, 2);
+
+    let _ = std::fs::remove_file(&metadata_path);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn metadata_prefix_lookup_returns_exact_and_descendant_paths() {
     let root = temp_test_root("metadata-prefix-lookup");
     let metadata_path = root.join("rag.sqlite3");
@@ -1402,35 +1714,36 @@ fn stream_rebuild_scan_defers_stale_cleanup_until_after_reindex_candidates_are_e
 #[tokio::test]
 async fn execute_path_update_plans_skips_untracked_missing_prefixes() {
     let root = temp_test_root("missing-prefix-delete");
-    let database_path = root.join("rag-lancedb");
+    let database_path = root.join("rag-index");
     let metadata_path = root.join("rag.sqlite3");
+    let runtime_status = Arc::new(AsyncRwLock::new(RagRuntimeStatus::default()));
     std::fs::create_dir_all(&root).expect("create rag temp root");
 
     let chunk = test_chunk("/tmp/docs/a.md", "current chunk");
-    let batch_reader =
-        build_record_batch_reader(&[chunk], &[vec![1.0_f32, 2.0_f32]]).expect("build batch");
-    let db = connect(database_path.to_string_lossy().as_ref())
-        .execute()
+    let mut vector_store = RagVectorStore::open(&database_path)
         .await
-        .expect("open lancedb");
-    db.create_table(RAG_TABLE_NAME, batch_reader)
-        .execute()
+        .expect("open vector store");
+    vector_store
+        .add_chunks(&[chunk], &[vec![1.0_f32, 2.0_f32]])
         .await
-        .expect("create current rag table");
+        .expect("insert current rag chunk");
 
     execute_path_update_plans(
-        None,
+        PathUpdateRuntimeContext {
+            app_handle: None,
+            runtime_status: &runtime_status,
+            runtime_guard: None,
+        },
         &database_path,
         &metadata_path,
         &test_resolved_config(&root),
-        &Arc::new(AsyncRwLock::new(RagRuntimeStatus::default())),
-        None,
         vec![(
             root.join(".git/index.lock"),
             PathUpdatePlan::Delete {
                 delete_descendants: true,
             },
         )],
+        RuntimeStatusUpdate::default(),
     )
     .await
     .expect("untracked missing prefix should not fail");
@@ -1447,24 +1760,138 @@ async fn execute_path_update_plans_skips_untracked_missing_prefixes() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-#[test]
-fn rag_table_schema_rejects_legacy_layout() {
-    let legacy_schema = Schema::new(vec![
-        Field::new("id", DataType::Utf8, false),
-        Field::new("absolute_path", DataType::Utf8, false),
-        Field::new("path", DataType::Utf8, false),
-        Field::new("chunk_index", DataType::Int32, false),
-        Field::new("line_start", DataType::Int32, false),
-        Field::new("line_end", DataType::Int32, false),
-        Field::new("text", DataType::Utf8, false),
-        Field::new(
-            "vector",
-            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), 2),
-            true,
-        ),
-    ]);
+#[tokio::test]
+async fn execute_path_update_plans_deletes_prefix_chunks_without_metadata_rows() {
+    let root = temp_test_root("prefix-delete-without-metadata");
+    let database_path = root.join("rag-index");
+    let metadata_path = root.join("rag.sqlite3");
+    let runtime_status = Arc::new(AsyncRwLock::new(RagRuntimeStatus::default()));
+    std::fs::create_dir_all(&root).expect("create rag temp root");
 
-    assert!(!rag_table_schema_is_compatible(&legacy_schema));
+    let mut descendant_chunk = test_chunk("/tmp/docs/nested/a.md", "descendant chunk");
+    descendant_chunk.id = "chunk-descendant".to_string();
+    descendant_chunk.absolute_path = "/tmp/docs/nested/a.md".to_string();
+    descendant_chunk.source_root = "/tmp/docs".to_string();
+    let mut sibling_chunk = test_chunk("/tmp/other/b.md", "sibling chunk");
+    sibling_chunk.id = "chunk-sibling".to_string();
+    sibling_chunk.absolute_path = "/tmp/other/b.md".to_string();
+    sibling_chunk.source_root = "/tmp/other".to_string();
+    let mut vector_store = RagVectorStore::open(&database_path)
+        .await
+        .expect("open vector store");
+    vector_store
+        .add_chunks(
+            &[descendant_chunk, sibling_chunk],
+            &[vec![1.0_f32, 2.0_f32], vec![3.0_f32, 4.0_f32]],
+        )
+        .await
+        .expect("insert rag chunks");
+
+    execute_path_update_plans(
+        PathUpdateRuntimeContext {
+            app_handle: None,
+            runtime_status: &runtime_status,
+            runtime_guard: None,
+        },
+        &database_path,
+        &metadata_path,
+        &test_resolved_config(&root),
+        vec![(
+            PathBuf::from("/tmp/docs"),
+            PathUpdatePlan::Delete {
+                delete_descendants: true,
+            },
+        )],
+        RuntimeStatusUpdate::default(),
+    )
+    .await
+    .expect("prefix delete should remove descendant chunks without metadata rows");
+
+    let vector_store = RagVectorStore::open(&database_path)
+        .await
+        .expect("reopen vector store");
+    assert!(vector_store
+        .load_chunk_vectors_for_file("/tmp/docs/nested/a.md", RagChunkState::Active)
+        .await
+        .expect("load deleted descendant vectors")
+        .is_empty());
+    assert_eq!(
+        vector_store
+            .load_chunk_vectors_for_file("/tmp/other/b.md", RagChunkState::Active)
+            .await
+            .expect("load surviving sibling vectors")
+            .len(),
+        1
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn execute_path_update_plans_treats_percent_in_prefix_as_literal_path_text() {
+    let root = temp_test_root("prefix-delete-percent-literal");
+    let database_path = root.join("rag-index");
+    let metadata_path = root.join("rag.sqlite3");
+    let runtime_status = Arc::new(AsyncRwLock::new(RagRuntimeStatus::default()));
+    std::fs::create_dir_all(&root).expect("create rag temp root");
+
+    let mut literal_percent_chunk = test_chunk("/tmp/docs%/nested/a.md", "literal percent chunk");
+    literal_percent_chunk.id = "chunk-percent".to_string();
+    literal_percent_chunk.absolute_path = "/tmp/docs%/nested/a.md".to_string();
+    literal_percent_chunk.source_root = "/tmp/docs%".to_string();
+    let mut similarly_prefixed_chunk = test_chunk("/tmp/docsX/nested/b.md", "sibling chunk");
+    similarly_prefixed_chunk.id = "chunk-sibling".to_string();
+    similarly_prefixed_chunk.absolute_path = "/tmp/docsX/nested/b.md".to_string();
+    similarly_prefixed_chunk.source_root = "/tmp/docsX".to_string();
+    let mut vector_store = RagVectorStore::open(&database_path)
+        .await
+        .expect("open vector store");
+    vector_store
+        .add_chunks(
+            &[literal_percent_chunk, similarly_prefixed_chunk],
+            &[vec![1.0_f32, 2.0_f32], vec![3.0_f32, 4.0_f32]],
+        )
+        .await
+        .expect("insert rag chunks");
+
+    execute_path_update_plans(
+        PathUpdateRuntimeContext {
+            app_handle: None,
+            runtime_status: &runtime_status,
+            runtime_guard: None,
+        },
+        &database_path,
+        &metadata_path,
+        &test_resolved_config(&root),
+        vec![(
+            PathBuf::from("/tmp/docs%"),
+            PathUpdatePlan::Delete {
+                delete_descendants: true,
+            },
+        )],
+        RuntimeStatusUpdate::default(),
+    )
+    .await
+    .expect("prefix delete should treat percent as literal path text");
+
+    let vector_store = RagVectorStore::open(&database_path)
+        .await
+        .expect("reopen vector store");
+    assert!(vector_store
+        .load_chunk_vectors_for_file("/tmp/docs%/nested/a.md", RagChunkState::Active)
+        .await
+        .expect("load deleted percent-prefix vectors")
+        .is_empty());
+    assert_eq!(
+        vector_store
+            .load_chunk_vectors_for_file("/tmp/docsX/nested/b.md", RagChunkState::Active)
+            .await
+            .expect("load surviving non-matching vectors")
+            .len(),
+        1
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -1527,6 +1954,265 @@ fn stream_rebuild_scan_does_not_apply_gitignore_as_implicit_filter() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[cfg(unix)]
+#[test]
+fn stream_rebuild_scan_keeps_existing_record_when_file_is_temporarily_unreadable() {
+    let root = temp_test_root("stream-rebuild-unreadable");
+    std::fs::create_dir_all(&root).expect("create unreadable scan root");
+    let file_path = root.join("locked.md");
+    std::fs::write(&file_path, "# Locked\n\ncontent\n").expect("write unreadable test file");
+    let canonical_root = root
+        .canonicalize()
+        .expect("canonicalize unreadable scan root");
+    let canonical_path = file_path
+        .canonicalize()
+        .expect("canonicalize unreadable test file");
+    let resolved = test_resolved_config(&canonical_root);
+    let normalized_path = normalize_path_string(&canonical_path);
+    let stored_records = HashMap::from([(
+        normalized_path.clone(),
+        test_indexed_record(
+            &canonical_root,
+            &canonical_path,
+            &resolved.embedding_fingerprint,
+            Some(test_active_version("locked-md5", Some(1), 18, 1, 1)),
+            None,
+        ),
+    )]);
+
+    let original_permissions = std::fs::metadata(&canonical_path)
+        .expect("read original permissions")
+        .permissions();
+    let mut unreadable_permissions = original_permissions.clone();
+    unreadable_permissions.set_mode(0o000);
+    std::fs::set_permissions(&canonical_path, unreadable_permissions)
+        .expect("make test file unreadable");
+
+    let (scan_tx, mut scan_rx) = mpsc::channel(8);
+    let scan_result = stream_rebuild_scan(&resolved, &stored_records, scan_tx);
+
+    std::fs::set_permissions(&canonical_path, original_permissions)
+        .expect("restore test file permissions");
+
+    scan_result.expect("streaming rebuild scan should survive unreadable files");
+
+    let events = std::iter::from_fn(|| scan_rx.blocking_recv()).collect::<Vec<_>>();
+    assert!(events.iter().any(|event| event.skipped_file_count == 1));
+    assert!(events
+        .iter()
+        .any(|event| event.warning_count == 1 && !event.recent_warnings.is_empty()));
+    assert!(events.iter().all(|event| !event
+        .stale_paths
+        .iter()
+        .any(|path| path == &normalized_path)));
+
+    let _ = std::fs::remove_file(&file_path);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn process_event_batch_surfaces_planning_failures_without_failing_the_watcher() {
+    let root = temp_test_root("watcher-planning-failure");
+    let source_root = root.join("docs");
+    let data_dir = root.join("app-data");
+    std::fs::create_dir_all(&source_root).expect("create watcher source root");
+    let file_path = source_root.join("broken.md");
+    std::fs::write(&file_path, b"# Broken\0content\n")
+        .expect("write invalid watcher file contents");
+
+    let runtime_status = Arc::new(AsyncRwLock::new(RagRuntimeStatus::default()));
+    let storage_lock = Arc::new(AsyncMutex::new(()));
+    let canonical_source_root = source_root
+        .canonicalize()
+        .expect("canonicalize watcher source root");
+    let resolved = test_resolved_config(&canonical_source_root);
+
+    let result = process_event_batch(
+        None,
+        &data_dir,
+        &resolved,
+        &runtime_status,
+        None,
+        &storage_lock,
+        vec![Ok(Event {
+            kind: EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Any)),
+            paths: vec![file_path.clone()],
+            attrs: Default::default(),
+        })],
+    )
+    .await;
+
+    result.expect("watcher batch should ignore planning failures");
+    let status = runtime_status.read().await.clone();
+    assert_eq!(status.phase, RagRuntimePhase::Idle);
+    assert_eq!(status.warning_count, 1);
+    assert_eq!(status.recent_warnings.len(), 1);
+    assert!(status.recent_warnings[0].contains("broken.md"));
+    assert!(status.recent_warnings[0].contains("cannot be indexed as text"));
+
+    let _ = std::fs::remove_file(&file_path);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn process_event_batch_normalizes_deleted_file_paths_before_cleanup() {
+    let root = temp_test_root("watcher-normalizes-deleted-path");
+    let source_root = root.join("docs");
+    let nested_dir = source_root.join("nested");
+    let data_dir = root.join("app-data");
+    std::fs::create_dir_all(&nested_dir).expect("create nested watcher source root");
+    let file_path = source_root.join("a.md");
+    std::fs::write(&file_path, "# Indexed\n\ncontent\n").expect("write indexed watcher file");
+    let canonical_source_root = source_root
+        .canonicalize()
+        .expect("canonicalize watcher source root");
+
+    let runtime_status = Arc::new(AsyncRwLock::new(RagRuntimeStatus::default()));
+    let storage_lock = Arc::new(AsyncMutex::new(()));
+    let resolved = test_resolved_config(&canonical_source_root);
+    let database_path = rag_database_path(&data_dir);
+    let metadata_path = rag_metadata_database_path(&data_dir);
+    let canonical_file_path = file_path
+        .canonicalize()
+        .expect("canonicalize watcher indexed file");
+    let absolute_path = normalize_path_string(&canonical_file_path);
+
+    let mut chunk = test_chunk(&absolute_path, "indexed chunk");
+    chunk.source_root = normalize_path_string(&canonical_source_root);
+    chunk.absolute_path = absolute_path.clone();
+    chunk.embedding_fingerprint = resolved.embedding_fingerprint.clone();
+    let mut vector_store = RagVectorStore::open(&database_path)
+        .await
+        .expect("open seeded vector store");
+    vector_store
+        .add_chunks(&[chunk], &[vec![1.0_f32, 2.0_f32]])
+        .await
+        .expect("seed active vector");
+    upsert_metadata_records(
+        &metadata_path,
+        &[test_indexed_record(
+            &canonical_source_root,
+            &canonical_file_path,
+            &resolved.embedding_fingerprint,
+            Some(test_active_version("seeded-md5", Some(1), 18, 1, 1)),
+            None,
+        )],
+    )
+    .expect("seed watcher metadata row");
+
+    std::fs::remove_file(&file_path).expect("remove watcher file");
+    let deleted_event_path = canonical_source_root.join("nested/../a.md");
+
+    process_event_batch(
+        None,
+        &data_dir,
+        &resolved,
+        &runtime_status,
+        None,
+        &storage_lock,
+        vec![Ok(Event {
+            kind: EventKind::Remove(notify::event::RemoveKind::File),
+            paths: vec![deleted_event_path],
+            attrs: Default::default(),
+        })],
+    )
+    .await
+    .expect("watcher batch should normalize deleted file paths");
+
+    assert!(load_metadata_records(&metadata_path)
+        .expect("load metadata after normalized delete")
+        .is_empty());
+    assert!(RagVectorStore::open(&database_path)
+        .await
+        .expect("open vector store after normalized delete")
+        .load_chunk_vectors_for_file(&absolute_path, RagChunkState::Active)
+        .await
+        .expect("load vectors after normalized delete")
+        .is_empty());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn process_event_batch_lexically_normalizes_deleted_directory_paths_before_cleanup() {
+    let root = temp_test_root("watcher-normalizes-deleted-directory-path");
+    let source_root = root.join("docs");
+    let nested_dir = source_root.join("nested");
+    let data_dir = root.join("app-data");
+    std::fs::create_dir_all(&nested_dir).expect("create nested watcher source root");
+    let file_path = nested_dir.join("a.md");
+    std::fs::write(&file_path, "# Indexed\n\ncontent\n").expect("write indexed watcher file");
+    let canonical_source_root = source_root
+        .canonicalize()
+        .expect("canonicalize watcher source root");
+
+    let runtime_status = Arc::new(AsyncRwLock::new(RagRuntimeStatus::default()));
+    let storage_lock = Arc::new(AsyncMutex::new(()));
+    let resolved = test_resolved_config(&canonical_source_root);
+    let database_path = rag_database_path(&data_dir);
+    let metadata_path = rag_metadata_database_path(&data_dir);
+    let canonical_file_path = file_path
+        .canonicalize()
+        .expect("canonicalize watcher indexed file");
+    let absolute_path = normalize_path_string(&canonical_file_path);
+
+    let mut chunk = test_chunk(&absolute_path, "indexed chunk");
+    chunk.source_root = normalize_path_string(&canonical_source_root);
+    chunk.absolute_path = absolute_path.clone();
+    chunk.embedding_fingerprint = resolved.embedding_fingerprint.clone();
+    let mut vector_store = RagVectorStore::open(&database_path)
+        .await
+        .expect("open seeded vector store");
+    vector_store
+        .add_chunks(&[chunk], &[vec![1.0_f32, 2.0_f32]])
+        .await
+        .expect("seed active vector");
+    upsert_metadata_records(
+        &metadata_path,
+        &[test_indexed_record(
+            &canonical_source_root,
+            &canonical_file_path,
+            &resolved.embedding_fingerprint,
+            Some(test_active_version("seeded-md5", Some(1), 18, 1, 1)),
+            None,
+        )],
+    )
+    .expect("seed watcher metadata row");
+
+    std::fs::remove_dir_all(&nested_dir).expect("remove watcher nested directory");
+    let deleted_event_path = canonical_source_root.join("missing-parent/../nested");
+
+    process_event_batch(
+        None,
+        &data_dir,
+        &resolved,
+        &runtime_status,
+        None,
+        &storage_lock,
+        vec![Ok(Event {
+            kind: EventKind::Remove(notify::event::RemoveKind::Folder),
+            paths: vec![deleted_event_path],
+            attrs: Default::default(),
+        })],
+    )
+    .await
+    .expect("watcher batch should lexically normalize deleted directory paths");
+
+    assert!(load_metadata_records(&metadata_path)
+        .expect("load metadata after normalized directory delete")
+        .is_empty());
+    assert!(RagVectorStore::open(&database_path)
+        .await
+        .expect("open vector store after normalized directory delete")
+        .load_chunk_vectors_for_file(&absolute_path, RagChunkState::Active)
+        .await
+        .expect("load vectors after normalized directory delete")
+        .is_empty());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[test]
 fn embedding_batch_planner_grows_slowly_after_three_clean_full_batches() {
     let mut planner = EmbeddingBatchPlanner::default();
@@ -1551,7 +2237,7 @@ fn embedding_batch_planner_grows_slowly_after_three_clean_full_batches() {
         },
     );
 
-    assert_eq!(planner.current_size, EMBEDDING_BATCH_SIZE_DEFAULT + 2);
+    assert_eq!(planner.current_size, EMBEDDING_BATCH_SIZE_DEFAULT + 1);
 }
 
 #[test]
@@ -1585,24 +2271,25 @@ fn embedding_batch_planner_limits_batch_by_total_chars() {
         "d".repeat(12_000),
     ];
 
-    assert_eq!(planner.next_batch_end(&inputs, 0), 2);
+    assert_eq!(planner.next_batch_end(&inputs, 0), 1);
+    assert_eq!(planner.next_batch_end(&inputs, 1), 2);
     assert_eq!(planner.next_batch_end(&inputs, 2), 3);
     assert_eq!(planner.next_batch_end(&inputs, 3), 4);
 }
 
 #[tokio::test]
-async fn vector_index_policy_skips_small_incremental_batches() {
+async fn vector_index_policy_rebuilds_any_dirty_incremental_batch() {
     let root = temp_test_root("vector-index-policy-small");
     std::fs::create_dir_all(&root).expect("create vector policy root");
     let mut vector_store = RagVectorStore::open(&root)
         .await
         .expect("open vector store");
 
-    vector_store.mark_index_dirty_for_chunks(VECTOR_INDEX_REBUILD_MIN_DIRTY_CHUNKS - 1);
+    vector_store.mark_index_dirty_for_chunks(1);
     vector_store.mark_index_dirty_for_delete();
 
     assert!(vector_store.index_dirty);
-    assert!(!vector_store.should_rebuild_index());
+    assert!(vector_store.should_rebuild_index());
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -1624,194 +2311,58 @@ async fn vector_index_policy_rebuilds_new_table_immediately() {
 }
 
 #[tokio::test]
-async fn prepare_index_storage_clears_legacy_lancedb_table_and_metadata() {
-    let root = temp_test_root("legacy-lancedb-reset");
-    let database_path = root.join("rag-lancedb");
-    let metadata_path = root.join("rag.sqlite3");
-    std::fs::create_dir_all(&root).expect("create rag temp root");
-
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("id", DataType::Utf8, false),
-        Field::new("absolute_path", DataType::Utf8, false),
-        Field::new("path", DataType::Utf8, false),
-        Field::new("chunk_index", DataType::Int32, false),
-        Field::new("line_start", DataType::Int32, false),
-        Field::new("line_end", DataType::Int32, false),
-        Field::new("text", DataType::Utf8, false),
-        Field::new(
-            "vector",
-            DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), 2),
-            true,
-        ),
-    ]));
-    let vector_array = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-        vec![Some([Some(1.0_f32), Some(2.0_f32)].into_iter())],
-        2,
-    );
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(StringArray::from(vec!["chunk-1"])),
-            Arc::new(StringArray::from(vec!["/tmp/docs/a.md"])),
-            Arc::new(StringArray::from(vec!["/tmp/docs/a.md"])),
-            Arc::new(Int32Array::from(vec![0])),
-            Arc::new(Int32Array::from(vec![1])),
-            Arc::new(Int32Array::from(vec![3])),
-            Arc::new(StringArray::from(vec!["legacy chunk"])),
-            Arc::new(vector_array),
-        ],
-    )
-    .expect("build legacy lance record batch");
-    let db = connect(database_path.to_string_lossy().as_ref())
-        .execute()
-        .await
-        .expect("open legacy lancedb");
-    db.create_table(
-        RAG_TABLE_NAME,
-        RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema),
-    )
-    .execute()
-    .await
-    .expect("create legacy rag table");
-
-    let indexed_record = RagIndexedFileRecord {
-        source_root: "/tmp/docs".to_string(),
-        absolute_path: "/tmp/docs/a.md".to_string(),
-        relative_path: "a.md".to_string(),
-        embedding_fingerprint: test_embedding_fingerprint(),
-        extractor_fingerprint: test_extractor_fingerprint(),
-        active: Some(test_active_version("md5-a", Some(1), 10, 1, 42)),
-        pending: None,
-    };
-    upsert_metadata_records(&metadata_path, &[indexed_record]).expect("write metadata row");
-
-    prepare_index_storage(
-        &database_path,
-        &metadata_path,
-        &test_resolved_config(&root),
-        true,
-    )
-    .await
-    .expect("prepare index storage should reset incompatible storage");
-
-    assert!(load_rag_table_schema(&database_path)
-        .await
-        .expect("query rag table state")
-        .is_none());
-    assert!(load_metadata_records(&metadata_path)
-        .expect("load metadata rows")
-        .is_empty());
-
-    let _ = std::fs::remove_dir_all(&root);
-}
-
-#[tokio::test]
-async fn prepare_index_storage_keeps_existing_rows_when_fingerprint_reset_is_disabled() {
-    let root = temp_test_root("fingerprint-reset-disabled");
-    let database_path = root.join("rag-lancedb");
-    let metadata_path = root.join("rag.sqlite3");
-    std::fs::create_dir_all(&root).expect("create rag temp root");
-
+async fn vector_store_open_marks_corrupted_index_as_dirty() {
+    let root = temp_test_root("vector-index-policy-corrupt-index");
+    std::fs::create_dir_all(&root).expect("create vector policy root");
     let chunk = test_chunk("/tmp/docs/a.md", "current chunk");
-    let batch_reader =
-        build_record_batch_reader(&[chunk], &[vec![1.0_f32, 2.0_f32]]).expect("build batch");
-    let db = connect(database_path.to_string_lossy().as_ref())
-        .execute()
+    let mut vector_store = RagVectorStore::open(&root)
         .await
-        .expect("open lancedb");
-    db.create_table(RAG_TABLE_NAME, batch_reader)
-        .execute()
+        .expect("open vector store");
+    vector_store
+        .add_chunks(&[chunk], &[vec![1.0_f32, 2.0_f32]])
         .await
-        .expect("create current rag table");
-
-    let indexed_record = RagIndexedFileRecord {
-        source_root: "/tmp/docs".to_string(),
-        absolute_path: "/tmp/docs/a.md".to_string(),
-        relative_path: "a.md".to_string(),
-        embedding_fingerprint: test_embedding_fingerprint_for(
-            "https://other.example.com/v1",
-            "text-embedding-3-small",
-        ),
-        extractor_fingerprint: test_extractor_fingerprint(),
-        active: Some(test_active_version("md5-a", Some(1), 10, 1, 42)),
-        pending: None,
-    };
-    upsert_metadata_records(&metadata_path, &[indexed_record]).expect("write metadata row");
-
-    prepare_index_storage(
-        &database_path,
-        &metadata_path,
-        &test_resolved_config(&root),
-        false,
-    )
-    .await
-    .expect("prepare index storage should preserve mismatched fingerprint rows");
-
-    assert!(load_rag_table_schema(&database_path)
+        .expect("insert current rag chunk");
+    vector_store
+        .ensure_index()
         .await
-        .expect("query rag table state")
-        .is_some());
-    assert_eq!(
-        load_metadata_records(&metadata_path)
-            .expect("load metadata rows")
-            .len(),
-        1
-    );
+        .expect("build vector index");
+
+    std::fs::write(vector_index_file_path(&root), b"not-a-valid-usearch-index")
+        .expect("corrupt vector index");
+
+    let reopened = RagVectorStore::open(&root)
+        .await
+        .expect("reopen vector store");
+
+    assert!(reopened.index_dirty);
 
     let _ = std::fs::remove_dir_all(&root);
 }
 
 #[tokio::test]
-async fn prepare_index_storage_resets_when_embedding_fingerprint_changes() {
-    let root = temp_test_root("fingerprint-reset-enabled");
-    let database_path = root.join("rag-lancedb");
-    let metadata_path = root.join("rag.sqlite3");
-    std::fs::create_dir_all(&root).expect("create rag temp root");
-
-    let mut chunk = test_chunk("/tmp/docs/a.md", "current chunk");
-    chunk.embedding_fingerprint =
-        test_embedding_fingerprint_for("https://other.example.com/v1", "text-embedding-3-small");
-    let batch_reader =
-        build_record_batch_reader(&[chunk], &[vec![1.0_f32, 2.0_f32]]).expect("build batch");
-    let db = connect(database_path.to_string_lossy().as_ref())
-        .execute()
+async fn vector_store_open_marks_dirty_marker_as_dirty() {
+    let root = temp_test_root("vector-index-policy-dirty-marker");
+    std::fs::create_dir_all(&root).expect("create vector policy root");
+    let chunk = test_chunk("/tmp/docs/a.md", "current chunk");
+    let mut vector_store = RagVectorStore::open(&root)
         .await
-        .expect("open lancedb");
-    db.create_table(RAG_TABLE_NAME, batch_reader)
-        .execute()
+        .expect("open vector store");
+    vector_store
+        .add_chunks(&[chunk], &[vec![1.0_f32, 2.0_f32]])
         .await
-        .expect("create current rag table");
-
-    let indexed_record = RagIndexedFileRecord {
-        source_root: "/tmp/docs".to_string(),
-        absolute_path: "/tmp/docs/a.md".to_string(),
-        relative_path: "a.md".to_string(),
-        embedding_fingerprint: test_embedding_fingerprint_for(
-            "https://other.example.com/v1",
-            "text-embedding-3-small",
-        ),
-        extractor_fingerprint: test_extractor_fingerprint(),
-        active: Some(test_active_version("md5-a", Some(1), 10, 1, 42)),
-        pending: None,
-    };
-    upsert_metadata_records(&metadata_path, &[indexed_record]).expect("write metadata row");
-
-    prepare_index_storage(
-        &database_path,
-        &metadata_path,
-        &test_resolved_config(&root),
-        true,
-    )
-    .await
-    .expect("prepare index storage should reset mismatched fingerprint rows");
-
-    assert!(load_rag_table_schema(&database_path)
+        .expect("insert current rag chunk");
+    vector_store
+        .ensure_index()
         .await
-        .expect("query rag table state")
-        .is_none());
-    assert!(load_metadata_records(&metadata_path)
-        .expect("load metadata rows")
-        .is_empty());
+        .expect("build vector index");
+
+    vector_store.mark_index_dirty_for_chunks(1);
+
+    let reopened = RagVectorStore::open(&root)
+        .await
+        .expect("reopen vector store");
+
+    assert!(reopened.index_dirty);
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -1819,21 +2370,18 @@ async fn prepare_index_storage_resets_when_embedding_fingerprint_changes() {
 #[tokio::test]
 async fn prepare_index_storage_clears_legacy_metadata_schema_and_vectors() {
     let root = temp_test_root("legacy-metadata-reset");
-    let database_path = root.join("rag-lancedb");
+    let database_path = root.join("rag-index");
     let metadata_path = root.join("rag.sqlite3");
     std::fs::create_dir_all(&root).expect("create rag temp root");
 
     let chunk = test_chunk("/tmp/docs/a.md", "current chunk");
-    let batch_reader =
-        build_record_batch_reader(&[chunk], &[vec![1.0_f32, 2.0_f32]]).expect("build batch");
-    let db = connect(database_path.to_string_lossy().as_ref())
-        .execute()
+    let mut vector_store = RagVectorStore::open(&database_path)
         .await
-        .expect("open lancedb");
-    db.create_table(RAG_TABLE_NAME, batch_reader)
-        .execute()
+        .expect("open vector store");
+    vector_store
+        .add_chunks(&[chunk], &[vec![1.0_f32, 2.0_f32]])
         .await
-        .expect("create current rag table");
+        .expect("create current rag vectors");
 
     let connection = Connection::open(&metadata_path).expect("open legacy metadata database");
     connection
@@ -1887,10 +2435,13 @@ async fn prepare_index_storage_clears_legacy_metadata_schema_and_vectors() {
     .await
     .expect("prepare index storage should reset incompatible metadata");
 
-    assert!(load_rag_table_schema(&database_path)
+    assert!(RagVectorStore::open(&database_path)
         .await
-        .expect("query rag table state")
-        .is_none());
+        .expect("reopen vector store")
+        .load_chunk_vectors_for_file("/tmp/docs/a.md", RagChunkState::Active)
+        .await
+        .expect("load surviving vectors after metadata reset")
+        .is_empty());
     assert!(metadata_store_has_compatible_schema(&metadata_path)
         .expect("inspect recreated metadata schema"));
     assert!(load_metadata_records(&metadata_path)
@@ -1901,9 +2452,288 @@ async fn prepare_index_storage_clears_legacy_metadata_schema_and_vectors() {
 }
 
 #[tokio::test]
+async fn prepare_index_storage_clears_orphaned_vector_index_artifacts() {
+    let root = temp_test_root("orphaned-vector-index-artifacts");
+    let database_path = root.join("rag-index");
+    let metadata_path = root.join("rag.sqlite3");
+    std::fs::create_dir_all(&database_path).expect("create rag index directory");
+    std::fs::write(vector_index_file_path(&database_path), b"stale-index")
+        .expect("write orphaned vector index");
+    std::fs::write(database_path.join("rag-chunks.dirty"), b"dirty")
+        .expect("write orphaned dirty marker");
+
+    prepare_index_storage(
+        &database_path,
+        &metadata_path,
+        &test_resolved_config(&root),
+        true,
+    )
+    .await
+    .expect("prepare index storage should clear orphaned vector artifacts");
+
+    assert!(!vector_index_file_path(&database_path).exists());
+    assert!(!database_path.join("rag-chunks.dirty").exists());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn prepare_index_storage_clears_active_metadata_when_chunk_store_has_no_active_rows() {
+    let root = temp_test_root("active-metadata-without-active-chunks");
+    let database_path = root.join("rag-index");
+    let metadata_path = root.join("rag.sqlite3");
+    std::fs::create_dir_all(&root).expect("create rag temp root");
+
+    let chunk = test_chunk("/tmp/docs/a.md", "current chunk");
+    let mut vector_store = RagVectorStore::open(&database_path)
+        .await
+        .expect("open vector store");
+    vector_store
+        .add_chunks(&[chunk], &[vec![1.0_f32, 2.0_f32]])
+        .await
+        .expect("insert rag chunk");
+    delete_vectors_for_exact_paths(&mut vector_store, &["/tmp/docs/a.md".to_string()])
+        .await
+        .expect("delete active rag chunk");
+
+    let indexed_record = RagIndexedFileRecord {
+        source_root: "/tmp/docs".to_string(),
+        absolute_path: "/tmp/docs/a.md".to_string(),
+        relative_path: "a.md".to_string(),
+        embedding_fingerprint: test_embedding_fingerprint(),
+        extractor_fingerprint: test_extractor_fingerprint(),
+        active: Some(test_active_version("md5-a", Some(1), 10, 1, 42)),
+        pending: None,
+    };
+    upsert_metadata_records(&metadata_path, &[indexed_record]).expect("write metadata row");
+
+    prepare_index_storage(
+        &database_path,
+        &metadata_path,
+        &test_resolved_config(&root),
+        true,
+    )
+    .await
+    .expect("prepare index storage should clear orphaned active metadata");
+
+    assert!(load_metadata_records(&metadata_path)
+        .expect("load metadata rows")
+        .is_empty());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn refresh_projection_metadata_for_records_updates_chunk_and_lexical_paths() {
+    let root = temp_test_root("refresh-projection-metadata");
+    let database_path = root.join("rag-index");
+    let metadata_path = root.join("rag.sqlite3");
+    std::fs::create_dir_all(&root).expect("create rag temp root");
+
+    let mut chunk = test_chunk("/tmp/docs/guide/a.md", "projection refresh chunk");
+    chunk.source_root = "/tmp/docs".to_string();
+    let prepared_chunk = PreparedRagChunk {
+        document_kind: chunk.document_kind,
+        chunk_index: chunk.chunk_index,
+        line_start: chunk.line_start,
+        line_end: chunk.line_end,
+        paragraph_line_start: chunk.paragraph_line_start,
+        page_start: chunk.page_start,
+        page_end: chunk.page_end,
+        heading_path: chunk.heading_path.clone(),
+        anchor_label: chunk.anchor_label.clone(),
+        chunk_reuse_key: chunk.chunk_reuse_key.clone(),
+        text: chunk.text.clone(),
+    };
+    let mut vector_store = RagVectorStore::open(&database_path)
+        .await
+        .expect("open vector store");
+    vector_store
+        .add_chunks(&[chunk.clone()], &[vec![1.0_f32, 2.0_f32]])
+        .await
+        .expect("insert rag chunk");
+
+    let original_record = RagIndexedFileRecord {
+        source_root: "/tmp/docs".to_string(),
+        absolute_path: "/tmp/docs/guide/a.md".to_string(),
+        relative_path: "guide/a.md".to_string(),
+        embedding_fingerprint: test_embedding_fingerprint(),
+        extractor_fingerprint: test_extractor_fingerprint(),
+        active: Some(test_active_version("md5-a", Some(1), 10, 1, 42)),
+        pending: None,
+    };
+    finalize_metadata_and_replace_lexical_chunks(
+        &metadata_path,
+        &original_record,
+        1,
+        &[prepared_chunk],
+    )
+    .expect("seed metadata and lexical rows");
+
+    let refreshed_record = RagIndexedFileRecord {
+        source_root: "/tmp/docs/guide".to_string(),
+        relative_path: "a.md".to_string(),
+        ..original_record
+    };
+    refresh_projection_metadata_for_records(
+        &database_path,
+        &metadata_path,
+        std::slice::from_ref(&refreshed_record),
+    )
+    .expect("refresh projection metadata");
+
+    let chunk_connection =
+        Connection::open(database_path.join(RAG_CHUNK_DB_FILE_NAME)).expect("open chunk db");
+    let chunk_source_root: String = chunk_connection
+        .query_row(
+            "SELECT source_root FROM rag_chunks WHERE absolute_path = ?1 LIMIT 1",
+            [&refreshed_record.absolute_path],
+            |row| row.get(0),
+        )
+        .expect("load refreshed chunk source root");
+    assert_eq!(chunk_source_root, refreshed_record.source_root);
+
+    let metadata_connection = Connection::open(&metadata_path).expect("open metadata db");
+    let (lexical_source_root, lexical_path): (String, String) = metadata_connection
+        .query_row(
+            &format!(
+                "SELECT source_root, path FROM {RAG_LEXICAL_TABLE_NAME} WHERE absolute_path = ?1 LIMIT 1"
+            ),
+            [&refreshed_record.absolute_path],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("load refreshed lexical path metadata");
+    assert_eq!(lexical_source_root, refreshed_record.source_root);
+    assert_eq!(lexical_path, refreshed_record.relative_path);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn metadata_records_require_rebuild_when_embedding_target_changes_on_restart() {
+    let root = PathBuf::from("/tmp/docs");
+    let current_provider =
+        test_embedding_provider_with_target("embedding", "http://127.0.0.1:8000/v1", "new-model");
+    let resolved = test_resolved_config_with_provider(&root, current_provider);
+    let stored_records = HashMap::from([(
+        "/tmp/docs/a.md".to_string(),
+        RagIndexedFileRecord {
+            source_root: "/tmp/docs".to_string(),
+            absolute_path: "/tmp/docs/a.md".to_string(),
+            relative_path: "a.md".to_string(),
+            embedding_fingerprint: test_embedding_fingerprint(),
+            extractor_fingerprint: test_extractor_fingerprint(),
+            active: Some(test_active_version("md5-a", Some(1), 10, 1, 42)),
+            pending: None,
+        },
+    )]);
+
+    assert!(metadata_records_require_rebuild(&stored_records, &resolved));
+}
+
+#[test]
+fn metadata_records_require_rebuild_when_source_roots_change_on_restart() {
+    let current_root = PathBuf::from("/tmp/current");
+    let resolved = test_resolved_config(&current_root);
+    let stored_records = HashMap::from([(
+        "/tmp/legacy/a.md".to_string(),
+        RagIndexedFileRecord {
+            source_root: "/tmp/legacy".to_string(),
+            absolute_path: "/tmp/legacy/a.md".to_string(),
+            relative_path: "a.md".to_string(),
+            embedding_fingerprint: resolved.embedding_fingerprint.clone(),
+            extractor_fingerprint: test_extractor_fingerprint(),
+            active: Some(test_active_version("md5-a", Some(1), 10, 1, 42)),
+            pending: None,
+        },
+    )]);
+
+    assert!(metadata_records_require_rebuild(&stored_records, &resolved));
+}
+
+#[test]
+fn metadata_records_require_rebuild_when_extractor_fingerprint_changes_on_restart() {
+    let current_root = PathBuf::from("/tmp/current");
+    let resolved = test_resolved_config(&current_root);
+    let stored_records = HashMap::from([(
+        "/tmp/current/a.md".to_string(),
+        RagIndexedFileRecord {
+            source_root: "/tmp/current".to_string(),
+            absolute_path: "/tmp/current/a.md".to_string(),
+            relative_path: "a.md".to_string(),
+            embedding_fingerprint: resolved.embedding_fingerprint.clone(),
+            extractor_fingerprint: "plain-text/v0".to_string(),
+            active: Some(test_active_version("md5-a", Some(1), 10, 1, 42)),
+            pending: None,
+        },
+    )]);
+
+    assert!(metadata_records_require_rebuild(&stored_records, &resolved));
+}
+
+#[tokio::test]
+async fn prepare_index_storage_preserves_mismatched_embedding_rows_for_resumable_rebuild() {
+    let root = temp_test_root("preserve-mismatched-embedding");
+    let database_path = root.join("rag-index");
+    let metadata_path = root.join("rag.sqlite3");
+    std::fs::create_dir_all(&root).expect("create rag temp root");
+
+    let chunk = test_chunk("/tmp/docs/a.md", "current chunk");
+    let mut vector_store = RagVectorStore::open(&database_path)
+        .await
+        .expect("open vector store");
+    vector_store
+        .add_chunks(&[chunk], &[vec![1.0_f32, 2.0_f32]])
+        .await
+        .expect("insert current rag chunk");
+    vector_store
+        .ensure_index()
+        .await
+        .expect("build current vector index");
+
+    let indexed_record = RagIndexedFileRecord {
+        source_root: "/tmp/docs".to_string(),
+        absolute_path: "/tmp/docs/a.md".to_string(),
+        relative_path: "a.md".to_string(),
+        embedding_fingerprint: test_embedding_fingerprint(),
+        extractor_fingerprint: test_extractor_fingerprint(),
+        active: Some(test_active_version("md5-a", Some(1), 10, 1, 42)),
+        pending: None,
+    };
+    upsert_metadata_records(&metadata_path, &[indexed_record]).expect("write metadata row");
+
+    let next_resolved = test_resolved_config_with_provider(
+        Path::new("/tmp/docs"),
+        test_embedding_provider_with_target("embedding", "http://127.0.0.1:8000/v1", "new-model"),
+    );
+    prepare_index_storage(&database_path, &metadata_path, &next_resolved, true)
+        .await
+        .expect("prepare index storage should preserve resumable rows");
+
+    assert_eq!(
+        load_metadata_records(&metadata_path)
+            .expect("load metadata rows")
+            .len(),
+        1
+    );
+    assert_eq!(
+        RagVectorStore::open(&database_path)
+            .await
+            .expect("reopen vector store")
+            .load_chunk_vectors_for_file("/tmp/docs/a.md", RagChunkState::Active)
+            .await
+            .expect("load preserved vectors")
+            .len(),
+        1
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
 async fn resolve_chunk_vectors_reuses_cached_vectors_before_requesting_embeddings() {
     let root = temp_test_root("cached-vectors");
-    let database_path = root.join("rag-lancedb");
+    let database_path = root.join("rag-index");
     std::fs::create_dir_all(&root).expect("create rag temp root");
 
     let listener = TcpListener::bind("127.0.0.1:0")
@@ -1943,20 +2773,13 @@ async fn resolve_chunk_vectors_reuses_cached_vectors_before_requesting_embedding
     cached_chunk.absolute_path = normalize_path_string(&root.join("a.md"));
     cached_chunk.embedding_fingerprint = resolved.embedding_fingerprint.clone();
     cached_chunk.line_end = Some(2);
-    let batch_reader = build_record_batch_reader(&[cached_chunk], &[vec![1.0_f32, 2.0_f32]])
-        .expect("build cache batch");
-    let db = connect(database_path.to_string_lossy().as_ref())
-        .execute()
-        .await
-        .expect("open lancedb");
-    db.create_table(RAG_TABLE_NAME, batch_reader)
-        .execute()
-        .await
-        .expect("create cache rag table");
-
-    let vector_store = RagVectorStore::open(&database_path)
+    let mut vector_store = RagVectorStore::open(&database_path)
         .await
         .expect("open vector store");
+    vector_store
+        .add_chunks(&[cached_chunk], &[vec![1.0_f32, 2.0_f32]])
+        .await
+        .expect("create cache rag table");
     let vectors = resolve_chunk_vectors(
         &resolved,
         &build_embedding_client().expect("build embedding client"),
@@ -2122,15 +2945,6 @@ async fn request_embeddings_retries_timed_out_batch_with_smaller_inputs() {
     server.await.expect("server task should complete");
 }
 
-#[test]
-fn small_corpus_vector_index_failure_is_treated_as_skippable() {
-    let error = anyhow::anyhow!(
-            "failed to create LanceDB vector index: Not enough rows to train PQ. Requires 256 rows but only 2 available"
-        );
-
-    assert!(can_skip_vector_index_build(&error));
-}
-
 #[tokio::test]
 async fn stale_runtime_generation_cannot_override_current_status() {
     let runtime_status = Arc::new(AsyncRwLock::new(RagRuntimeStatus::default()));
@@ -2148,7 +2962,7 @@ async fn stale_runtime_generation_cannot_override_current_status() {
             total_file_count: 12,
             pending_file_count: 3,
         },
-        None,
+        RuntimeStatusUpdate::default(),
     )
     .await;
     set_runtime_status_for_generation(
@@ -2158,7 +2972,10 @@ async fn stale_runtime_generation_cannot_override_current_status() {
         1,
         RagRuntimePhase::Error,
         RuntimeProgress::default(),
-        Some("stale error".to_string()),
+        RuntimeStatusUpdate {
+            last_error: Some("stale error".to_string()),
+            ..RuntimeStatusUpdate::default()
+        },
     )
     .await;
 

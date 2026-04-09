@@ -16,8 +16,10 @@ pub(crate) use config::{
     resolve_embedding_provider,
 };
 pub(crate) use embedding::{build_embedding_client, request_embeddings};
-pub(crate) use model::RAG_TABLE_NAME;
-pub(crate) use storage::{metadata_store_has_pending_rows, search_lexical_chunks};
+pub(crate) use storage::{
+    build_usearch_index_options, load_active_vector_dimensions, metadata_store_has_pending_rows,
+    open_vector_chunk_connection, search_lexical_chunks, vector_index_file_path,
+};
 
 #[cfg(test)]
 use indexing::collect_chunks_for_path;

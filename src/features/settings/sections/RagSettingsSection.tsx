@@ -154,18 +154,36 @@ export function RagSettingsSection({
 									</span>
 								</div>
 								{ragScanResult ? (
-									<div className="settings-rag-scan-grid">
-										{ragScanSummaryItems.map((item) => (
-											<div className="settings-rag-scan-metric" key={item.label}>
-												<span className="settings-rag-scan-label">{item.label}</span>
-												<span
-													className={`settings-rag-scan-value ${item.label === "数据库" ? "settings-rag-scan-value-path" : ""}`}
-												>
-													{item.value}
+									<>
+										<div className="settings-rag-scan-grid">
+											{ragScanSummaryItems.map((item) => (
+												<div className="settings-rag-scan-metric" key={item.label}>
+													<span className="settings-rag-scan-label">{item.label}</span>
+													<span
+														className={`settings-rag-scan-value ${item.label === "数据库" ? "settings-rag-scan-value-path" : ""}`}
+													>
+														{item.value}
+													</span>
+												</div>
+											))}
+										</div>
+										{ragScanResult.recentWarnings.length > 0 ? (
+											<div className="settings-rag-warning-panel">
+												<span className="settings-rag-summary-rule-label">最近告警</span>
+												<span className="settings-rag-summary-note">
+													这里只保留最近 {ragScanResult.recentWarnings.length}{" "}
+													条，完整细节看应用日志。
 												</span>
+												<ul className="settings-rag-warning-list">
+													{ragScanResult.recentWarnings.map((warning) => (
+														<li className="settings-rag-warning-item" key={warning}>
+															{warning}
+														</li>
+													))}
+												</ul>
 											</div>
-										))}
-									</div>
+										) : null}
+									</>
 								) : null}
 							</div>
 						</div>

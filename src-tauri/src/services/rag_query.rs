@@ -1,19 +1,19 @@
-use std::{collections::HashMap, path::Path, sync::OnceLock, time::Instant};
+use std::{
+    collections::HashMap,
+    path::Path,
+    sync::{Arc, OnceLock},
+    time::Instant,
+};
 
 use anyhow::{bail, Context, Result};
-use arrow_array::{Array, Float32Array, Float64Array, Int32Array, RecordBatch, StringArray};
-use futures::TryStreamExt;
-use lancedb::{
-    connect,
-    query::{ExecutableQuery, QueryBase, Select},
-    Connection as LanceConnection,
-};
+use rusqlite::Connection;
 use serde::Serialize;
 use tokio::sync::Mutex as AsyncMutex;
+use usearch::{ffi::Matches, Index};
 
 use crate::domain::settings::{LlmProviderConfig, LlmSettings, RagSettings};
 use crate::services::document_extract::DocumentKind;
-use crate::services::rag::{self, RAG_TABLE_NAME};
+use crate::services::rag::{self, open_vector_chunk_connection, vector_index_file_path};
 
 const MAX_TOP_K: usize = 20;
 const MAX_HITS_PER_FILE: usize = 2;
@@ -72,13 +72,6 @@ const ENGLISH_QUERY_NOISE_TERMS: &[&str] = &[
     "tell",
     "me",
     "documented",
-    "documentation",
-    "docs",
-    "file",
-    "files",
-    "code",
-    "source",
-    "implementation",
     "explain",
 ];
 
@@ -93,11 +86,6 @@ const CHINESE_QUERY_NOISE_TERMS: &[&str] = &[
     "怎么",
     "如何",
     "哪个",
-    "文档",
-    "文件",
-    "代码",
-    "实现",
-    "说明",
     "解释",
     "给我",
     "找",
@@ -188,6 +176,16 @@ struct StructuralMatchSignals {
     has_anchor: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SearchRetentionPolicy {
+    effective_min_score: f32,
+    relative_combined_floor: f32,
+    term_coverage_floor: f32,
+    lexical_presence_floor: usize,
+    matched_terms_floor: usize,
+    distance_ceiling: Option<f32>,
+}
+
 pub async fn search_chunks(
     data_dir: &Path,
     query: &str,
@@ -264,41 +262,58 @@ pub async fn search_chunks(
     })
 }
 
-fn rag_query_db_cache() -> &'static AsyncMutex<HashMap<String, LanceConnection>> {
-    static RAG_QUERY_DB_CACHE: OnceLock<AsyncMutex<HashMap<String, LanceConnection>>> =
-        OnceLock::new();
+#[derive(Debug, Clone)]
+struct StoredSearchRow {
+    source_root: String,
+    absolute_path: String,
+    document_kind: DocumentKind,
+    chunk_index: i32,
+    line_start: Option<i32>,
+    line_end: Option<i32>,
+    paragraph_line_start: Option<i32>,
+    page_start: Option<i32>,
+    page_end: Option<i32>,
+    heading_path: Vec<String>,
+    anchor_label: Option<String>,
+    text: String,
+}
+
+fn rag_query_db_cache() -> &'static AsyncMutex<HashMap<String, Arc<Index>>> {
+    static RAG_QUERY_DB_CACHE: OnceLock<AsyncMutex<HashMap<String, Arc<Index>>>> = OnceLock::new();
 
     RAG_QUERY_DB_CACHE.get_or_init(|| AsyncMutex::new(HashMap::new()))
 }
 
-pub(crate) async fn invalidate_rag_query_db_cache(database_path: &Path) {
-    let normalized_path = database_path.to_string_lossy().into_owned();
-    let mut guard = rag_query_db_cache().lock().await;
-    let removed = guard.remove(&normalized_path).is_some();
-    tracing::debug!(
-        removed,
-        "invalidated cached LanceDB connection for RAG query"
-    );
+fn rag_query_db_cache_key(database_path: &Path) -> String {
+    database_path
+        .canonicalize()
+        .unwrap_or_else(|_| database_path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
 }
 
-async fn get_rag_query_db(database_path: &Path) -> Result<LanceConnection> {
-    let normalized_path = database_path.to_string_lossy().into_owned();
+pub(crate) async fn invalidate_rag_query_db_cache(database_path: &Path) {
+    let normalized_path = rag_query_db_cache_key(database_path);
     let mut guard = rag_query_db_cache().lock().await;
-    if let Some(db) = guard.get(&normalized_path) {
-        return Ok(db.clone());
+    let removed = guard.remove(&normalized_path).is_some();
+    tracing::debug!(removed, "invalidated cached USearch index for RAG query");
+}
+
+async fn get_rag_query_db(database_path: &Path) -> Result<Arc<Index>> {
+    let normalized_path = rag_query_db_cache_key(database_path);
+    let mut guard = rag_query_db_cache().lock().await;
+    if let Some(index) = guard.get(&normalized_path) {
+        return Ok(index.clone());
     }
 
     let started_at = Instant::now();
-    let db = connect(&normalized_path)
-        .execute()
-        .await
-        .context("failed to open LanceDB database for RAG search")?;
+    let index = Arc::new(load_query_index(database_path)?);
     tracing::info!(
         elapsed_ms = started_at.elapsed().as_millis(),
-        "opened cached LanceDB connection for RAG query"
+        "opened cached USearch index for RAG query"
     );
-    guard.insert(normalized_path, db.clone());
-    Ok(db)
+    guard.insert(normalized_path, index.clone());
+    Ok(index)
 }
 
 async fn search_similar_chunks(
@@ -309,21 +324,12 @@ async fn search_similar_chunks(
 ) -> Result<Vec<RagSearchHit>> {
     let vector_search_started_at = Instant::now();
     let database_path = rag::rag_database_path(data_dir);
-    let db = get_rag_query_db(&database_path).await?;
-    let table_names = db
-        .table_names()
-        .execute()
-        .await
-        .context("failed to list LanceDB tables for RAG search")?;
-    if !table_names.iter().any(|name| name == RAG_TABLE_NAME) {
+    let index_path = vector_index_file_path(&database_path);
+    if !index_path.exists() {
         return Ok(Vec::new());
     }
 
-    let table = db
-        .open_table(RAG_TABLE_NAME)
-        .execute()
-        .await
-        .context("failed to open RAG chunk table")?;
+    let index = get_rag_query_db(&database_path).await?;
     let client = rag::build_embedding_client()?;
     let semantic_queries = query_plan
         .semantic_queries
@@ -332,51 +338,31 @@ async fn search_similar_chunks(
         .collect::<Vec<_>>();
     let vectors = rag::request_embeddings(&client, embedding_provider, &semantic_queries).await?;
     let limit = top_k.max(1);
+    let query_weights = query_plan
+        .semantic_queries
+        .iter()
+        .map(|query| query.weight)
+        .collect::<Vec<_>>();
+    let mut hits = tokio::task::spawn_blocking(move || {
+        let connection = open_vector_chunk_connection(&database_path)?;
+        let mut hits = Vec::new();
 
-    let mut hits = Vec::new();
-    for (query_index, query_vector) in vectors.into_iter().enumerate() {
-        let query_weight = query_plan
-            .semantic_queries
-            .get(query_index)
-            .map(|query| query.weight)
-            .unwrap_or(0.0);
-        let stream = table
-            .query()
-            .only_if("chunk_state = 'active'")
-            .select(Select::columns(&[
-                "source_root",
-                "absolute_path",
-                "document_kind",
-                "chunk_index",
-                "line_start",
-                "line_end",
-                "paragraph_line_start",
-                "page_start",
-                "page_end",
-                "heading_path",
-                "anchor_label",
-                "text",
-                "_distance",
-            ]))
-            .nearest_to(query_vector.as_slice())
-            .context("failed to prepare RAG vector search query")?
-            .limit(limit)
-            .execute()
-            .await
-            .context("failed to execute RAG vector search")?;
-        let batches = stream
-            .try_collect::<Vec<_>>()
-            .await
-            .context("failed to collect RAG vector search batches")?;
-
-        for batch in batches {
-            let mut batch_hits = parse_search_batch(&batch)?;
+        for (query_index, query_vector) in vectors.into_iter().enumerate() {
+            let query_weight = query_weights.get(query_index).copied().unwrap_or(0.0);
+            let matches = index
+                .search(query_vector.as_slice(), limit)
+                .context("failed to execute USearch vector query")?;
+            let mut batch_hits = load_search_hits(&connection, &matches)?;
             for hit in &mut batch_hits {
                 hit.retrieval_boost = hit.retrieval_boost.max(query_weight);
             }
             hits.extend(batch_hits);
         }
-    }
+
+        Ok::<_, anyhow::Error>(hits)
+    })
+    .await
+    .context("failed to join RAG vector search task")??;
 
     hits.sort_by(|left, right| {
         left.distance
@@ -389,57 +375,6 @@ async fn search_similar_chunks(
         limit,
         "rag vector search completed"
     );
-    Ok(hits)
-}
-
-fn parse_search_batch(batch: &RecordBatch) -> Result<Vec<RagSearchHit>> {
-    if batch.num_rows() == 0 {
-        return Ok(Vec::new());
-    }
-
-    let source_roots = downcast_string_column(batch, "source_root")?;
-    let absolute_paths = downcast_string_column(batch, "absolute_path")?;
-    let document_kinds = downcast_string_column(batch, "document_kind")?;
-    let chunk_indexes = downcast_int32_column(batch, "chunk_index")?;
-    let line_starts = downcast_int32_column(batch, "line_start")?;
-    let line_ends = downcast_int32_column(batch, "line_end")?;
-    let paragraph_line_starts = downcast_int32_column(batch, "paragraph_line_start")?;
-    let page_starts = downcast_int32_column(batch, "page_start")?;
-    let page_ends = downcast_int32_column(batch, "page_end")?;
-    let heading_paths = downcast_string_column(batch, "heading_path")?;
-    let anchor_labels = downcast_string_column(batch, "anchor_label")?;
-    let texts = downcast_string_column(batch, "text")?;
-    let distance_column = column_by_name(batch, "_distance")?;
-
-    let mut hits = Vec::with_capacity(batch.num_rows());
-    for row_index in 0..batch.num_rows() {
-        let distance = float_value_at(distance_column.as_ref(), row_index)
-            .with_context(|| format!("failed to read LanceDB distance at row {row_index}"))?;
-        let vector_score = distance_to_score(distance);
-        let absolute_path = absolute_paths.value(row_index).to_string();
-        hits.push(RagSearchHit {
-            source_root: source_roots.value(row_index).to_string(),
-            path: rag::display_path_for_prompt(&absolute_path),
-            absolute_path,
-            document_kind: rag::parse_document_kind(document_kinds.value(row_index))?,
-            chunk_index: chunk_indexes.value(row_index),
-            line_start: optional_int32_value_at(line_starts, row_index),
-            line_end: optional_int32_value_at(line_ends, row_index),
-            paragraph_line_start: optional_int32_value_at(paragraph_line_starts, row_index),
-            page_start: optional_int32_value_at(page_starts, row_index),
-            page_end: optional_int32_value_at(page_ends, row_index),
-            heading_path: rag::parse_heading_path(heading_paths.value(row_index))?,
-            anchor_label: optional_string_value_at(anchor_labels, row_index),
-            text: texts.value(row_index).to_string(),
-            distance,
-            score: vector_score,
-            vector_score,
-            lexical_score: 0.0,
-            has_vector_signal: true,
-            retrieval_boost: 0.0,
-        });
-    }
-
     Ok(hits)
 }
 
@@ -501,48 +436,125 @@ async fn search_lexical_chunks(
         .collect())
 }
 
-fn downcast_string_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray> {
-    column_by_name(batch, name)?
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .with_context(|| format!("column `{name}` is not a StringArray"))
-}
+fn load_query_index(database_path: &Path) -> Result<Index> {
+    let dimensions = rag::load_active_vector_dimensions(database_path)?.unwrap_or(1);
+    let options = rag::build_usearch_index_options(dimensions);
+    let index = Index::new(&options).context("failed to create USearch query index")?;
 
-fn downcast_int32_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Int32Array> {
-    column_by_name(batch, name)?
-        .as_any()
-        .downcast_ref::<Int32Array>()
-        .with_context(|| format!("column `{name}` is not an Int32Array"))
-}
-
-fn optional_int32_value_at(values: &Int32Array, row_index: usize) -> Option<i32> {
-    (!values.is_null(row_index)).then(|| values.value(row_index))
-}
-
-fn optional_string_value_at(values: &StringArray, row_index: usize) -> Option<String> {
-    (!values.is_null(row_index)).then(|| values.value(row_index).to_string())
-}
-
-fn column_by_name<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a std::sync::Arc<dyn Array>> {
-    let index = batch
-        .schema()
-        .index_of(name)
-        .with_context(|| format!("column `{name}` is missing from LanceDB result"))?;
-    Ok(batch.column(index))
-}
-
-fn float_value_at(column: &dyn Array, row_index: usize) -> Result<f32> {
-    if let Some(values) = column.as_any().downcast_ref::<Float32Array>() {
-        return Ok(values.value(row_index));
+    let index_path = vector_index_file_path(database_path);
+    if index_path.exists() {
+        index
+            .load(index_path.to_string_lossy().as_ref())
+            .with_context(|| format!("failed to load USearch index: {}", index_path.display()))?;
     }
-    if let Some(values) = column.as_any().downcast_ref::<Float64Array>() {
-        return Ok(values.value(row_index) as f32);
+    Ok(index)
+}
+
+fn load_search_hits(connection: &Connection, matches: &Matches) -> Result<Vec<RagSearchHit>> {
+    if matches.keys.is_empty() {
+        return Ok(Vec::new());
     }
 
-    bail!(
-        "unsupported LanceDB distance column type: {:?}",
-        column.data_type()
-    )
+    let rows_by_key = load_search_rows_by_keys(connection, &matches.keys)?;
+    let mut hits = Vec::with_capacity(matches.keys.len());
+    for (vector_key, distance) in matches.keys.iter().zip(matches.distances.iter()) {
+        let Some(row) = rows_by_key.get(vector_key) else {
+            continue;
+        };
+        let vector_score = distance_to_score(*distance);
+        hits.push(RagSearchHit {
+            source_root: row.source_root.clone(),
+            path: rag::display_path_for_prompt(&row.absolute_path),
+            absolute_path: row.absolute_path.clone(),
+            document_kind: row.document_kind,
+            chunk_index: row.chunk_index,
+            line_start: row.line_start,
+            line_end: row.line_end,
+            paragraph_line_start: row.paragraph_line_start,
+            page_start: row.page_start,
+            page_end: row.page_end,
+            heading_path: row.heading_path.clone(),
+            anchor_label: row.anchor_label.clone(),
+            text: row.text.clone(),
+            distance: *distance,
+            score: vector_score,
+            vector_score,
+            lexical_score: 0.0,
+            has_vector_signal: true,
+            retrieval_boost: 0.0,
+        });
+    }
+    Ok(hits)
+}
+
+fn load_search_rows_by_keys(
+    connection: &Connection,
+    keys: &[u64],
+) -> Result<HashMap<u64, StoredSearchRow>> {
+    let placeholders = (0..keys.len())
+        .map(|index| format!("?{}", index + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "
+        SELECT
+            vector_key,
+            source_root,
+            absolute_path,
+            document_kind,
+            chunk_index,
+            line_start,
+            line_end,
+            paragraph_line_start,
+            page_start,
+            page_end,
+            heading_path_json,
+            anchor_label,
+            text
+        FROM rag_chunks
+        WHERE chunk_state = 'active'
+          AND vector_key IN ({placeholders})
+        "
+    );
+    let mut statement = connection
+        .prepare(&sql)
+        .context("failed to prepare rag chunk search row query")?;
+    let numeric_keys = keys
+        .iter()
+        .map(|key| i64::try_from(*key).context("vector key does not fit into SQLite INTEGER"))
+        .collect::<Result<Vec<_>>>()?;
+    let params = rusqlite::params_from_iter(numeric_keys.iter());
+    let mut rows = statement
+        .query(params)
+        .context("failed to execute rag chunk search row query")?;
+    let mut results = HashMap::new();
+    while let Some(row) = rows
+        .next()
+        .context("failed to step rag chunk search rows")?
+    {
+        let vector_key_i64: i64 = row.get(0)?;
+        let vector_key = u64::try_from(vector_key_i64).context("vector_key is negative")?;
+        let document_kind_raw: String = row.get(3)?;
+        let heading_path_raw: String = row.get(10)?;
+        results.insert(
+            vector_key,
+            StoredSearchRow {
+                source_root: row.get(1)?,
+                absolute_path: row.get(2)?,
+                document_kind: rag::parse_document_kind(&document_kind_raw)?,
+                chunk_index: row.get(4)?,
+                line_start: row.get(5)?,
+                line_end: row.get(6)?,
+                paragraph_line_start: row.get(7)?,
+                page_start: row.get(8)?,
+                page_end: row.get(9)?,
+                heading_path: rag::parse_heading_path(&heading_path_raw)?,
+                anchor_label: row.get(11)?,
+                text: row.get(12)?,
+            },
+        );
+    }
+    Ok(results)
 }
 
 fn distance_to_score(distance: f32) -> f32 {
@@ -638,26 +650,21 @@ fn prune_search_hits(
         None => return Vec::new(),
     };
     let target_limit = top_k.clamp(1, MAX_TOP_K);
-    let effective_min_score = min_relevance_score(best_hit.hit.score, min_score);
-    let relative_combined_floor = best_hit.combined_score * RELATIVE_RELEVANCE_RATIO;
-    let term_coverage_floor = min_term_coverage(best_hit.term_coverage);
-    let matched_terms_floor = min_anchor_term_matches(best_hit);
-    let lexical_presence_floor = min_lexical_presence(best_hit);
-    let distance_ceiling = distance_ceiling_for_strong_query(best_hit);
+    let retention_policy = SearchRetentionPolicy {
+        effective_min_score: min_relevance_score(best_hit.hit.score, min_score),
+        relative_combined_floor: best_hit.combined_score * RELATIVE_RELEVANCE_RATIO,
+        term_coverage_floor: min_term_coverage(best_hit.term_coverage),
+        lexical_presence_floor: min_lexical_presence(best_hit),
+        matched_terms_floor: min_anchor_term_matches(best_hit),
+        distance_ceiling: distance_ceiling_for_strong_query(best_hit),
+    };
     let mut file_buckets = HashMap::<String, Vec<RagSearchHit>>::new();
     let mut file_order = Vec::new();
 
-    for ranked_hit in hits.into_iter().filter(|ranked_hit| {
-        should_keep_ranked_hit(
-            ranked_hit,
-            effective_min_score,
-            relative_combined_floor,
-            term_coverage_floor,
-            lexical_presence_floor,
-            matched_terms_floor,
-            distance_ceiling,
-        )
-    }) {
+    for ranked_hit in hits
+        .into_iter()
+        .filter(|ranked_hit| should_keep_ranked_hit(ranked_hit, retention_policy))
+    {
         let hit = ranked_hit.hit;
         if !file_buckets.contains_key(&hit.absolute_path) {
             file_order.push(hit.absolute_path.clone());
@@ -698,20 +705,15 @@ fn prune_search_hits(
 
 fn should_keep_ranked_hit(
     ranked_hit: &RankedSearchHit,
-    effective_min_score: f32,
-    relative_combined_floor: f32,
-    term_coverage_floor: f32,
-    lexical_presence_floor: usize,
-    matched_terms_floor: usize,
-    distance_ceiling: Option<f32>,
+    retention_policy: SearchRetentionPolicy,
 ) -> bool {
-    ranked_hit.hit.score >= effective_min_score
-        && ranked_hit.combined_score >= relative_combined_floor
-        && within_distance_ceiling(ranked_hit, distance_ceiling)
+    ranked_hit.hit.score >= retention_policy.effective_min_score
+        && ranked_hit.combined_score >= retention_policy.relative_combined_floor
+        && within_distance_ceiling(ranked_hit, retention_policy.distance_ceiling)
         && !is_low_information_hit(&ranked_hit.hit)
-        && meets_term_coverage_floor(ranked_hit, term_coverage_floor)
-        && meets_lexical_presence_floor(ranked_hit, lexical_presence_floor)
-        && meets_anchor_term_floor(ranked_hit, matched_terms_floor)
+        && meets_term_coverage_floor(ranked_hit, retention_policy.term_coverage_floor)
+        && meets_lexical_presence_floor(ranked_hit, retention_policy.lexical_presence_floor)
+        && meets_anchor_term_floor(ranked_hit, retention_policy.matched_terms_floor)
 }
 
 fn within_distance_ceiling(ranked_hit: &RankedSearchHit, distance_ceiling: Option<f32>) -> bool {
@@ -963,11 +965,7 @@ fn build_query_plan(query: &str) -> QueryPlan {
     let normalized_query = normalize_text(&raw_query);
     let raw_terms = extract_query_terms(&raw_query);
     let required_terms = filter_query_noise_terms(&raw_terms);
-    let focus_terms = if required_terms.is_empty() {
-        raw_terms.clone()
-    } else {
-        required_terms.clone()
-    };
+    let focus_terms = preferred_query_terms(&required_terms, &raw_terms);
     let focus_query = if focus_terms.is_empty() {
         raw_query.clone()
     } else {
@@ -1005,11 +1003,9 @@ fn build_query_plan(query: &str) -> QueryPlan {
     if let Some(and_query) = build_term_conjunction_query(&required_terms) {
         push_lexical_query(&mut lexical_queries, and_query, 0.15, MAX_LEXICAL_QUERIES);
     }
-    if let Some(or_query) = build_term_disjunction_query(if required_terms.is_empty() {
-        &raw_terms
-    } else {
-        &required_terms
-    }) {
+    if let Some(or_query) =
+        build_term_disjunction_query(preferred_query_terms(&required_terms, &raw_terms))
+    {
         push_lexical_query(&mut lexical_queries, or_query, 0.0, MAX_LEXICAL_QUERIES);
     }
     if let Some(path_query) = build_term_disjunction_query(&path_focused_terms(&raw_query)) {
@@ -1023,6 +1019,17 @@ fn build_query_plan(query: &str) -> QueryPlan {
         required_terms,
         semantic_queries,
         lexical_queries,
+    }
+}
+
+fn preferred_query_terms<'a>(
+    required_terms: &'a [String],
+    raw_terms: &'a [String],
+) -> &'a [String] {
+    if required_terms.is_empty() {
+        raw_terms
+    } else {
+        required_terms
     }
 }
 
@@ -1195,6 +1202,7 @@ mod tests {
     use std::{
         path::PathBuf,
         sync::atomic::{AtomicU64, Ordering},
+        sync::Arc,
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -1205,7 +1213,8 @@ mod tests {
         expanded_candidate_limit, get_rag_query_db, hybrid_candidate_score,
         invalidate_rag_query_db_cache, is_base64_like_chunk, is_heading_only_chunk,
         min_anchor_term_matches, min_lexical_presence, min_relevance_score, prune_search_hits,
-        rag_query_db_cache, rerank_search_hits, RagSearchHit, RankedSearchHit,
+        rag_query_db_cache, rag_query_db_cache_key, rerank_search_hits, RagSearchHit,
+        RankedSearchHit,
     };
 
     static NEXT_RAG_QUERY_CACHE_TEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -1248,13 +1257,13 @@ mod tests {
         let database_path = next_temp_rag_query_db_path();
         tokio::fs::create_dir_all(&database_path)
             .await
-            .expect("create temporary LanceDB directory");
+            .expect("create temporary RAG query directory");
 
         get_rag_query_db(&database_path)
             .await
-            .expect("open cached LanceDB connection");
+            .expect("open cached USearch index");
 
-        let normalized_path = database_path.to_string_lossy().into_owned();
+        let normalized_path = rag_query_db_cache_key(&database_path);
         assert!(rag_query_db_cache()
             .lock()
             .await
@@ -1266,6 +1275,39 @@ mod tests {
             .lock()
             .await
             .contains_key(&normalized_path));
+
+        let _ = tokio::fs::remove_dir_all(&database_path).await;
+    }
+
+    #[tokio::test]
+    async fn rag_query_db_cache_reuses_equivalent_database_paths() {
+        let database_path = next_temp_rag_query_db_path();
+        tokio::fs::create_dir_all(&database_path)
+            .await
+            .expect("create temporary RAG query directory");
+        let canonical_path = database_path
+            .canonicalize()
+            .expect("canonicalize temporary RAG query directory");
+        let dotted_path = canonical_path.join(".");
+        invalidate_rag_query_db_cache(&canonical_path).await;
+        invalidate_rag_query_db_cache(&dotted_path).await;
+        let initial_cache_len = rag_query_db_cache().lock().await.len();
+
+        let first = get_rag_query_db(&canonical_path)
+            .await
+            .expect("open cached USearch index for canonical path");
+        let second = get_rag_query_db(&dotted_path)
+            .await
+            .expect("reuse cached USearch index for equivalent path");
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(
+            rag_query_db_cache().lock().await.len(),
+            initial_cache_len + 1
+        );
+
+        invalidate_rag_query_db_cache(&dotted_path).await;
+        assert_eq!(rag_query_db_cache().lock().await.len(), initial_cache_len);
 
         let _ = tokio::fs::remove_dir_all(&database_path).await;
     }
@@ -1309,6 +1351,17 @@ mod tests {
         assert!(plan.lexical_queries.iter().any(
             |query| query.match_query == "\"alpha\" AND \"timeout\" AND \"root\" AND \"cause\""
         ));
+    }
+
+    #[test]
+    fn query_plan_keeps_file_intent_terms_in_short_queries() {
+        let plan = build_query_plan("settings file");
+
+        assert_eq!(plan.focus_query, "settings file");
+        assert!(plan
+            .lexical_queries
+            .iter()
+            .any(|query| query.match_query == "\"settings\" AND \"file\""));
     }
 
     #[test]

@@ -123,6 +123,8 @@ export const browserRagRuntimeStatus: RagRuntimeStatus = {
 	completedFileCount: 0,
 	totalFileCount: 0,
 	pendingFileCount: 0,
+	warningCount: 0,
+	recentWarnings: [],
 	lastError: null,
 	updatedAtMs: 0,
 };

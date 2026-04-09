@@ -11,13 +11,20 @@ use crate::infrastructure::window;
 
 use super::{config::now_unix_ms, model::RuntimeProgress};
 
+#[derive(Debug, Clone, Default)]
+pub(super) struct RuntimeStatusUpdate {
+    pub(super) warning_count: usize,
+    pub(super) recent_warnings: Vec<String>,
+    pub(super) last_error: Option<String>,
+}
+
 pub(super) async fn set_runtime_status(
     app_handle: Option<&AppHandle>,
     runtime_status: &Arc<AsyncRwLock<RagRuntimeStatus>>,
     runtime_guard: Option<(&Arc<AtomicU64>, u64)>,
     phase: RagRuntimePhase,
     progress: RuntimeProgress,
-    last_error: Option<String>,
+    update: RuntimeStatusUpdate,
 ) {
     if let Some((runtime_generation, generation)) = runtime_guard {
         if runtime_generation.load(Ordering::SeqCst) != generation {
@@ -38,7 +45,9 @@ pub(super) async fn set_runtime_status(
         completed_file_count: progress.completed_file_count,
         total_file_count: progress.total_file_count,
         pending_file_count: progress.pending_file_count,
-        last_error,
+        warning_count: update.warning_count,
+        recent_warnings: update.recent_warnings,
+        last_error: update.last_error,
         updated_at_ms: u64::try_from(now_unix_ms()).unwrap_or_default(),
     };
     if let Some(app_handle) = app_handle {
@@ -55,7 +64,7 @@ pub(super) async fn set_runtime_status_for_generation(
     generation: u64,
     phase: RagRuntimePhase,
     progress: RuntimeProgress,
-    last_error: Option<String>,
+    update: RuntimeStatusUpdate,
 ) {
     set_runtime_status(
         app_handle,
@@ -63,7 +72,7 @@ pub(super) async fn set_runtime_status_for_generation(
         Some((runtime_generation, generation)),
         phase,
         progress,
-        last_error,
+        update,
     )
     .await;
 }
