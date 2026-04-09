@@ -9,7 +9,7 @@
 - 全局快捷键支持切换主窗口、翻译选中文本/OCR，以及直接打开历史剪贴板；默认分别为 `Alt+Space`、`Alt+D`、`Alt+V`
 - macOS 下支持全局快捷键触发交互式截图 OCR；`Alt+D` 会先尝试翻译当前应用的选中文本，只有没有选中文本时才回退到截图 OCR 并翻译
 - OCR provider 现已支持本地 macOS Vision 和远程 OpenAI 兼容多模态模型
-- 设置页已把快捷键、外观和 OCR 配置并入“通用”；“AI 功能”页按“翻译配置 / 文档问答配置”两个任务卡片维护各自的模型和系统提示词；LLM 页面统一维护 OpenAI 风格接入点下的单模型条目：配置类型直接区分 `LLM · responses stateless`、`LLM · responses stateful`、`LLM · chat/completions` 和 `Embedding`，其中 `responses` 页面仍可额外声明多模态，并提供 `OpenAI / DeepSeek / Ollama / 智谱 / SiliconFlow` 等内置模板；RAG 配置页支持用这些 embedding 模型为选中目录中的 `.md`、`.mdx`、`.txt`、`.markdown`、`.rst`、`.adoc` 文件构建并持续维护本地 LanceDB 向量索引，配套 SQLite 元数据缓存、watcher 增量维护、`staged/active` 版本切换，以及基于 `原文文本 + embedding fingerprint` 的全局向量复用以减少重复 embedding
+- 设置页已把快捷键、外观和 OCR 配置并入“通用”；“AI 功能”页按“翻译配置 / 文档问答配置”两个任务卡片维护各自的模型和系统提示词；LLM 页面统一维护 OpenAI 风格接入点下的单模型条目：配置类型直接区分 `LLM · responses stateless`、`LLM · responses stateful`、`LLM · chat/completions` 和 `Embedding`，其中 `responses` 页面仍可额外声明多模态，并提供 `OpenAI / DeepSeek / Ollama / 智谱 / SiliconFlow` 等内置模板；RAG 配置页支持用这些 embedding 模型为选中目录中的 `.md`、`.mdx`、`.txt`、`.markdown`、`.rst`、`.adoc`、`.docx`、`.pdf` 文件构建并持续维护本地文档索引，底层采用 SQLite 元数据与 chunk 真相源配合 USearch 派生向量索引，支持 watcher 增量维护、`staged/active` 版本切换，以及基于 `原文文本 + embedding fingerprint` 的全局向量复用以减少重复 embedding；当前按文档类型限制单文件大小：纯文本/Markdown 20 MB、`docx` 16 MB、`pdf` 8 MB
 - 透明窗口 + 圆角 launcher 外观
 - 默认单行输入框，可按 `Cmd/Ctrl+Enter` 插入换行并切到多行模式；单行和多行都用 `Enter` 执行
 - 历史剪贴板通过全局快捷键 `Alt+V` 打开独立面板：后台只保留少量文本记录，并支持固定少量常用项；如果 launcher 已在前台，选中某条会插入 launcher 输入框；否则会写回系统剪贴板、记住呼出前的前台应用、隐藏 launcher、重新激活原应用，并在确认目标应用重新成为前台后再发送粘贴快捷键
@@ -33,13 +33,33 @@ npm run lint
 npm run tauri dev
 ```
 
-如果 `src-tauri/target` 积累了大量旧构建产物，可用下面的命令按修改时间清理：
+`npm run tauri dev` 现在会自动走 `scripts/tauri-cli.sh` 包装层，开发态默认仍写入 `src-tauri/target`，并在启动前自动清理一次超过 6 小时未更新的 `src-tauri/target/debug/deps` 和 `src-tauri/target/debug/incremental`。若确实需要改到别的位置，可在命令前显式设置 `WABITY_TAURI_DEV_TARGET_DIR`。
+
+```bash
+WABITY_TAURI_DEV_TARGET_DIR="$HOME/.cache/wabity-tauri-dev-target" npm run tauri dev
+```
+
+如果 `src-tauri/target` 已经积累了大量旧构建产物，可用下面的命令按修改时间清理：
 
 ```bash
 npm run clean:target -- --days 3
 ```
 
 默认只删除超过 3 天未更新的常见 Rust/Tauri 构建产物目录与顶层二进制；先预览可加 `--dry-run`，需要全清已识别构建产物可用 `--all`。
+
+如果只想清理开发期最占空间的 `src-tauri/target/debug/deps` 和 `src-tauri/target/debug/incremental`，使用：
+
+```bash
+npm run clean:target:debug-cache -- --days 3
+```
+
+默认就是按 6 小时阈值处理；等价于：
+
+```bash
+bash ./scripts/clean-target.sh --scope debug-cache --hours 6
+```
+
+这个模式只会检查上述两个目录本身的更新时间；超过指定小时数未更新时，整目录删除。先预览可加 `--dry-run`，需要改阈值可显式传 `--hours <n>`，需要全清这两类缓存可加 `--all`。
 
 Rust 侧当前依赖系统 `protoc`。在 macOS + Homebrew 环境下，确保 `protoc` 已安装并可执行，例如 `/opt/homebrew/bin/protoc`。
 

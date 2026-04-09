@@ -19,7 +19,7 @@
 
 ## 目标
 
-在不推翻现有 LanceDB、SQLite 元数据、chunk 复用、embedding 缓存和问答工具循环架构的前提下，让 RAG 索引支持：
+在不推翻现有 SQLite 元数据、chunk 复用、embedding 缓存和问答工具循环架构的前提下，让 RAG 索引支持：
 
 - `docx`
 - `pdf`
@@ -40,7 +40,7 @@
 - 当前实现新增独立 `document_extract` 模块
 - `docx` 会先解 ZIP，读取 `word/document.xml`，并在可用时读取 `word/styles.xml`
 - 抽取结果会被规范化成 Markdown 风格文本，再复用现有标题路径和语义切块逻辑
-- 文本型 `pdf` 会先使用 `lopdf` 按页抽取文本、做轻量页眉页脚去噪，并切成页级 block；单页解析失败只降级为 warning；当前 chunk 主锚点为 `page_start/page_end`
+- 文本型 `pdf` 会先使用 `lopdf` 按页抽取文本、做轻量页眉页脚去噪，并切成页级 block；实现上按页内 text chunk 容错保留可读片段，而不是把单个 chunk 失败直接放大成整页失败；明显控制字符污染或可疑乱码页会被轻量质量闸门丢弃；warning 会进入运行时状态和手动重建结果；当前 chunk 主锚点为 `page_start/page_end`
 - `wabity.read_document_excerpt` 已支持按 `path + chunk_index` 回读抽取型文档摘录，`wabity.read_file_lines` 继续只服务文本行语义稳定的文档
 - 旧二进制 `.doc` 仍未实现
 
@@ -85,11 +85,11 @@
 
 核心链路改为：
 
-`Path -> DocumentExtractor -> ExtractedDocument -> chunk -> embedding -> LanceDB`
+`Path -> DocumentExtractor -> ExtractedDocument -> chunk -> embedding -> local index`
 
 而不是：
 
-`Path -> 直接读 UTF-8 文本 -> chunk -> embedding -> LanceDB`
+`Path -> 直接读 UTF-8 文本 -> chunk -> embedding -> local index`
 
 ### 分层建议
 
@@ -107,7 +107,7 @@
   - 负责把原文档抽取成规范化文本和结构块
   - 负责返回抽取警告、页码、标题路径、段落锚点等格式相关元数据
 - `rag`
-  - 继续负责扫描、分块、chunk 元数据归并、embedding、缓存、版本切换和向量写入
+  - 继续负责扫描、分块、chunk 元数据归并、embedding、缓存、版本切换和本地索引写入
 - `rag_answer`
   - 继续负责问答工具循环
   - 但需要补一个基于规范化文档内容的精读工具，而不是只读原文件行
@@ -187,7 +187,7 @@ pub struct ExtractedBlock {
 
 ### 3. 元数据扩展
 
-LanceDB chunk 行和查询返回结构建议补充：
+本地 chunk 记录和查询返回结构建议补充：
 
 - `document_kind`
 - `page_start`

@@ -39,6 +39,7 @@
 ### 工程化
 
 - [large-file-splitting-2026-04-03.md](/Users/wweir/Sites/Mine/wabity/docs/large-file-splitting-2026-04-03.md): 大文件拆分的边界收敛记录
+- [memory-budget-optimization-2026-04-07.md](/Users/wweir/Sites/Mine/wabity/docs/memory-budget-optimization-2026-04-07.md): 常驻缓存、RAG 批次与业务级内存观测的收敛决策
 
 ## 维护规则
 

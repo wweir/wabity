@@ -4,7 +4,7 @@
 
 当前 RAG 查询链路已经具备：
 
-- LanceDB 向量召回
+- USearch 向量召回
 - SQLite `FTS5 + bm25()` 词法召回
 - 轻量 rerank
 - 单文件配额裁剪
@@ -16,7 +16,7 @@
 
 ## 目标
 
-在不引入额外 LLM 请求、不改变现有设置模型、不推翻 LanceDB + SQLite 双存储的前提下，先落地两项高优先级优化：
+在不引入额外 LLM 请求、不改变现有设置模型、不推翻当前 USearch + SQLite 检索布局的前提下，先落地两项高优先级优化：
 
 - 启发式 query rewrite
 - 两阶段多查询召回 + 统一 rerank

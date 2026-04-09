@@ -39,7 +39,7 @@
 
 ### 复用边界
 
-- `rag_query` 继续只做 query embedding + LanceDB top-k 检索。
+- `rag_query` 继续只做 query embedding + 本地向量 top-k 检索。
 - `builtin_mcp` 只负责 MCP 协议适配、模块注册和 tool 包装。
 - `rag_answer` 继续保留自己的问答裁剪与生成链路，不被这次需求强行重写。
 - `document_extract`、`rag::load_document_excerpt_for_chunk` 和路径白名单逻辑继续复用现有实现，不为 MCP 再复制一套读取栈。

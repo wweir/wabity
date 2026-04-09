@@ -116,7 +116,7 @@
 - RAG 只接受 Embedding 类型条目；没有选 provider 时允许保存空白配置，但只要配置了扫描目录就必须同时配置 Embedding 条目
 - RAG 扫描目录使用“每行一个目录”的 textarea，并提供“选择目录追加”按钮；保存后 watcher 只监听这些显式选中的目录
 - RAG 当前支持 `.md`、`.mdx`、`.txt`、`.markdown`、`.rst`、`.adoc`、`.docx`、`.pdf`；扫描边界只受“显式选择的目录 + 生效中的 ignore glob + 50 MB 大小上限”控制。`.gitignore` / `.ignore` / 全局 git ignore 不会被当成额外隐式过滤条件
-- 纯文本类文件要求内容可读、是 UTF-8 文本且不含 NUL 字节；`.md`、`.mdx`、`.markdown` 和 `.docx` 会按标题、列表项、代码块和普通段落做语义预切，再按字符预算打包；`.txt`、`.rst`、`.adoc` 继续走通用文本切分；文本型 `.pdf` 会先按页抽取文本并切成页级 block，再进入现有 chunk 打包链路
+- 纯文本类文件要求内容可读、是 UTF-8 文本且不含 NUL 字节；`.md`、`.mdx`、`.markdown` 和 `.docx` 会按标题、列表项、代码块和普通段落做语义预切，再按字符预算打包；`.txt`、`.rst`、`.adoc` 继续走通用文本切分；文本型 `.pdf` 会先按页抽取文本，允许页内 chunk 部分失败并保留可读片段；明显控制字符污染或可疑乱码页会被质量闸门丢弃；最终只把保留下来的页级 block 送进现有 chunk 打包链路。设置页会展示最近一次手动重建的 warning 数和最近若干条告警摘要
 - RAG 忽略规则拆成“内置忽略目录说明 + 额外忽略通配符”两层：设置页直接用文案说明固定规则，不再为它们渲染输入框；内置规则固定包含常见第三方依赖目录和编译产物目录，例如 `node_modules`、`target`、`dist`、`.next`、`.git`、`coverage`，始终生效且不支持取消；textarea 只允许追加额外 glob，命中后文件不会被切分、向量化或写入 LanceDB
 - 翻译 LLM 和问答 LLM 只影响 launcher 的翻译 / RAG 问答链路，不直接决定 ACP session 该用哪个 agent
 - 可以同时配置多个 ACP agent，但每个 session 仍然只绑定其中一个

@@ -54,7 +54,7 @@
 - 应用索引、目录监听、运行中进程枚举
 - OpenAI 兼容 LLM / OCR / Embedding 服务
 - ACP agent 进程
-- LanceDB 与 SQLite
+- USearch 索引文件与 SQLite
 
 ## 4. 分层结构
 
@@ -81,6 +81,12 @@
 - 拼接平台协议
 - 复制后端业务规则
 
+补充约束：
+
+- 根级 `src/` 不保留没有实际内容的预留目录；空的 `components`、`assets` 一类目录应删除，而不是提前占位
+- feature 内部优先直接依赖 `src/lib/tauri/client/*` 职责子模块；`src/lib/tauri/client.ts` 只保留少量稳定公共入口，不作为默认的大一统导出层
+- 不新增 `shared`、`common`、`utils` 这类语义空洞的根级目录；跨 feature 复用未形成稳定边界前，代码先留在所属 feature 内
+
 ### 4.2 Rust 后端
 
 | 路径                           | 职责                                     | 约束                 |
@@ -93,6 +99,11 @@
 | `src-tauri/src/domain`         | 稳定领域模型、配置模型、前后端共享结构   | 不依赖 Tauri UI 细节 |
 | `src-tauri/src/services`       | 用例级业务流程                           | 纯逻辑优先           |
 | `src-tauri/src/infrastructure` | 系统能力、存储、窗口、快捷键、外部客户端 | 不承载业务语义       |
+
+补充约束：
+
+- OpenAI-compatible 传输与 payload 兼容逻辑沉到 workspace crate `src-tauri/crates/openai-compatible`
+- 该 crate 内部固定按 `client`、`parsing`、`streaming`、`extract`、`models` 分层；宿主 `src/infrastructure/openai_compatible.rs` 只保留兼容导出与本地类型转换
 
 允许的依赖方向：
 
@@ -132,7 +143,8 @@
 - workspace 历史：`workspace-history.toml`
 - 剪贴板历史：`clipboard-history.toml`
 - RAG 元数据与词法索引：SQLite
-- RAG chunk 与向量：LanceDB
+- RAG chunk、向量真相源与词法索引：SQLite
+- RAG ANN 索引文件：USearch
 - ACP session 可恢复快照：应用状态存储
 
 原则：
@@ -209,6 +221,20 @@ ACP 链路是独立运行时：
 - 自启动状态与系统登录项对账
 - OCR / LLM / RAG / ACP / MCP 运行时配置更新
 
+### 6.5 RAG 文档摄取与状态反馈
+
+RAG 建索引固定分两层：
+
+1. `document_extract` 先把原文件归一化成可分块文本和结构锚点
+2. `rag/indexing` 再做切块、向量复用、embedding 和元数据持久化
+
+当前 PDF 约束：
+
+- 只支持文本型 PDF，不做 OCR
+- 使用 `lopdf` 按页抽取，但不是“整页成功/失败”二值语义；页内 text chunk 允许部分失败，保留可读片段并把失败原因记成 warning
+- 抽取后会经过轻量文本质量闸门，明显控制字符污染或可疑乱码页不会进入 embedding
+- warning 会沿 `RagRuntimeStatus` 和手动重建结果向上暴露，前端可见最近若干条，而不是只剩一个笼统的“跳过文件”
+
 ## 7. 启动与平台约束
 
 启动顺序固定为：
@@ -228,6 +254,8 @@ ACP 链路是独立运行时：
 - launcher 是短时交互窗口，不是长期主工作台
 - 历史剪贴板使用独立原生窗口，而不是 launcher 内部视图切换
 - 构建产物必须注入版本和日期信息
+- `npm run tauri dev` 必须经由仓库脚本包装；开发态默认写入 `src-tauri/target`，并通过仓库脚本按需清理 `debug/deps`、`debug/incremental` 等旧缓存，避免清理口径分散
+- `application` 和 `process` 缓存不在启动时预热，也没有固定轮询刷新；首次命中时同步建快照，后续只在过旧时异步补刷新，避免把常驻扫描成本摊到空闲态
 
 ## 8. 关键设计决策
 
@@ -237,9 +265,11 @@ ACP 链路是独立运行时：
 2. IPC 边界显式建模，不依赖隐式字符串协议
 3. ACP session、轻量问答、普通 launcher 执行是三条不同链路
 4. 平台能力统一下沉到 `infrastructure`，业务语义统一收敛到 `services`
-5. RAG 使用 LanceDB + SQLite 组合，而不是把全部状态塞进单一存储
+5. RAG 使用 USearch + SQLite 组合：SQLite 作为真相源，USearch 只负责 ANN 检索
 6. 配置条目先表达“接入点和能力”，运行时用途资格由后端统一投影，不让前端各自猜
 7. 内置 MCP server 是统一 loopback endpoint + 模块注册，不伪装成多条普通外部 server
+8. 常驻索引和缓存默认优先收紧内存占用，再考虑额外吞吐；预热轮询、重复字符串和大批次中间态都不是默认选项
+9. PDF 摄取优先保留可验证的可读文本，再决定是否索引；“抽到了非空字符串”不等于“可用于 embedding 的文本”
 
 ## 9. 文档地图
 

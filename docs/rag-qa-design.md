@@ -166,7 +166,7 @@
 理由：
 
 - 它依赖运行时配置
-- 它依赖 LanceDB
+- 它依赖本地语义索引
 - 它依赖网络 LLM 请求
 - 它依赖 settings 中的 provider 选择
 
@@ -189,7 +189,7 @@
 1. 校验 RAG 已配置扫描目录和 embedding 条目
 2. 校验 AI 功能页已经选择可用于生成答案的问答 LLM 条目
 3. 用 RAG 的 embedding 模型对用户问题生成 query embedding
-4. 在 LanceDB 对 `vector` 列做 top-k 相似搜索，同时在 SQLite `FTS5 + bm25()` 上做一轮关键词候选召回
+4. 在本地向量索引上做 top-k 相似搜索，同时在 SQLite `FTS5 + bm25()` 上做一轮关键词候选召回
 5. 按 `absolute_path + chunk_index` 去重合并两路候选，并读取候选 chunk 的 `absolute_path`、对外展示用 `path`、`chunk_index`、`line_start`、`line_end`、`paragraph_line_start`、`heading_path`、`text`
 6. 做一次轻量重排和裁剪，再送给 LLM；裁剪不只看固定 `top_k`，还要同时过滤低于默认高置信阈值、明显落后于首个命中的弱相关尾部、以及不满足强实体锚点词约束或命中标题-only / base64 低质量 chunk 的结果
 
@@ -320,7 +320,7 @@ v1 阈值可以先做静态配置，后续再按模型/距离度量调参。
 - RAG 配置为空
 - embedding 条目缺失或非法
 - 问答 LLM 缺失或配置非法
-- LanceDB 查询失败
+- 本地向量检索失败
 - embedding 请求失败
 - LLM 作答失败
 - 检索结果不足
