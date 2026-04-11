@@ -143,7 +143,7 @@
 - workspace 历史：`workspace-history.toml`
 - 剪贴板历史：`clipboard-history.toml`
 - RAG 元数据与词法索引：SQLite
-- RAG chunk、向量真相源与词法索引：SQLite
+- RAG chunk 元数据、文本与暂存向量缓存：SQLite
 - RAG ANN 索引文件：USearch
 - ACP session 可恢复快照：应用状态存储
 
@@ -151,6 +151,7 @@
 
 - 配置读写集中在配置模块，不在业务流程里到处拼路径
 - 前后端通信只使用结构化模型，不透出底层文件格式
+- active chunk 的 ANN 向量长期驻留在 USearch；SQLite 只在 staged 写入、复用命中或恢复窗口内短暂持有 `vector_blob`
 - 运行时状态和持久化配置分离，不能把配置对象直接当运行时真相源
 
 ## 6. 核心数据流

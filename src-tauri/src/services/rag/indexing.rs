@@ -25,7 +25,7 @@ use crate::{
 use super::{
     chunking::split_extracted_document_for_path,
     config::{
-        normalize_path_string, now_unix_ms, rag_database_path, rag_metadata_database_path,
+        normalize_path_string, now_unix_ms, rag_database_path, rag_sqlite_database_path,
         resolve_source_root_for_path, should_skip_path, system_time_to_unix_ms,
     },
     embedding::{
@@ -41,11 +41,12 @@ use super::{
     },
     status::{set_runtime_status, RuntimeStatusUpdate},
     storage::{
-        delete_metadata_for_paths, delete_vectors_for_exact_paths,
+        delete_rag_file_records_for_paths, delete_vectors_for_exact_paths,
         delete_vectors_for_exact_paths_in_state, delete_vectors_for_prefix_paths,
         delete_vectors_with_filter, escape_sql_literal,
-        finalize_metadata_and_replace_lexical_chunks, load_metadata_records, prepare_index_storage,
-        refresh_projection_metadata_for_records, upsert_metadata_records, RagVectorStore,
+        finalize_rag_file_record_and_replace_lexical_chunks, load_rag_file_records,
+        prepare_index_storage, refresh_projection_for_rag_file_records, upsert_rag_file_records,
+        RagVectorStore,
     },
 };
 
@@ -80,7 +81,7 @@ pub(super) struct RebuildScanEvent {
     pub(super) recent_warnings: Vec<String>,
     pub(super) staged_cleanup_paths: Vec<String>,
     pub(super) stale_paths: Vec<String>,
-    pub(super) metadata_refresh: Option<RagIndexedFileRecord>,
+    pub(super) rag_file_record_refresh: Option<RagIndexedFileRecord>,
     pub(super) projection_refresh: Option<RagIndexedFileRecord>,
     pub(super) file_to_index: Option<PreparedRagFile>,
 }
@@ -138,7 +139,7 @@ pub(super) enum InspectPathOutcome {
     Skip,
     Unchanged {
         record: RagIndexedFileRecord,
-        refresh_metadata: bool,
+        refresh_rag_file_record: bool,
         clear_staged: bool,
         refresh_projection: bool,
     },
@@ -151,7 +152,7 @@ pub(super) enum PathUpdatePlan {
     Delete {
         delete_descendants: bool,
     },
-    RefreshMetadata {
+    RefreshRagFileRecord {
         record: RagIndexedFileRecord,
         clear_staged: bool,
         refresh_projection: bool,
@@ -162,7 +163,7 @@ pub(super) enum PathUpdatePlan {
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn initialize_runtime_storage(
     data_dir: &Path,
-    _metadata_path: &Path,
+    _sqlite_path: &Path,
     resolved: &ResolvedRagConfig,
     app_handle: Option<&AppHandle>,
     runtime_status: &Arc<AsyncRwLock<RagRuntimeStatus>>,
@@ -170,19 +171,111 @@ pub(super) async fn initialize_runtime_storage(
     storage_lock: &Arc<AsyncMutex<()>>,
     start_mode: RagRuntimeStartMode,
 ) -> Result<()> {
-    if start_mode == RagRuntimeStartMode::ReuseIndex {
-        tracing::info!("running incremental RAG startup scan to reconcile offline file changes");
-    }
-
     let _storage_guard = storage_lock.lock().await;
-    rebuild_index_locked(
+    match start_mode {
+        RagRuntimeStartMode::ReuseIndex => {
+            tracing::info!(
+                "running incremental RAG startup scan to reconcile offline file changes"
+            );
+            reconcile_runtime_storage_locked(
+                app_handle,
+                data_dir,
+                resolved,
+                runtime_status,
+                runtime_guard,
+            )
+            .await?;
+        }
+        RagRuntimeStartMode::RebuildIndex => {
+            rebuild_index_locked(
+                app_handle,
+                data_dir,
+                resolved,
+                runtime_status,
+                runtime_guard,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn reconcile_runtime_storage_locked(
+    app_handle: Option<&AppHandle>,
+    data_dir: &Path,
+    resolved: &ResolvedRagConfig,
+    runtime_status: &Arc<AsyncRwLock<RagRuntimeStatus>>,
+    runtime_guard: Option<(&Arc<AtomicU64>, u64)>,
+) -> Result<()> {
+    set_runtime_status(
         app_handle,
-        data_dir,
-        resolved,
         runtime_status,
         runtime_guard,
+        RagRuntimePhase::Scanning,
+        RuntimeProgress::default(),
+        RuntimeStatusUpdate::default(),
+    )
+    .await;
+    tokio::fs::create_dir_all(data_dir).await.with_context(|| {
+        format!(
+            "failed to create RAG data directory: {}",
+            data_dir.display()
+        )
+    })?;
+
+    let database_path = rag_database_path(data_dir);
+    let sqlite_path = rag_sqlite_database_path(data_dir);
+    tokio::fs::create_dir_all(&database_path)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to create RAG database directory: {}",
+                database_path.display()
+            )
+        })?;
+
+    prepare_index_storage(&database_path, &sqlite_path, resolved, true).await?;
+    let stored_records = tokio::task::spawn_blocking({
+        let sqlite_path = sqlite_path.clone();
+        move || load_rag_file_records(&sqlite_path)
+    })
+    .await
+    .context("failed to join RAG sqlite load task")??;
+    let resolved_for_planning = resolved.clone();
+    let (plans, planning_update) = tokio::task::spawn_blocking(move || {
+        plan_startup_reconciliation(&resolved_for_planning, &stored_records)
+    })
+    .await
+    .context("failed to join RAG startup reconciliation planning task")??;
+    let plans_is_empty = plans.is_empty();
+    let status_update = execute_path_update_plans(
+        PathUpdateRuntimeContext {
+            app_handle,
+            runtime_status,
+            runtime_guard,
+        },
+        &database_path,
+        &sqlite_path,
+        resolved,
+        plans,
+        planning_update,
     )
     .await?;
+
+    if plans_is_empty {
+        let mut vector_store = RagVectorStore::open(&database_path).await?;
+        vector_store.ensure_index().await?;
+    }
+
+    set_runtime_status(
+        app_handle,
+        runtime_status,
+        runtime_guard,
+        RagRuntimePhase::Idle,
+        RuntimeProgress::default(),
+        status_update,
+    )
+    .await;
     Ok(())
 }
 
@@ -211,7 +304,7 @@ pub(super) async fn rebuild_index_locked(
     })?;
 
     let database_path = rag_database_path(data_dir);
-    let metadata_path = rag_metadata_database_path(data_dir);
+    let sqlite_path = rag_sqlite_database_path(data_dir);
     tokio::fs::create_dir_all(&database_path)
         .await
         .with_context(|| {
@@ -221,13 +314,13 @@ pub(super) async fn rebuild_index_locked(
             )
         })?;
 
-    prepare_index_storage(&database_path, &metadata_path, resolved, true).await?;
+    prepare_index_storage(&database_path, &sqlite_path, resolved, true).await?;
     let stored_records = tokio::task::spawn_blocking({
-        let metadata_path = metadata_path.clone();
-        move || load_metadata_records(&metadata_path)
+        let sqlite_path = sqlite_path.clone();
+        move || load_rag_file_records(&sqlite_path)
     })
     .await
-    .context("failed to join RAG metadata load task")??;
+    .context("failed to join RAG sqlite load task")??;
     let client = build_embedding_client()?;
     let mut vector_store = RagVectorStore::open(&database_path).await?;
     let (scan_tx, mut scan_rx) =
@@ -249,7 +342,7 @@ pub(super) async fn rebuild_index_locked(
             &mut join_set,
             &mut pending_files,
             &semaphore,
-            &metadata_path,
+            &sqlite_path,
             resolved,
             &client,
             &vector_store,
@@ -285,16 +378,16 @@ pub(super) async fn rebuild_index_locked(
                 plan.staged_cleanup_paths.extend(event.staged_cleanup_paths);
                 plan.stale_paths.extend(event.stale_paths);
 
-                if let Some(record) = event.metadata_refresh {
-                    write_metadata_records(
-                        &metadata_path,
+                if let Some(record) = event.rag_file_record_refresh {
+                    write_rag_file_records(
+                        &sqlite_path,
                         vec![record.clone()],
-                        "failed to join streamed RAG metadata refresh task",
+                        "failed to join streamed RAG file record refresh task",
                     )
                     .await?;
                 }
                 if let Some(record) = event.projection_refresh {
-                    refresh_projection_records(&database_path, &metadata_path, vec![record]).await?;
+                    refresh_projection_records(&database_path, &sqlite_path, vec![record]).await?;
                 }
 
                 if let Some(file) = event.file_to_index {
@@ -329,7 +422,7 @@ pub(super) async fn rebuild_index_locked(
                 let indexed = maybe_indexed
                     .context("streaming RAG reindex task queue ended unexpectedly")?
                     .context("failed to join streaming RAG reindex task")??;
-                persist_indexed_file(&mut vector_store, &metadata_path, indexed).await?;
+                persist_indexed_file(&mut vector_store, &sqlite_path, indexed).await?;
                 pending_file_count = pending_file_count.saturating_sub(1);
                 completed_file_count = completed_file_count.saturating_add(1);
                 set_rebuild_runtime_status(
@@ -372,11 +465,11 @@ pub(super) async fn rebuild_index_locked(
         let stale_paths = plan.stale_paths.iter().cloned().collect::<Vec<_>>();
         delete_vectors_for_exact_paths(&mut vector_store, &stale_paths).await?;
         tokio::task::spawn_blocking({
-            let metadata_path = metadata_path.clone();
-            move || delete_metadata_for_paths(&metadata_path, &stale_paths, false)
+            let sqlite_path = sqlite_path.clone();
+            move || delete_rag_file_records_for_paths(&sqlite_path, &stale_paths, false)
         })
         .await
-        .context("failed to join RAG metadata cleanup task")??;
+        .context("failed to join RAG sqlite cleanup task")??;
     }
 
     vector_store.ensure_index().await?;
@@ -415,6 +508,44 @@ fn streaming_reindex_concurrency() -> usize {
         .unwrap_or(2)
 }
 
+pub(super) fn choose_scanned_file_path(
+    resolved: &ResolvedRagConfig,
+    original_path: &Path,
+    canonical_path: &Path,
+) -> PathBuf {
+    if resolve_source_root_for_path(&resolved.source_roots, canonical_path).is_some() {
+        canonical_path.to_path_buf()
+    } else {
+        original_path.to_path_buf()
+    }
+}
+
+pub(super) fn scanned_file_lookup_keys(
+    original_path: &Path,
+    canonical_path: &Path,
+    scan_path: &Path,
+) -> Vec<String> {
+    let mut keys = Vec::new();
+    for key in [
+        normalize_path_string(scan_path),
+        normalize_path_string(original_path),
+        normalize_path_string(canonical_path),
+    ] {
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    keys
+}
+
+pub(super) fn find_stored_record_by_path_alias<'a>(
+    stored_records: &'a HashMap<String, RagIndexedFileRecord>,
+    keys: &[String],
+) -> Option<(&'a RagIndexedFileRecord, String)> {
+    keys.iter()
+        .find_map(|key| stored_records.get(key).map(|record| (record, key.clone())))
+}
+
 pub(super) fn stream_rebuild_scan(
     resolved: &ResolvedRagConfig,
     stored_records: &HashMap<String, RagIndexedFileRecord>,
@@ -435,7 +566,10 @@ pub(super) fn stream_rebuild_scan(
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(error) => {
-                    tracing::warn!(?error, "failed to walk RAG source entry");
+                    tracing::warn!(
+                        error = format_args!("{:#}", error),
+                        "failed to walk RAG source entry"
+                    );
                     if scan_tx
                         .blocking_send(RebuildScanEvent {
                             skipped_file_count: 1,
@@ -464,7 +598,7 @@ pub(super) fn stream_rebuild_scan(
             let canonical_path = match path.canonicalize() {
                 Ok(path) => path,
                 Err(error) => {
-                    tracing::warn!(?error, path = %path.display(), "failed to canonicalize RAG file path");
+                    tracing::warn!(error = format_args!("{:#}", error), path = %path.display(), "failed to canonicalize RAG file path");
                     let fallback_path = normalize_path_string(path);
                     if stored_records.contains_key(&fallback_path) {
                         visited_paths.insert(fallback_path);
@@ -486,7 +620,12 @@ pub(super) fn stream_rebuild_scan(
                     continue;
                 }
             };
-            let normalized_path = normalize_path_string(&canonical_path);
+            let scan_path = choose_scanned_file_path(resolved, path, &canonical_path);
+            let lookup_keys = scanned_file_lookup_keys(path, &canonical_path, &scan_path);
+            let normalized_path = lookup_keys
+                .first()
+                .cloned()
+                .unwrap_or_else(|| normalize_path_string(&scan_path));
             if !visited_paths.insert(normalized_path.clone()) {
                 continue;
             }
@@ -495,30 +634,41 @@ pub(super) fn stream_rebuild_scan(
                 scanned_file_count: 1,
                 ..RebuildScanEvent::default()
             };
-            let stored_record = stored_records.get(&normalized_path);
-            match inspect_path_for_index(resolved, &canonical_path, stored_record) {
+            let matched_stored_path =
+                find_stored_record_by_path_alias(stored_records, &lookup_keys).map(
+                    |(record, matched_key)| {
+                        visited_paths.insert(matched_key.clone());
+                        (record, matched_key)
+                    },
+                );
+            let stored_record = matched_stored_path.as_ref().map(|(record, _)| *record);
+            match inspect_path_for_index(resolved, &scan_path, stored_record) {
                 Ok(InspectPathOutcome::Skip) => {
                     event.skipped_file_count = 1;
-                    if stored_record.is_some() {
-                        event.stale_paths.push(normalized_path);
+                    if let Some((_, matched_path)) = matched_stored_path {
+                        event.stale_paths.push(matched_path);
                     }
                 }
                 Ok(InspectPathOutcome::Unchanged {
                     record,
-                    refresh_metadata,
+                    refresh_rag_file_record,
                     clear_staged,
                     refresh_projection,
                 }) => {
                     event.indexed_file_count = 1;
                     event.chunk_count = record.current_chunk_count();
-                    if refresh_metadata {
-                        event.metadata_refresh = Some(record.clone());
+                    if refresh_rag_file_record {
+                        event.rag_file_record_refresh = Some(record.clone());
                     }
                     if refresh_projection {
                         event.projection_refresh = Some(record);
                     }
                     if clear_staged {
-                        event.staged_cleanup_paths.push(normalized_path);
+                        let cleanup_path = matched_stored_path
+                            .as_ref()
+                            .map(|(_, matched_path)| matched_path.clone())
+                            .unwrap_or(normalized_path);
+                        event.staged_cleanup_paths.push(cleanup_path);
                     }
                 }
                 Ok(InspectPathOutcome::Reindex(file)) => {
@@ -529,18 +679,26 @@ pub(super) fn stream_rebuild_scan(
                         &mut event.recent_warnings,
                         file.warnings
                             .iter()
-                            .map(|warning| format_rag_warning_for_path(&canonical_path, warning)),
+                            .map(|warning| format_rag_warning_for_path(&scan_path, warning)),
                     );
                     event.file_to_index = Some(file);
                 }
                 Err(error) => {
-                    tracing::warn!(?error, path = %canonical_path.display(), "failed to inspect RAG file");
+                    tracing::warn!(error = format_args!("{:#}", error), path = %scan_path.display(), "failed to inspect RAG file");
                     event.skipped_file_count = 1;
                     event.warning_count = 1;
                     push_recent_rag_warning(
                         &mut event.recent_warnings,
-                        format_rag_warning_for_path(&canonical_path, &format_error_chain(&error)),
+                        format_rag_warning_for_path(&scan_path, &format_error_chain(&error)),
                     );
+                    let has_active_chunks = stored_record
+                        .and_then(|r| r.active.as_ref())
+                        .map(|v| v.chunk_count > 0)
+                        .unwrap_or(false);
+                    if !has_active_chunks {
+                        event.rag_file_record_refresh =
+                            build_skip_marker_record(resolved, &scan_path);
+                    }
                 }
             }
 
@@ -565,11 +723,147 @@ pub(super) fn stream_rebuild_scan(
     Ok(())
 }
 
+fn plan_startup_reconciliation(
+    resolved: &ResolvedRagConfig,
+    stored_records: &HashMap<String, RagIndexedFileRecord>,
+) -> Result<(Vec<(PathBuf, PathUpdatePlan)>, RuntimeStatusUpdate)> {
+    let mut visited_paths = HashSet::new();
+    let mut plans = Vec::new();
+    let mut planning_update = RuntimeStatusUpdate::default();
+
+    for source_root in &resolved.source_roots {
+        let mut walker = WalkBuilder::new(source_root);
+        walker
+            .hidden(false)
+            .ignore(false)
+            .git_ignore(false)
+            .git_global(false)
+            .git_exclude(false);
+
+        for entry in walker.build() {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    tracing::warn!(
+                        error = format_args!("{:#}", error),
+                        "failed to walk RAG source entry"
+                    );
+                    planning_update.warning_count = planning_update.warning_count.saturating_add(1);
+                    push_recent_rag_warning(
+                        &mut planning_update.recent_warnings,
+                        format!("walk source entry failed: {error}"),
+                    );
+                    continue;
+                }
+            };
+
+            let path = entry.path();
+            if path == source_root
+                || !entry
+                    .file_type()
+                    .map(|kind| kind.is_file())
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+
+            let canonical_path = match path.canonicalize() {
+                Ok(path) => path,
+                Err(error) => {
+                    tracing::warn!(error = format_args!("{:#}", error), path = %path.display(), "failed to canonicalize RAG file path");
+                    let fallback_path = normalize_path_string(path);
+                    if stored_records.contains_key(&fallback_path) {
+                        visited_paths.insert(fallback_path);
+                    }
+                    planning_update.warning_count = planning_update.warning_count.saturating_add(1);
+                    push_recent_rag_warning(
+                        &mut planning_update.recent_warnings,
+                        format_rag_warning_for_path(
+                            path,
+                            &format!("failed to canonicalize path: {error}"),
+                        ),
+                    );
+                    continue;
+                }
+            };
+            let scan_path = choose_scanned_file_path(resolved, path, &canonical_path);
+            let lookup_keys = scanned_file_lookup_keys(path, &canonical_path, &scan_path);
+            let normalized_path = lookup_keys
+                .first()
+                .cloned()
+                .unwrap_or_else(|| normalize_path_string(&scan_path));
+            if !visited_paths.insert(normalized_path.clone()) {
+                continue;
+            }
+
+            let stored_record = find_stored_record_by_path_alias(stored_records, &lookup_keys).map(
+                |(record, matched_key)| {
+                    visited_paths.insert(matched_key);
+                    record.clone()
+                },
+            );
+            match build_path_update_plan(resolved, &scan_path, stored_record.clone()) {
+                Ok(PathUpdatePlan::Noop) => {}
+                Ok(PathUpdatePlan::Delete { .. }) if stored_record.is_none() => {}
+                Ok(plan @ PathUpdatePlan::Delete { .. }) => {
+                    let plan_path = stored_record
+                        .as_ref()
+                        .map(|record| PathBuf::from(&record.absolute_path))
+                        .unwrap_or_else(|| scan_path.clone());
+                    plans.push((plan_path, plan));
+                }
+                Ok(plan) => plans.push((scan_path, plan)),
+                Err(error) => {
+                    tracing::warn!(error = format_args!("{:#}", error), path = %scan_path.display(), "failed to inspect RAG file during startup reconciliation");
+                    planning_update.warning_count = planning_update.warning_count.saturating_add(1);
+                    push_recent_rag_warning(
+                        &mut planning_update.recent_warnings,
+                        format_rag_warning_for_path(&scan_path, &format_error_chain(&error)),
+                    );
+                    // Only write a skip marker when there are no active chunks
+                    // to avoid orphaning existing vector data in the chunk store.
+                    let has_active_chunks = stored_record
+                        .as_ref()
+                        .and_then(|r| r.active.as_ref())
+                        .map(|v| v.chunk_count > 0)
+                        .unwrap_or(false);
+                    if !has_active_chunks {
+                        if let Some(marker) = build_skip_marker_record(resolved, &scan_path) {
+                            plans.push((
+                                scan_path,
+                                PathUpdatePlan::RefreshRagFileRecord {
+                                    record: marker,
+                                    clear_staged: false,
+                                    refresh_projection: false,
+                                },
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for absolute_path in stored_records.keys() {
+        if visited_paths.contains(absolute_path) {
+            continue;
+        }
+        plans.push((
+            PathBuf::from(absolute_path),
+            PathUpdatePlan::Delete {
+                delete_descendants: false,
+            },
+        ));
+    }
+
+    Ok((plans, planning_update))
+}
+
 async fn spawn_streaming_reindex_tasks(
     join_set: &mut JoinSet<Result<IndexedPreparedFile>>,
     pending_files: &mut VecDeque<PreparedRagFile>,
     semaphore: &Arc<Semaphore>,
-    metadata_path: &Path,
+    sqlite_path: &Path,
     resolved: &ResolvedRagConfig,
     client: &HttpClient,
     vector_store: &RagVectorStore,
@@ -579,10 +873,10 @@ async fn spawn_streaming_reindex_tasks(
             pending_files.push_front(file);
             break;
         };
-        write_metadata_records(
-            metadata_path,
+        write_rag_file_records(
+            sqlite_path,
             vec![file.record.clone()],
-            "failed to join streamed RAG metadata stage task",
+            "failed to join streamed RAG file record stage task",
         )
         .await?;
         let resolved = resolved.clone();
@@ -627,8 +921,8 @@ async fn set_rebuild_runtime_status(
     .await;
 }
 
-async fn write_metadata_records(
-    metadata_path: &Path,
+async fn write_rag_file_records(
+    sqlite_path: &Path,
     records: Vec<RagIndexedFileRecord>,
     join_error_message: &'static str,
 ) -> Result<()> {
@@ -639,22 +933,22 @@ async fn write_metadata_records(
     let started_at = Instant::now();
     let record_count = records.len();
     tokio::task::spawn_blocking({
-        let metadata_path = metadata_path.to_path_buf();
-        move || upsert_metadata_records(&metadata_path, &records)
+        let sqlite_path = sqlite_path.to_path_buf();
+        move || upsert_rag_file_records(&sqlite_path, &records)
     })
     .await
     .context(join_error_message)??;
     tracing::info!(
         record_count,
         elapsed_ms = started_at.elapsed().as_millis(),
-        "rag metadata records persisted"
+        "rag file records persisted"
     );
     Ok(())
 }
 
 async fn refresh_projection_records(
     database_path: &Path,
-    metadata_path: &Path,
+    sqlite_path: &Path,
     records: Vec<RagIndexedFileRecord>,
 ) -> Result<()> {
     if records.is_empty() {
@@ -663,18 +957,18 @@ async fn refresh_projection_records(
 
     tokio::task::spawn_blocking({
         let database_path = database_path.to_path_buf();
-        let metadata_path = metadata_path.to_path_buf();
-        move || refresh_projection_metadata_for_records(&database_path, &metadata_path, &records)
+        let sqlite_path = sqlite_path.to_path_buf();
+        move || refresh_projection_for_rag_file_records(&database_path, &sqlite_path, &records)
     })
     .await
-    .context("failed to join RAG projection metadata refresh task")??;
+    .context("failed to join RAG projection refresh task")??;
     Ok(())
 }
 
 pub(super) async fn execute_path_update_plans(
     runtime_context: PathUpdateRuntimeContext<'_>,
     database_path: &Path,
-    metadata_path: &Path,
+    sqlite_path: &Path,
     resolved: &ResolvedRagConfig,
     plans: Vec<(PathBuf, PathUpdatePlan)>,
     mut status_update: RuntimeStatusUpdate,
@@ -687,7 +981,7 @@ pub(super) async fn execute_path_update_plans(
     let mut delete_exact_paths = Vec::new();
     let mut delete_prefix_paths = Vec::new();
     let mut staged_cleanup_paths = Vec::new();
-    let mut metadata_refreshes = Vec::new();
+    let mut rag_file_record_refreshes = Vec::new();
     let mut projection_refreshes = Vec::new();
     let mut files_to_index = Vec::new();
 
@@ -701,7 +995,7 @@ pub(super) async fn execute_path_update_plans(
                     delete_exact_paths.push(normalize_path_string(&path));
                 }
             }
-            PathUpdatePlan::RefreshMetadata {
+            PathUpdatePlan::RefreshRagFileRecord {
                 record,
                 clear_staged,
                 refresh_projection,
@@ -712,7 +1006,7 @@ pub(super) async fn execute_path_update_plans(
                 if refresh_projection {
                     projection_refreshes.push(record.clone());
                 }
-                metadata_refreshes.push(record);
+                rag_file_record_refreshes.push(record);
             }
             PathUpdatePlan::Reindex(file) => files_to_index.push(file),
         }
@@ -721,23 +1015,23 @@ pub(super) async fn execute_path_update_plans(
     if !delete_exact_paths.is_empty() {
         delete_vectors_for_exact_paths(&mut vector_store, &delete_exact_paths).await?;
         tokio::task::spawn_blocking({
-            let metadata_path = metadata_path.to_path_buf();
+            let sqlite_path = sqlite_path.to_path_buf();
             let delete_exact_paths = delete_exact_paths.clone();
-            move || delete_metadata_for_paths(&metadata_path, &delete_exact_paths, false)
+            move || delete_rag_file_records_for_paths(&sqlite_path, &delete_exact_paths, false)
         })
         .await
-        .context("failed to join batched RAG metadata delete task")??;
+        .context("failed to join batched RAG file record delete task")??;
     }
 
     if !delete_prefix_paths.is_empty() {
         delete_vectors_for_prefix_paths(&mut vector_store, &delete_prefix_paths).await?;
         tokio::task::spawn_blocking({
-            let metadata_path = metadata_path.to_path_buf();
+            let sqlite_path = sqlite_path.to_path_buf();
             let delete_prefix_paths = delete_prefix_paths.clone();
-            move || delete_metadata_for_paths(&metadata_path, &delete_prefix_paths, true)
+            move || delete_rag_file_records_for_paths(&sqlite_path, &delete_prefix_paths, true)
         })
         .await
-        .context("failed to join descendant RAG metadata delete task")??;
+        .context("failed to join descendant RAG file record delete task")??;
     }
 
     if !staged_cleanup_paths.is_empty() {
@@ -749,18 +1043,18 @@ pub(super) async fn execute_path_update_plans(
         .await?;
     }
 
-    if !metadata_refreshes.is_empty() {
+    if !rag_file_record_refreshes.is_empty() {
         tokio::task::spawn_blocking({
-            let metadata_path = metadata_path.to_path_buf();
-            let metadata_refreshes = metadata_refreshes.clone();
-            move || upsert_metadata_records(&metadata_path, &metadata_refreshes)
+            let sqlite_path = sqlite_path.to_path_buf();
+            let rag_file_record_refreshes = rag_file_record_refreshes.clone();
+            move || upsert_rag_file_records(&sqlite_path, &rag_file_record_refreshes)
         })
         .await
-        .context("failed to join batched RAG metadata refresh task")??;
+        .context("failed to join batched RAG file record refresh task")??;
     }
 
     if !projection_refreshes.is_empty() {
-        refresh_projection_records(database_path, metadata_path, projection_refreshes).await?;
+        refresh_projection_records(database_path, sqlite_path, projection_refreshes).await?;
     }
 
     for file in &files_to_index {
@@ -792,14 +1086,13 @@ pub(super) async fn execute_path_update_plans(
         )
         .await;
         for (index, file) in files_to_index.iter().enumerate() {
-            write_metadata_records(
-                metadata_path,
+            write_rag_file_records(
+                sqlite_path,
                 vec![file.record.clone()],
-                "failed to join batched RAG metadata stage task",
+                "failed to join batched RAG file record stage task",
             )
             .await?;
-            reindex_prepared_file(&mut vector_store, metadata_path, resolved, &client, file)
-                .await?;
+            reindex_prepared_file(&mut vector_store, sqlite_path, resolved, &client, file).await?;
             let remaining = files_to_index.len().saturating_sub(index + 1);
             set_runtime_status(
                 runtime_context.app_handle,
@@ -828,13 +1121,13 @@ pub(super) async fn execute_path_update_plans(
 
 async fn reindex_prepared_file(
     vector_store: &mut RagVectorStore,
-    metadata_path: &Path,
+    sqlite_path: &Path,
     resolved: &ResolvedRagConfig,
     client: &HttpClient,
     file: &PreparedRagFile,
 ) -> Result<()> {
     let indexed = index_prepared_file_for_store(vector_store, resolved, client, file).await?;
-    persist_indexed_file(vector_store, metadata_path, indexed).await
+    persist_indexed_file(vector_store, sqlite_path, indexed).await
 }
 
 async fn index_prepared_file(
@@ -862,7 +1155,11 @@ async fn build_indexed_file_output(
     file: PreparedRagFile,
 ) -> Result<IndexedPreparedFile> {
     let reusable_vectors = vector_store
-        .load_chunk_vectors_for_file(&file.record.absolute_path, RagChunkState::Active)
+        .load_chunk_vectors_for_file(
+            &file.record.absolute_path,
+            RagChunkState::Active,
+            &resolved.embedding_fingerprint,
+        )
         .await?;
     let observation = observe_prepared_file(&file);
     let chunks = build_chunks_for_prepared_file(&file, &file.prepared_chunks);
@@ -888,7 +1185,7 @@ async fn build_indexed_file_output(
 
 async fn persist_indexed_file(
     vector_store: &mut RagVectorStore,
-    metadata_path: &Path,
+    sqlite_path: &Path,
     indexed: IndexedPreparedFile,
 ) -> Result<()> {
     let persist_started_at = Instant::now();
@@ -935,10 +1232,10 @@ async fn persist_indexed_file(
     }
 
     tokio::task::spawn_blocking({
-        let metadata_path = metadata_path.to_path_buf();
+        let sqlite_path = sqlite_path.to_path_buf();
         move || {
-            finalize_metadata_and_replace_lexical_chunks(
-                &metadata_path,
+            finalize_rag_file_record_and_replace_lexical_chunks(
+                &sqlite_path,
                 &file.record,
                 file.prepared_chunks.len(),
                 &file.prepared_chunks,
@@ -946,7 +1243,7 @@ async fn persist_indexed_file(
         }
     })
     .await
-    .context("failed to join RAG metadata finalize task")??;
+    .context("failed to join RAG file record finalize task")??;
     tracing::info!(
         chunk_count,
         elapsed_ms = persist_started_at.elapsed().as_millis(),
@@ -1039,12 +1336,12 @@ pub(super) fn build_path_update_plan(
         }),
         InspectPathOutcome::Unchanged {
             record,
-            refresh_metadata,
+            refresh_rag_file_record,
             clear_staged,
             refresh_projection,
         } => {
-            if refresh_metadata {
-                Ok(PathUpdatePlan::RefreshMetadata {
+            if refresh_rag_file_record {
+                Ok(PathUpdatePlan::RefreshRagFileRecord {
                     record,
                     clear_staged,
                     refresh_projection,
@@ -1088,7 +1385,7 @@ pub(super) fn inspect_path_for_index(
 
     let size_bytes = i64::try_from(file_metadata.len()).with_context(|| {
         format!(
-            "file is too large to track in metadata store: {}",
+            "file is too large to track in rag sqlite store: {}",
             path.display()
         )
     })?;
@@ -1130,12 +1427,24 @@ pub(super) fn inspect_path_for_index(
                     modified_at_ms,
                     size_bytes,
                 ),
-                refresh_metadata: clear_staged || refresh_projection,
+                refresh_rag_file_record: clear_staged || refresh_projection,
                 clear_staged,
                 refresh_projection,
             });
         }
     }
+
+    tracing::debug!(
+        path = %path.display(),
+        has_stored_record = stored_record.is_some(),
+        has_active_version = active_version.is_some(),
+        same_embedding_and_extractor,
+        stored_size = active_version.map(|v| v.size_bytes),
+        current_size = size_bytes,
+        stored_mtime = active_version.and_then(|v| v.modified_at_ms),
+        current_mtime = modified_at_ms,
+        "rag file metadata fast path missed, will extract and inspect content"
+    );
 
     let bytes =
         std::fs::read(path).with_context(|| format!("failed to read file: {}", path.display()))?;
@@ -1167,11 +1476,11 @@ pub(super) fn inspect_path_for_index(
             let clear_staged = stored_record.has_pending();
             return Ok(InspectPathOutcome::Unchanged {
                 record: if clear_staged {
-                    stored_record.refresh_active_metadata(modified_at_ms, size_bytes)
+                    stored_record.refresh_active_version(modified_at_ms, size_bytes)
                 } else {
                     stored_record.clone()
                 },
-                refresh_metadata: clear_staged,
+                refresh_rag_file_record: clear_staged,
                 clear_staged,
                 refresh_projection: false,
             });
@@ -1196,19 +1505,37 @@ pub(super) fn inspect_path_for_index(
                     modified_at_ms,
                     size_bytes,
                 ),
-                refresh_metadata: true,
+                refresh_rag_file_record: true,
                 clear_staged,
                 refresh_projection,
             });
         }
     }
     if extracted.normalized_text.trim().is_empty() && extracted.blocks.is_empty() {
-        return Ok(InspectPathOutcome::Skip);
+        return Ok(build_empty_content_outcome(
+            path,
+            &source_root_string,
+            &relative_path,
+            &extractor_fingerprint,
+            resolved,
+            modified_at_ms,
+            size_bytes,
+            stored_record,
+        ));
     }
     let prepared_chunks =
         split_extracted_document_for_path(path, &extracted, CHUNK_MAX_CHARS, CHUNK_OVERLAP_CHARS)?;
     if prepared_chunks.is_empty() {
-        return Ok(InspectPathOutcome::Skip);
+        return Ok(build_empty_content_outcome(
+            path,
+            &source_root_string,
+            &relative_path,
+            &extractor_fingerprint,
+            resolved,
+            modified_at_ms,
+            size_bytes,
+            stored_record,
+        ));
     }
     let chunk_count = prepared_chunks.len();
 
@@ -1240,6 +1567,96 @@ pub(super) fn inspect_path_for_index(
     }))
 }
 
+/// Build a skip marker record for a file that cannot produce indexable content.
+/// Stores size+mtime so the next startup fast path can skip re-extraction.
+pub(super) fn build_skip_marker_record(
+    resolved: &ResolvedRagConfig,
+    path: &Path,
+) -> Option<RagIndexedFileRecord> {
+    let source_root = resolve_source_root_for_path(&resolved.source_roots, path)?;
+    let source_root_string = normalize_path_string(source_root);
+    let relative_path = path
+        .strip_prefix(source_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let extractor_fingerprint = extractor_fingerprint_for_path(path)?;
+    let file_metadata = std::fs::metadata(path).ok()?;
+    let size_bytes = i64::try_from(file_metadata.len()).ok()?;
+    let modified_at_ms = file_metadata
+        .modified()
+        .ok()
+        .and_then(system_time_to_unix_ms);
+    Some(RagIndexedFileRecord {
+        source_root: source_root_string,
+        absolute_path: normalize_path_string(path),
+        relative_path,
+        embedding_fingerprint: resolved.embedding_fingerprint.clone(),
+        extractor_fingerprint: extractor_fingerprint.to_string(),
+        active: Some(RagIndexedFileVersion {
+            version_id: format!("skip-{:x}", md5::compute(normalize_path_string(path))),
+            content_md5: String::new(),
+            modified_at_ms,
+            size_bytes,
+            chunk_count: 0,
+            indexed_at_ms: now_unix_ms(),
+        }),
+        pending: None,
+    })
+}
+
+/// Build an outcome for files that exist but produce no indexable content
+/// (empty text, no viable chunks). If the file was previously indexed with
+/// real chunks, returns `Skip` so the caller deletes stale vector data first;
+/// the skip marker will be written on the next scan once the old data is gone.
+/// Otherwise persists a skip marker record so the next startup can
+/// short-circuit via the size+mtime fast path.
+#[allow(clippy::too_many_arguments)]
+fn build_empty_content_outcome(
+    path: &Path,
+    source_root: &str,
+    relative_path: &str,
+    extractor_fingerprint: &str,
+    resolved: &ResolvedRagConfig,
+    modified_at_ms: Option<i64>,
+    size_bytes: i64,
+    stored_record: Option<&RagIndexedFileRecord>,
+) -> InspectPathOutcome {
+    // When the stored record has active chunks, return Skip so the caller
+    // runs Delete and cleans up stale vector data in the chunk store.
+    let has_active_chunks = stored_record
+        .and_then(|r| r.active.as_ref())
+        .map(|v| v.chunk_count > 0)
+        .unwrap_or(false);
+    if has_active_chunks {
+        return InspectPathOutcome::Skip;
+    }
+
+    let record = RagIndexedFileRecord {
+        source_root: source_root.to_string(),
+        absolute_path: normalize_path_string(path),
+        relative_path: relative_path.to_string(),
+        embedding_fingerprint: resolved.embedding_fingerprint.clone(),
+        extractor_fingerprint: extractor_fingerprint.to_string(),
+        active: Some(RagIndexedFileVersion {
+            version_id: format!("skip-{:x}", md5::compute(normalize_path_string(path))),
+            content_md5: String::new(),
+            modified_at_ms,
+            size_bytes,
+            chunk_count: 0,
+            indexed_at_ms: now_unix_ms(),
+        }),
+        pending: None,
+    };
+    let clear_staged = stored_record.map(|r| r.has_pending()).unwrap_or(false);
+    InspectPathOutcome::Unchanged {
+        record,
+        refresh_rag_file_record: true,
+        clear_staged,
+        refresh_projection: false,
+    }
+}
+
 fn refreshed_record_with_current_path(
     stored_record: &RagIndexedFileRecord,
     source_root: &str,
@@ -1247,7 +1664,7 @@ fn refreshed_record_with_current_path(
     modified_at_ms: Option<i64>,
     size_bytes: i64,
 ) -> RagIndexedFileRecord {
-    let mut refreshed = stored_record.refresh_active_metadata(modified_at_ms, size_bytes);
+    let mut refreshed = stored_record.refresh_active_version(modified_at_ms, size_bytes);
     refreshed.source_root = source_root.to_string();
     refreshed.relative_path = relative_path.to_string();
     refreshed

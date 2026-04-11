@@ -17,7 +17,7 @@ use crate::{
 };
 
 pub(crate) const RAG_DB_DIR_NAME: &str = "rag-index";
-pub(crate) const RAG_METADATA_DB_FILE_NAME: &str = "rag-metadata.sqlite3";
+pub(crate) const RAG_SQLITE_DB_FILE_NAME: &str = "rag-chunks.sqlite3";
 pub(crate) const RAG_LEXICAL_TABLE_NAME: &str = "rag_chunk_fts";
 pub(crate) const MAX_TEXT_FILE_BYTES_PLAIN_TEXT: u64 = 20 * 1024 * 1024;
 pub(crate) const MAX_TEXT_FILE_BYTES_MARKDOWN: u64 = 20 * 1024 * 1024;
@@ -209,7 +209,7 @@ impl RagIndexedFileRecord {
         self.pending.is_some()
     }
 
-    pub(crate) fn refresh_active_metadata(
+    pub(crate) fn refresh_active_version(
         &self,
         modified_at_ms: Option<i64>,
         size_bytes: i64,

@@ -12,13 +12,13 @@ pub use service::RagIndexService;
 pub(crate) use chunking::load_document_excerpt_for_chunk;
 pub(crate) use config::{
     collect_document_access_roots, display_path_for_prompt, parse_document_kind,
-    parse_heading_path, path_is_within_roots, rag_database_path, rag_metadata_database_path,
+    parse_heading_path, path_is_within_roots, rag_database_path, rag_sqlite_database_path,
     resolve_embedding_provider,
 };
 pub(crate) use embedding::{build_embedding_client, request_embeddings};
 pub(crate) use storage::{
-    build_usearch_index_options, load_active_vector_dimensions, metadata_store_has_pending_rows,
-    open_vector_chunk_connection, search_lexical_chunks, vector_index_file_path,
+    build_usearch_index_options, load_active_vector_dimensions, open_vector_chunk_connection,
+    rag_sqlite_has_pending_rows, search_lexical_chunks, vector_index_file_path,
 };
 
 #[cfg(test)]

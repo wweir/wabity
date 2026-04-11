@@ -245,8 +245,8 @@ pub async fn search_chunks(
     let hits = merge_search_hits(vector_hits?, lexical_hits?);
     let ranked_hits = rerank_search_hits(&query_plan, hits);
     let filtered_hits = prune_search_hits(ranked_hits, top_k, min_score);
-    let metadata_path = rag::rag_metadata_database_path(data_dir);
-    let pending_indexing = rag::metadata_store_has_pending_rows(&metadata_path)?;
+    let sqlite_path = rag::rag_sqlite_database_path(data_dir);
+    let pending_indexing = rag::rag_sqlite_has_pending_rows(&sqlite_path)?;
     tracing::info!(
         elapsed_ms = total_started_at.elapsed().as_millis(),
         hit_count = filtered_hits.len(),
@@ -387,12 +387,12 @@ async fn search_lexical_chunks(
         return Ok(Vec::new());
     }
 
-    let metadata_path = rag::rag_metadata_database_path(data_dir);
+    let sqlite_path = rag::rag_sqlite_database_path(data_dir);
     let lexical_queries = query_plan.lexical_queries.clone();
     let rows = tokio::task::spawn_blocking(move || {
         let mut merged = HashMap::new();
         for query in lexical_queries {
-            for row in rag::search_lexical_chunks(&metadata_path, &query.match_query, top_k)? {
+            for row in rag::search_lexical_chunks(&sqlite_path, &query.match_query, top_k)? {
                 let score = bm25_rank_to_score(row.bm25_rank) + query.weight;
                 let key = format!("{}#{}", row.absolute_path, row.chunk_index);
                 merged
@@ -1289,9 +1289,9 @@ mod tests {
             .canonicalize()
             .expect("canonicalize temporary RAG query directory");
         let dotted_path = canonical_path.join(".");
+        let normalized_path = rag_query_db_cache_key(&canonical_path);
         invalidate_rag_query_db_cache(&canonical_path).await;
         invalidate_rag_query_db_cache(&dotted_path).await;
-        let initial_cache_len = rag_query_db_cache().lock().await.len();
 
         let first = get_rag_query_db(&canonical_path)
             .await
@@ -1301,13 +1301,16 @@ mod tests {
             .expect("reuse cached USearch index for equivalent path");
 
         assert!(Arc::ptr_eq(&first, &second));
-        assert_eq!(
-            rag_query_db_cache().lock().await.len(),
-            initial_cache_len + 1
-        );
+        assert!(rag_query_db_cache()
+            .lock()
+            .await
+            .contains_key(&normalized_path));
 
         invalidate_rag_query_db_cache(&dotted_path).await;
-        assert_eq!(rag_query_db_cache().lock().await.len(), initial_cache_len);
+        assert!(!rag_query_db_cache()
+            .lock()
+            .await
+            .contains_key(&normalized_path));
 
         let _ = tokio::fs::remove_dir_all(&database_path).await;
     }

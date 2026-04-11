@@ -145,6 +145,9 @@
 - 纯 metadata watcher 事件在进入索引规划前直接过滤，避免把 write-time / xattr 噪音升级成整文件读取、`md5` 和分片
 - 手动全量重建与后台 watcher 增量维护通过同一把存储锁串行化，避免两条链路并发改写同一份本地索引 / SQLite
 - 当前语义索引已经切到“SQLite 真相源 + USearch 派生文件”；只要 active chunk 集合变化，就在该批次结束前重建 USearch，不能再沿用旧的阈值延迟重建语义
+- active chunk 成功写入 USearch 后，会回收 SQLite 行上的 `vector_blob`；SQLite 不再长期保留 active 向量副本
+- 如果只残留 `rag-chunks.dirty` 但 USearch 仍可用，启动时只补做 blob 回收并清掉 dirty marker，不应误触发全量重建
+- 如果 active 向量 blob 只回收到一半且 USearch 又缺失/损坏，这属于不可恢复的半残状态；启动时直接重置本地索引，避免拿不完整 blob 强行重建
 
 ## 状态
 
@@ -157,4 +160,6 @@
 - 2026-03-21：文件级索引目标从 `embedding_model` 升级为 `embedding_fingerprint`，冷启动也会对账当前 embedding 目标身份；fingerprint 优先使用模型自身稳定身份（显式 digest、`/models` 返回项里的 digest/fingerprint hint、官方 OpenAI 托管 model ID），无法稳定确认时才回退到 `endpoint + model`。chunk 行新增 `embedding_fingerprint` / `text_fingerprint`，会在调用 embedding 前先按 `原文文本 + embedding_fingerprint` 查找全局已算好的向量再决定是否远程计算
 - 2026-03-23：watcher 现在会直接忽略纯 metadata 事件，手动全量重建与后台增量维护共享存储互斥
 - 2026-04-07：向量存储切换为“SQLite 真相源 + USearch 派生索引”；USearch 不再按脏阈值延迟刷新，而是在 active chunk 变化后按批次重建，避免语义索引陈旧
+- 2026-04-10：active chunk 在 USearch 落盘成功后立即清空 SQLite `vector_blob`，减少本地磁盘占用；若启动时 USearch 缺失且 active blob 已回收，则重置本地索引并走全量重建
+- 2026-04-10：补充恢复语义细化；dirty marker 残留但 USearch 可用时只完成善后，不再误清空索引；active blob 处于部分回收状态且 USearch 不可用时，直接判为不可恢复并重置
 - 2026-03-25：Markdown 切块升级为“两阶段切块”：先按标题 / 列表项 / 代码块 / 段落做语义预切，再按目标字符预算在同一标题路径下打包；单个语义块超限时才回退到 `MarkdownSplitter`，以改善读书摘记和列表式笔记的检索粒度

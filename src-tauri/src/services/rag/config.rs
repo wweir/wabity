@@ -16,7 +16,7 @@ use super::{
     embedding::embedding_fingerprint,
     model::{
         EmbeddingTargetIdentity, RagRuntimeInputs, RagRuntimeStartMode, ResolvedRagConfig,
-        RAG_DB_DIR_NAME, RAG_METADATA_DB_FILE_NAME,
+        RAG_DB_DIR_NAME, RAG_SQLITE_DB_FILE_NAME,
     },
 };
 
@@ -63,8 +63,8 @@ pub(crate) fn rag_database_path(config_dir: &Path) -> PathBuf {
     config_dir.join(RAG_DB_DIR_NAME)
 }
 
-pub(crate) fn rag_metadata_database_path(data_dir: &Path) -> PathBuf {
-    data_dir.join(RAG_METADATA_DB_FILE_NAME)
+pub(crate) fn rag_sqlite_database_path(data_dir: &Path) -> PathBuf {
+    rag_database_path(data_dir).join(RAG_SQLITE_DB_FILE_NAME)
 }
 
 pub(crate) fn classify_rag_runtime_start(

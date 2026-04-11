@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Component, Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -24,17 +24,18 @@ use crate::services::document_extract::is_supported_document_file;
 
 use super::{
     config::{
-        classify_rag_runtime_start, rag_database_path, rag_metadata_database_path,
-        rag_settings_disabled, resolve_rag_config, PathStartsWithAny,
+        classify_rag_runtime_start, rag_database_path, rag_settings_disabled,
+        rag_sqlite_database_path, resolve_rag_config, PathStartsWithAny,
     },
     indexing::{
-        build_path_update_plan, execute_path_update_plans, extend_recent_rag_warnings,
+        build_path_update_plan, build_skip_marker_record, choose_scanned_file_path,
+        execute_path_update_plans, extend_recent_rag_warnings, find_stored_record_by_path_alias,
         format_error_chain, format_rag_warning_for_path, initialize_runtime_storage,
-        rebuild_index_locked, PathUpdateRuntimeContext,
+        rebuild_index_locked, scanned_file_lookup_keys, PathUpdateRuntimeContext,
     },
     model::{RagRuntimeContext, RagRuntimeInputs, RagRuntimeStartMode, WATCH_DEBOUNCE_WINDOW},
     status::{set_runtime_status, set_runtime_status_for_generation, RuntimeStatusUpdate},
-    storage::{clear_index, clear_metadata_store, load_metadata_records_for_paths},
+    storage::{clear_index, clear_sqlite_store, load_rag_file_records_for_paths},
 };
 
 #[derive(Clone)]
@@ -129,7 +130,10 @@ impl RagIndexService {
                     },
                 )
                 .await;
-                tracing::error!(?error, "RAG watcher loop exited unexpectedly");
+                tracing::error!(
+                    error = format_args!("{:#}", error),
+                    "RAG watcher loop exited unexpectedly"
+                );
             }
         }));
     }
@@ -180,13 +184,13 @@ pub(super) async fn run_watch_loop(
     start_mode: RagRuntimeStartMode,
 ) -> Result<()> {
     let database_path = rag_database_path(&data_dir);
-    let metadata_path = rag_metadata_database_path(&data_dir);
+    let sqlite_path = rag_sqlite_database_path(&data_dir);
     let resolved = match resolve_rag_config(&settings, &llm_settings) {
         Ok(resolved) => resolved,
         Err(error) => {
             if rag_settings_disabled(&settings) {
                 clear_index(&database_path).await?;
-                clear_metadata_store(&metadata_path).await?;
+                clear_sqlite_store(&sqlite_path).await?;
                 set_runtime_status_for_generation(
                     runtime_context.app_handle.as_ref(),
                     &runtime_context.runtime_status,
@@ -218,7 +222,7 @@ pub(super) async fn run_watch_loop(
 
     initialize_runtime_storage(
         &data_dir,
-        &metadata_path,
+        &sqlite_path,
         &resolved,
         runtime_context.app_handle.as_ref(),
         &runtime_context.runtime_status,
@@ -290,7 +294,10 @@ pub(super) async fn run_watch_loop(
                 },
             )
             .await;
-            tracing::warn!(?error, "failed to process RAG watcher events");
+            tracing::warn!(
+                error = format_args!("{:#}", error),
+                "failed to process RAG watcher events"
+            );
         }
     }
 }
@@ -306,15 +313,18 @@ pub(super) async fn process_event_batch(
 ) -> Result<()> {
     let _storage_guard = storage_lock.lock().await;
     let database_path = rag_database_path(data_dir);
-    let metadata_path = rag_metadata_database_path(data_dir);
+    let sqlite_path = rag_sqlite_database_path(data_dir);
     let mut full_rescan = false;
-    let mut changed_paths = BTreeSet::new();
+    let mut changed_paths = BTreeMap::new();
 
     for event in events {
         let event = match event {
             Ok(event) => event,
             Err(error) => {
-                tracing::warn!(?error, "RAG watcher reported an invalid event");
+                tracing::warn!(
+                    error = format_args!("{:#}", error),
+                    "RAG watcher reported an invalid event"
+                );
                 continue;
             }
         };
@@ -340,12 +350,16 @@ pub(super) async fn process_event_batch(
                     event.kind,
                     EventKind::Create(notify::event::CreateKind::Folder)
                 ) {
-                    changed_paths.extend(collect_indexable_paths_in_directory(&stable_path));
+                    for indexed_path in collect_indexable_paths_in_directory(&stable_path) {
+                        changed_paths
+                            .entry(indexed_path.clone())
+                            .or_insert(indexed_path);
+                    }
                 }
                 continue;
             }
 
-            changed_paths.insert(stable_path);
+            changed_paths.entry(stable_path).or_insert(path);
         }
     }
 
@@ -391,39 +405,78 @@ pub(super) async fn process_event_batch(
     }
 
     let changed_paths = changed_paths.into_iter().collect::<Vec<_>>();
+    let changed_path_inputs = changed_paths
+        .iter()
+        .map(|(stable_path, original_path)| {
+            let canonical_path = stable_path
+                .canonicalize()
+                .unwrap_or_else(|_| stable_path.clone());
+            let scan_path =
+                choose_scanned_file_path(resolved, original_path.as_path(), &canonical_path);
+            let lookup_keys =
+                scanned_file_lookup_keys(original_path.as_path(), &canonical_path, &scan_path);
+            (stable_path.clone(), scan_path, lookup_keys)
+        })
+        .collect::<Vec<_>>();
     let stored_records = tokio::task::spawn_blocking({
-        let metadata_path = metadata_path.clone();
-        let absolute_paths = changed_paths
+        let sqlite_path = sqlite_path.clone();
+        let absolute_paths = changed_path_inputs
             .iter()
-            .map(|path| super::config::normalize_path_string(path))
+            .flat_map(|(_, _, lookup_keys)| lookup_keys.iter().cloned())
             .collect::<Vec<_>>();
-        move || load_metadata_records_for_paths(&metadata_path, &absolute_paths)
+        move || load_rag_file_records_for_paths(&sqlite_path, &absolute_paths)
     })
     .await
-    .context("failed to join RAG metadata batch lookup task")??;
+    .context("failed to join RAG file records batch lookup task")??;
     let resolved_for_batch = resolved.clone();
     let (plans, planning_update) = tokio::task::spawn_blocking(move || {
         let mut plans = Vec::new();
         let mut planning_update = RuntimeStatusUpdate::default();
-        for path in changed_paths {
-            let normalized_path = super::config::normalize_path_string(&path);
-            let stored_record = stored_records.get(&normalized_path).cloned();
-            match build_path_update_plan(&resolved_for_batch, &path, stored_record) {
-                Ok(plan) => plans.push((path, plan)),
+        for (_, scan_path, lookup_keys) in changed_path_inputs {
+            let stored_record = find_stored_record_by_path_alias(&stored_records, &lookup_keys)
+                .map(|(record, _)| record.clone());
+            match build_path_update_plan(&resolved_for_batch, &scan_path, stored_record.clone()) {
+                Ok(plan @ super::indexing::PathUpdatePlan::Delete { .. }) => {
+                    let plan_path = stored_record
+                        .as_ref()
+                        .map(|record| PathBuf::from(&record.absolute_path))
+                        .unwrap_or_else(|| scan_path.clone());
+                    plans.push((plan_path, plan));
+                }
+                Ok(plan) => plans.push((scan_path, plan)),
                 Err(error) => {
                     tracing::warn!(
-                        ?error,
-                        path = %path.display(),
+                        error = format_args!("{:#}", error),
+                        path = %scan_path.display(),
                         "failed to build RAG watcher update plan"
                     );
                     planning_update.warning_count = planning_update.warning_count.saturating_add(1);
                     extend_recent_rag_warnings(
                         &mut planning_update.recent_warnings,
                         [format_rag_warning_for_path(
-                            &path,
+                            &scan_path,
                             &format_error_chain(&error),
                         )],
                     );
+                    let has_active_chunks = stored_record
+                        .as_ref()
+                        .and_then(|r| r.active.as_ref())
+                        .map(|v| v.chunk_count > 0)
+                        .unwrap_or(false);
+                    if !has_active_chunks {
+                        if let Some(marker) =
+                            build_skip_marker_record(&resolved_for_batch, &scan_path)
+                        {
+                            plans.push((
+                                scan_path,
+                                super::indexing::PathUpdatePlan::RefreshRagFileRecord {
+                                    record: marker,
+                                    clear_staged: false,
+                                    refresh_projection: false,
+                                },
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -439,7 +492,7 @@ pub(super) async fn process_event_batch(
             runtime_guard,
         },
         &database_path,
-        &metadata_path,
+        &sqlite_path,
         resolved,
         plans,
         planning_update,
@@ -525,7 +578,7 @@ pub(super) fn collect_indexable_paths_in_directory(path: &Path) -> BTreeSet<Path
             Ok(entry) => entry,
             Err(error) => {
                 tracing::warn!(
-                    ?error,
+                    error = format_args!("{:#}", error),
                     path = %path.display(),
                     "failed to walk created RAG directory"
                 );

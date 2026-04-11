@@ -7,6 +7,8 @@ use std::{
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+use rusqlite::params;
+
 use super::*;
 use crate::services::document_extract::{extract_document_from_bytes, is_supported_document_file};
 use text_splitter::TextSplitter;
@@ -143,6 +145,26 @@ fn test_runtime_inputs(
         embedding_provider_id,
         providers,
     )
+}
+
+fn count_active_vector_blobs(database_path: &Path) -> i64 {
+    let connection =
+        open_vector_chunk_connection(database_path).expect("open rag chunk database for test");
+    connection
+        .query_row(
+            "SELECT COUNT(*) FROM rag_chunks WHERE chunk_state = 'active' AND vector_blob IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count active vector blobs")
+}
+
+fn test_serialize_vector(vector: &[f32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(vector.len().saturating_mul(std::mem::size_of::<f32>()));
+    for value in vector {
+        bytes.extend_from_slice(&value.to_le_bytes());
+    }
+    bytes
 }
 
 fn test_runtime_inputs_with_directories(
@@ -577,7 +599,7 @@ fn collect_chunks_for_path_skips_text_files_over_plain_text_limit() {
 
 #[test]
 fn inspect_path_for_index_skips_hashing_when_size_and_mtime_match() {
-    let root = temp_test_root("metadata-fast-path");
+    let root = temp_test_root("rag-file-record-fast-path");
     let file_path = root.join("notes.txt");
     std::fs::create_dir_all(&root).expect("create rag temp root");
     std::fs::write(&file_path, "alpha beta gamma").expect("write rag source file");
@@ -607,12 +629,12 @@ fn inspect_path_for_index_skips_hashing_when_size_and_mtime_match() {
     match outcome {
         InspectPathOutcome::Unchanged {
             record,
-            refresh_metadata,
+            refresh_rag_file_record,
             clear_staged,
             ..
         } => {
             assert_eq!(record, stored_record);
-            assert!(!refresh_metadata);
+            assert!(!refresh_rag_file_record);
             assert!(!clear_staged);
         }
         other => panic!("expected unchanged fast path, got {other:?}"),
@@ -623,8 +645,8 @@ fn inspect_path_for_index_skips_hashing_when_size_and_mtime_match() {
 }
 
 #[test]
-fn inspect_path_for_index_refreshes_metadata_when_md5_matches() {
-    let root = temp_test_root("metadata-refresh");
+fn inspect_path_for_index_refreshes_rag_file_record_when_md5_matches() {
+    let root = temp_test_root("rag-file-record-refresh");
     let file_path = root.join("notes.txt");
     let content = "alpha beta gamma";
     std::fs::create_dir_all(&root).expect("create rag temp root");
@@ -652,12 +674,12 @@ fn inspect_path_for_index_refreshes_metadata_when_md5_matches() {
     match outcome {
         InspectPathOutcome::Unchanged {
             record,
-            refresh_metadata,
+            refresh_rag_file_record,
             clear_staged,
             ..
         } => {
             let active = record.active.expect("active version should exist");
-            assert!(refresh_metadata);
+            assert!(refresh_rag_file_record);
             assert!(!clear_staged);
             assert_eq!(
                 active.content_md5,
@@ -692,8 +714,8 @@ fn inspect_path_for_index_refreshes_metadata_when_md5_matches() {
 }
 
 #[test]
-fn inspect_path_for_index_clears_pending_record_when_active_metadata_matches() {
-    let root = temp_test_root("metadata-pending");
+fn inspect_path_for_index_clears_pending_record_when_active_version_matches() {
+    let root = temp_test_root("rag-file-record-pending");
     let file_path = root.join("notes.txt");
     let content = "alpha beta gamma";
     std::fs::create_dir_all(&root).expect("create rag temp root");
@@ -734,11 +756,11 @@ fn inspect_path_for_index_clears_pending_record_when_active_metadata_matches() {
     match outcome {
         InspectPathOutcome::Unchanged {
             record,
-            refresh_metadata,
+            refresh_rag_file_record,
             clear_staged,
             ..
         } => {
-            assert!(refresh_metadata);
+            assert!(refresh_rag_file_record);
             assert!(clear_staged);
             assert!(record.active.is_some());
             assert!(record.pending.is_none());
@@ -784,11 +806,11 @@ fn inspect_path_for_index_refreshes_projection_without_reindex_when_content_is_u
     match outcome {
         InspectPathOutcome::Unchanged {
             record,
-            refresh_metadata,
+            refresh_rag_file_record,
             clear_staged,
             refresh_projection,
         } => {
-            assert!(refresh_metadata);
+            assert!(refresh_rag_file_record);
             assert!(!clear_staged);
             assert!(refresh_projection);
             assert_eq!(record.source_root, normalize_path_string(&nested_root));
@@ -804,7 +826,7 @@ fn inspect_path_for_index_refreshes_projection_without_reindex_when_content_is_u
 
 #[test]
 fn inspect_path_for_index_reindexes_when_embedding_fingerprint_changes() {
-    let root = temp_test_root("metadata-model-change");
+    let root = temp_test_root("rag-file-record-model-change");
     let file_path = root.join("notes.txt");
     let content = "alpha beta gamma";
     std::fs::create_dir_all(&root).expect("create rag temp root");
@@ -1026,7 +1048,7 @@ async fn initialize_runtime_storage_reconciles_deleted_files_during_reuse_startu
     let runtime_status = Arc::new(AsyncRwLock::new(RagRuntimeStatus::default()));
     let storage_lock = Arc::new(AsyncMutex::new(()));
     let database_path = rag_database_path(&data_dir);
-    let metadata_path = rag_metadata_database_path(&data_dir);
+    let sqlite_path = rag_sqlite_database_path(&data_dir);
     let absolute_path = normalize_path_string(&file_path);
 
     let mut chunk = test_chunk(&absolute_path, "indexed chunk");
@@ -1040,8 +1062,8 @@ async fn initialize_runtime_storage_reconciles_deleted_files_during_reuse_startu
         .add_chunks(&[chunk], &[vec![1.0_f32, 2.0_f32]])
         .await
         .expect("seed active vector");
-    upsert_metadata_records(
-        &metadata_path,
+    upsert_rag_file_records(
+        &sqlite_path,
         &[test_indexed_record(
             &source_root,
             &file_path,
@@ -1050,11 +1072,11 @@ async fn initialize_runtime_storage_reconciles_deleted_files_during_reuse_startu
             None,
         )],
     )
-    .expect("seed metadata row");
+    .expect("seed rag file row");
 
     assert_eq!(
-        load_metadata_records(&metadata_path)
-            .expect("load seeded metadata rows")
+        load_rag_file_records(&sqlite_path)
+            .expect("load seeded rag file rows")
             .len(),
         1
     );
@@ -1063,7 +1085,7 @@ async fn initialize_runtime_storage_reconciles_deleted_files_during_reuse_startu
 
     initialize_runtime_storage(
         &data_dir,
-        &metadata_path,
+        &sqlite_path,
         &resolved,
         None,
         &runtime_status,
@@ -1074,13 +1096,399 @@ async fn initialize_runtime_storage_reconciles_deleted_files_during_reuse_startu
     .await
     .expect("reuse startup should reconcile deleted files");
 
-    assert!(load_metadata_records(&metadata_path)
-        .expect("load reconciled metadata rows")
+    assert!(load_rag_file_records(&sqlite_path)
+        .expect("load reconciled rag file rows")
         .is_empty());
     assert!(RagVectorStore::open(&database_path)
         .await
         .expect("open reconciled vector store")
-        .load_chunk_vectors_for_file(&absolute_path, RagChunkState::Active)
+        .load_chunk_vectors_for_file(
+            &absolute_path,
+            RagChunkState::Active,
+            &test_embedding_fingerprint()
+        )
+        .await
+        .expect("load reconciled active vectors")
+        .is_empty());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn active_vector_rows_release_sqlite_blobs_after_index_save() {
+    let root = temp_test_root("active-vectors-release-sqlite-blobs");
+    std::fs::create_dir_all(&root).expect("create vector policy root");
+    let chunk = test_chunk("/tmp/docs/a.md", "current chunk");
+    let expected_vector = vec![1.0_f32, 2.0_f32];
+    let mut vector_store = RagVectorStore::open(&root)
+        .await
+        .expect("open vector store");
+
+    vector_store
+        .add_chunks(&[chunk], std::slice::from_ref(&expected_vector))
+        .await
+        .expect("insert current rag chunk");
+
+    assert_eq!(count_active_vector_blobs(&root), 0);
+
+    let reopened = RagVectorStore::open(&root)
+        .await
+        .expect("reopen vector store");
+    let loaded_vectors = reopened
+        .load_chunk_vectors_for_file(
+            "/tmp/docs/a.md",
+            RagChunkState::Active,
+            &test_embedding_fingerprint(),
+        )
+        .await
+        .expect("load vectors from USearch-backed active row");
+    assert_eq!(loaded_vectors.len(), 1);
+    assert_eq!(
+        loaded_vectors.get(&test_chunk("/tmp/docs/a.md", "current chunk").chunk_reuse_key),
+        Some(&expected_vector)
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn prepare_index_storage_resets_unusable_vector_index_when_active_blobs_were_reclaimed() {
+    let root = temp_test_root("prepare-resets-unusable-vector-index");
+    let source_root = root.join("docs");
+    std::fs::create_dir_all(&source_root).expect("create rag source root");
+    let file_path = source_root.join("indexed.md");
+    let file_text = "# Indexed\n\ncontent\n";
+    std::fs::write(&file_path, file_text).expect("write indexed rag source file");
+
+    let resolved = test_resolved_config(&source_root);
+    let database_path = root.join("rag-index");
+    let sqlite_path = root.join("rag.sqlite3");
+    let absolute_path = normalize_path_string(&file_path);
+    let file_metadata = std::fs::metadata(&file_path).expect("read indexed file metadata");
+
+    let mut chunk = test_chunk(&absolute_path, "indexed chunk");
+    chunk.source_root = normalize_path_string(&source_root);
+    chunk.absolute_path = absolute_path.clone();
+    chunk.embedding_fingerprint = resolved.embedding_fingerprint.clone();
+    let mut vector_store = RagVectorStore::open(&database_path)
+        .await
+        .expect("open seeded vector store");
+    vector_store
+        .add_chunks(&[chunk], &[vec![1.0_f32, 2.0_f32]])
+        .await
+        .expect("seed active vector");
+    assert_eq!(count_active_vector_blobs(&database_path), 0);
+    assert!(vector_index_file_path(&database_path).exists());
+    upsert_rag_file_records(
+        &sqlite_path,
+        &[test_indexed_record(
+            &source_root,
+            &file_path,
+            &resolved.embedding_fingerprint,
+            Some(test_active_version(
+                &format!("{:x}", md5::compute(file_text.as_bytes())),
+                file_metadata
+                    .modified()
+                    .ok()
+                    .and_then(system_time_to_unix_ms),
+                i64::try_from(file_metadata.len()).expect("file size fits i64"),
+                1,
+                1,
+            )),
+            None,
+        )],
+    )
+    .expect("seed rag file row");
+
+    let dirty_marker_path = database_path.join("rag-chunks.dirty");
+    std::fs::write(
+        vector_index_file_path(&database_path),
+        b"not-a-valid-usearch-index",
+    )
+    .expect("corrupt vector index");
+    std::fs::write(&dirty_marker_path, b"dirty").expect("write dirty marker");
+
+    prepare_index_storage(&database_path, &sqlite_path, &resolved, true)
+        .await
+        .expect("prepare index storage should reset reclaimed vector storage");
+
+    assert!(!vector_index_file_path(&database_path).exists());
+    assert!(!dirty_marker_path.exists());
+    let rebuilt_records = load_rag_file_records(&sqlite_path).expect("load rebuilt rag file rows");
+    assert!(rebuilt_records.is_empty());
+    let rebuilt_vectors = RagVectorStore::open(&database_path)
+        .await
+        .expect("reopen rebuilt vector store")
+        .load_chunk_vectors_for_file(
+            &absolute_path,
+            RagChunkState::Active,
+            &test_embedding_fingerprint(),
+        )
+        .await
+        .expect("load rebuilt active vectors");
+    assert!(rebuilt_vectors.is_empty());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn prepare_index_storage_keeps_usable_index_when_only_dirty_marker_remains() {
+    let root = temp_test_root("prepare-keeps-usable-index-with-stale-dirty-marker");
+    let source_root = root.join("docs");
+    std::fs::create_dir_all(&source_root).expect("create rag source root");
+    let file_path = source_root.join("indexed.md");
+    let file_text = "# Indexed\n\ncontent\n";
+    std::fs::write(&file_path, file_text).expect("write indexed rag source file");
+
+    let resolved = test_resolved_config(&source_root);
+    let database_path = root.join("rag-index");
+    let sqlite_path = root.join("rag.sqlite3");
+    let absolute_path = normalize_path_string(&file_path);
+    let file_metadata = std::fs::metadata(&file_path).expect("read indexed file metadata");
+
+    let mut chunk = test_chunk(&absolute_path, "indexed chunk");
+    chunk.source_root = normalize_path_string(&source_root);
+    chunk.absolute_path = absolute_path.clone();
+    chunk.embedding_fingerprint = resolved.embedding_fingerprint.clone();
+    let expected_reuse_key = chunk.chunk_reuse_key.clone();
+    let mut vector_store = RagVectorStore::open(&database_path)
+        .await
+        .expect("open seeded vector store");
+    vector_store
+        .add_chunks(&[chunk], &[vec![1.0_f32, 2.0_f32]])
+        .await
+        .expect("seed active vector");
+    assert_eq!(count_active_vector_blobs(&database_path), 0);
+    upsert_rag_file_records(
+        &sqlite_path,
+        &[test_indexed_record(
+            &source_root,
+            &file_path,
+            &resolved.embedding_fingerprint,
+            Some(test_active_version(
+                &format!("{:x}", md5::compute(file_text.as_bytes())),
+                file_metadata
+                    .modified()
+                    .ok()
+                    .and_then(system_time_to_unix_ms),
+                i64::try_from(file_metadata.len()).expect("file size fits i64"),
+                1,
+                1,
+            )),
+            None,
+        )],
+    )
+    .expect("seed rag file row");
+
+    let dirty_marker_path = database_path.join("rag-chunks.dirty");
+    std::fs::write(&dirty_marker_path, b"dirty").expect("write stale dirty marker");
+
+    prepare_index_storage(&database_path, &sqlite_path, &resolved, true)
+        .await
+        .expect("prepare index storage should keep usable index");
+
+    assert!(vector_index_file_path(&database_path).exists());
+    assert!(!dirty_marker_path.exists());
+    assert_eq!(count_active_vector_blobs(&database_path), 0);
+    assert_eq!(
+        load_rag_file_records(&sqlite_path)
+            .expect("load surviving rag file rows")
+            .len(),
+        1
+    );
+    let surviving_vectors = RagVectorStore::open(&database_path)
+        .await
+        .expect("reopen surviving vector store")
+        .load_chunk_vectors_for_file(
+            &absolute_path,
+            RagChunkState::Active,
+            &test_embedding_fingerprint(),
+        )
+        .await
+        .expect("load surviving active vectors");
+    assert_eq!(
+        surviving_vectors.get(&expected_reuse_key),
+        Some(&vec![1.0_f32, 2.0_f32])
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn prepare_index_storage_resets_partial_active_blob_recovery_state() {
+    let root = temp_test_root("prepare-resets-partial-active-blob-recovery");
+    let source_root = root.join("docs");
+    std::fs::create_dir_all(&source_root).expect("create rag source root");
+    let file_path = source_root.join("indexed.md");
+    let file_text = "# Indexed\n\ncontent\n";
+    std::fs::write(&file_path, file_text).expect("write indexed rag source file");
+
+    let resolved = test_resolved_config(&source_root);
+    let database_path = root.join("rag-index");
+    let sqlite_path = root.join("rag.sqlite3");
+    let absolute_path = normalize_path_string(&file_path);
+    let file_metadata = std::fs::metadata(&file_path).expect("read indexed file metadata");
+
+    let mut first_chunk = test_chunk(&absolute_path, "indexed chunk one");
+    first_chunk.source_root = normalize_path_string(&source_root);
+    first_chunk.absolute_path = absolute_path.clone();
+    first_chunk.embedding_fingerprint = resolved.embedding_fingerprint.clone();
+    let mut second_chunk = test_chunk(&absolute_path, "indexed chunk two");
+    second_chunk.id.push_str("-second");
+    second_chunk.chunk_index = 1;
+    second_chunk.chunk_reuse_key.push_str("-second");
+    second_chunk.source_root = normalize_path_string(&source_root);
+    second_chunk.absolute_path = absolute_path.clone();
+    second_chunk.embedding_fingerprint = resolved.embedding_fingerprint.clone();
+    let first_vector = vec![1.0_f32, 2.0_f32];
+    let second_vector = vec![3.0_f32, 4.0_f32];
+
+    let mut vector_store = RagVectorStore::open(&database_path)
+        .await
+        .expect("open seeded vector store");
+    vector_store
+        .add_chunks(
+            &[first_chunk.clone(), second_chunk],
+            &[first_vector.clone(), second_vector],
+        )
+        .await
+        .expect("seed active vectors");
+    assert_eq!(count_active_vector_blobs(&database_path), 0);
+    upsert_rag_file_records(
+        &sqlite_path,
+        &[test_indexed_record(
+            &source_root,
+            &file_path,
+            &resolved.embedding_fingerprint,
+            Some(test_active_version(
+                &format!("{:x}", md5::compute(file_text.as_bytes())),
+                file_metadata
+                    .modified()
+                    .ok()
+                    .and_then(system_time_to_unix_ms),
+                i64::try_from(file_metadata.len()).expect("file size fits i64"),
+                2,
+                1,
+            )),
+            None,
+        )],
+    )
+    .expect("seed rag file row");
+
+    let connection =
+        open_vector_chunk_connection(&database_path).expect("open chunk database for corruption");
+    connection
+        .execute(
+            "UPDATE rag_chunks SET vector_blob = ?1 WHERE chunk_reuse_key = ?2",
+            params![
+                test_serialize_vector(&first_vector),
+                &first_chunk.chunk_reuse_key
+            ],
+        )
+        .expect("restore one active vector blob only");
+    assert_eq!(count_active_vector_blobs(&database_path), 1);
+
+    let dirty_marker_path = database_path.join("rag-chunks.dirty");
+    std::fs::write(
+        vector_index_file_path(&database_path),
+        b"not-a-valid-usearch-index",
+    )
+    .expect("corrupt vector index");
+    std::fs::write(&dirty_marker_path, b"dirty").expect("write dirty marker");
+
+    prepare_index_storage(&database_path, &sqlite_path, &resolved, true)
+        .await
+        .expect("prepare index storage should reset partial recovery state");
+
+    assert!(!vector_index_file_path(&database_path).exists());
+    assert!(!dirty_marker_path.exists());
+    assert!(load_rag_file_records(&sqlite_path)
+        .expect("load rag file rows after partial recovery reset")
+        .is_empty());
+    assert!(RagVectorStore::open(&database_path)
+        .await
+        .expect("reopen vector store after partial recovery reset")
+        .load_chunk_vectors_for_file(
+            &absolute_path,
+            RagChunkState::Active,
+            &test_embedding_fingerprint()
+        )
+        .await
+        .expect("load vectors after partial recovery reset")
+        .is_empty());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn initialize_runtime_storage_deletes_alias_matched_stale_records_when_file_is_skipped() {
+    let root = temp_test_root("startup-reuse-skip-alias-cleanup");
+    let source_root = root.join("docs");
+    let data_dir = root.join("app-data");
+    std::fs::create_dir_all(&source_root).expect("create rag source root");
+    let file_path = source_root.join("stale.bin");
+    std::fs::write(&file_path, "binary-ish").expect("write unsupported rag source file");
+
+    let resolved = test_resolved_config(&source_root);
+    let runtime_status = Arc::new(AsyncRwLock::new(RagRuntimeStatus::default()));
+    let storage_lock = Arc::new(AsyncMutex::new(()));
+    let database_path = rag_database_path(&data_dir);
+    let sqlite_path = rag_sqlite_database_path(&data_dir);
+    let canonical_source_root = source_root
+        .canonicalize()
+        .expect("canonicalize rag source root");
+    let canonical_file_path = file_path
+        .canonicalize()
+        .expect("canonicalize rag file path");
+    let canonical_absolute_path = normalize_path_string(&canonical_file_path);
+
+    let mut chunk = test_chunk(&canonical_absolute_path, "indexed chunk");
+    chunk.source_root = normalize_path_string(&canonical_source_root);
+    chunk.absolute_path = canonical_absolute_path.clone();
+    chunk.embedding_fingerprint = resolved.embedding_fingerprint.clone();
+    let mut vector_store = RagVectorStore::open(&database_path)
+        .await
+        .expect("open seeded vector store");
+    vector_store
+        .add_chunks(&[chunk], &[vec![1.0_f32, 2.0_f32]])
+        .await
+        .expect("seed active vector");
+    upsert_rag_file_records(
+        &sqlite_path,
+        &[test_indexed_record(
+            &canonical_source_root,
+            &canonical_file_path,
+            &resolved.embedding_fingerprint,
+            Some(test_active_version("seeded-md5", Some(1), 18, 1, 1)),
+            None,
+        )],
+    )
+    .expect("seed canonical rag file row");
+
+    initialize_runtime_storage(
+        &data_dir,
+        &sqlite_path,
+        &resolved,
+        None,
+        &runtime_status,
+        None,
+        &storage_lock,
+        RagRuntimeStartMode::ReuseIndex,
+    )
+    .await
+    .expect("reuse startup should delete alias-matched stale records");
+
+    assert!(load_rag_file_records(&sqlite_path)
+        .expect("load reconciled rag file rows")
+        .is_empty());
+    assert!(RagVectorStore::open(&database_path)
+        .await
+        .expect("open reconciled vector store")
+        .load_chunk_vectors_for_file(
+            &canonical_absolute_path,
+            RagChunkState::Active,
+            &test_embedding_fingerprint()
+        )
         .await
         .expect("load reconciled active vectors")
         .is_empty());
@@ -1233,7 +1641,7 @@ fn rag_runtime_start_reuses_index_for_equivalent_source_directory_paths() {
 async fn run_watch_loop_preserves_existing_storage_when_config_is_invalid() {
     let root = temp_test_root("invalid-config-preserves-storage");
     let database_path = root.join("rag-index");
-    let metadata_path = root.join("rag.sqlite3");
+    let sqlite_path = root.join("rag.sqlite3");
     std::fs::create_dir_all(&root).expect("create rag temp root");
 
     let chunk = test_chunk("/tmp/docs/a.md", "current chunk");
@@ -1254,7 +1662,7 @@ async fn run_watch_loop_preserves_existing_storage_when_config_is_invalid() {
         active: Some(test_active_version("md5-a", Some(1), 10, 1, 42)),
         pending: None,
     };
-    upsert_metadata_records(&metadata_path, &[indexed_record]).expect("write metadata row");
+    upsert_rag_file_records(&sqlite_path, &[indexed_record]).expect("write rag file row");
 
     let runtime_status = Arc::new(AsyncRwLock::new(RagRuntimeStatus::default()));
     let runtime_generation = Arc::new(AtomicU64::new(0));
@@ -1299,15 +1707,19 @@ async fn run_watch_loop_preserves_existing_storage_when_config_is_invalid() {
         .expect("reopen vector store");
     assert_eq!(
         reopened
-            .load_chunk_vectors_for_file("/tmp/docs/a.md", RagChunkState::Active)
+            .load_chunk_vectors_for_file(
+                "/tmp/docs/a.md",
+                RagChunkState::Active,
+                &test_embedding_fingerprint()
+            )
             .await
             .expect("load preserved vectors")
             .len(),
         1
     );
     assert_eq!(
-        load_metadata_records(&metadata_path)
-            .expect("load metadata rows")
+        load_rag_file_records(&sqlite_path)
+            .expect("load rag file rows")
             .len(),
         1
     );
@@ -1467,9 +1879,9 @@ fn rag_runtime_start_rebuilds_when_ignore_globs_change() {
 }
 
 #[test]
-fn metadata_store_tracks_pending_status() {
-    let root = temp_test_root("metadata-store");
-    let metadata_path = root.join("rag.sqlite3");
+fn rag_sqlite_tracks_pending_rows() {
+    let root = temp_test_root("rag-sqlite");
+    let sqlite_path = root.join("rag.sqlite3");
     std::fs::create_dir_all(&root).expect("create rag temp root");
 
     let pending_record = RagIndexedFileRecord {
@@ -1481,22 +1893,22 @@ fn metadata_store_tracks_pending_status() {
         active: None,
         pending: Some(test_pending_version("md5-a", Some(1), 10, 2, 0)),
     };
-    upsert_metadata_records(&metadata_path, std::slice::from_ref(&pending_record))
+    upsert_rag_file_records(&sqlite_path, std::slice::from_ref(&pending_record))
         .expect("upsert pending record");
-    assert!(metadata_store_has_pending_rows(&metadata_path).expect("query pending records"));
+    assert!(rag_sqlite_has_pending_rows(&sqlite_path).expect("query pending records"));
 
     let indexed_record = RagIndexedFileRecord {
         active: Some(test_active_version("md5-a", Some(1), 10, 2, 99)),
         pending: None,
         ..pending_record.clone()
     };
-    upsert_metadata_records(&metadata_path, std::slice::from_ref(&indexed_record))
+    upsert_rag_file_records(&sqlite_path, std::slice::from_ref(&indexed_record))
         .expect("upsert indexed record");
 
-    let loaded = load_metadata_records(&metadata_path)
-        .expect("load metadata records")
+    let loaded = load_rag_file_records(&sqlite_path)
+        .expect("load rag file records")
         .remove(&indexed_record.absolute_path)
-        .expect("metadata record should exist");
+        .expect("rag file record should exist");
     assert_eq!(
         loaded
             .active
@@ -1509,16 +1921,17 @@ fn metadata_store_tracks_pending_status() {
         indexed_record.embedding_fingerprint
     );
     assert!(loaded.pending.is_none());
-    assert!(!metadata_store_has_pending_rows(&metadata_path).expect("query pending rows"));
+    assert!(!rag_sqlite_has_pending_rows(&sqlite_path).expect("query pending rows"));
 
-    let _ = std::fs::remove_file(&metadata_path);
+    let _ = std::fs::remove_file(&sqlite_path);
     let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
-fn finalize_metadata_and_lexical_chunks_stays_in_sync() {
-    let root = temp_test_root("metadata-lexical-finalize");
-    let metadata_path = root.join("rag.sqlite3");
+fn finalize_rag_file_record_and_lexical_chunks_stays_in_sync() {
+    let root = temp_test_root("rag-file-record-lexical-finalize");
+    let database_path = root.join("rag-index");
+    let sqlite_path = database_path.join(RAG_CHUNK_DB_FILE_NAME);
     std::fs::create_dir_all(&root).expect("create rag temp root");
 
     let record = RagIndexedFileRecord {
@@ -1558,46 +1971,82 @@ fn finalize_metadata_and_lexical_chunks_stays_in_sync() {
             text: "second chunk".to_string(),
         },
     ];
+    let active_chunks = chunks
+        .iter()
+        .enumerate()
+        .map(|(index, chunk)| RagChunk {
+            id: format!("chunk-{index}"),
+            source_root: record.source_root.clone(),
+            absolute_path: record.absolute_path.clone(),
+            version_id: "pending-v1".to_string(),
+            embedding_fingerprint: record.embedding_fingerprint.clone(),
+            document_kind: chunk.document_kind,
+            chunk_state: RagChunkState::Active,
+            chunk_index: chunk.chunk_index,
+            line_start: chunk.line_start,
+            line_end: chunk.line_end,
+            paragraph_line_start: chunk.paragraph_line_start,
+            page_start: chunk.page_start,
+            page_end: chunk.page_end,
+            heading_path: chunk.heading_path.clone(),
+            anchor_label: chunk.anchor_label.clone(),
+            chunk_reuse_key: chunk.chunk_reuse_key.clone(),
+            text_fingerprint: text_fingerprint(&chunk.text),
+            text: chunk.text.clone(),
+        })
+        .collect::<Vec<_>>();
+    let vectors = vec![vec![1.0_f32, 2.0_f32], vec![3.0_f32, 4.0_f32]];
+    let runtime = tokio::runtime::Runtime::new().expect("create runtime");
+    runtime.block_on(async {
+        let mut vector_store = RagVectorStore::open(&database_path)
+            .await
+            .expect("open vector store");
+        vector_store
+            .add_chunks(&active_chunks, &vectors)
+            .await
+            .expect("insert active rag chunks");
+    });
 
-    finalize_metadata_and_replace_lexical_chunks(&metadata_path, &record, chunks.len(), &chunks)
-        .expect("finalize metadata and lexical chunks");
+    finalize_rag_file_record_and_replace_lexical_chunks(
+        &sqlite_path,
+        &record,
+        chunks.len(),
+        &chunks,
+    )
+    .expect("finalize rag file record and lexical chunks");
 
-    let stored = load_metadata_records(&metadata_path)
-        .expect("load metadata records")
+    let stored = load_rag_file_records(&sqlite_path)
+        .expect("load rag file records")
         .remove(&record.absolute_path)
-        .expect("metadata row should exist");
+        .expect("rag file row should exist");
     let active = stored.active.expect("active version should exist");
     assert_eq!(active.version_id, "pending-v1");
     assert_eq!(active.content_md5, "md5-new");
     assert_eq!(active.chunk_count, 2);
     assert!(stored.pending.is_none());
 
-    let connection = rusqlite::Connection::open(&metadata_path)
-        .expect("open metadata database for lexical rows");
+    let connection =
+        rusqlite::Connection::open(&sqlite_path).expect("open sqlite database for lexical rows");
     let lexical_count: i64 = connection
-        .query_row(
-            "SELECT COUNT(*) FROM rag_chunk_fts WHERE absolute_path = ?1",
-            [&record.absolute_path],
-            |row| row.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM rag_chunk_fts", [], |row| row.get(0))
         .expect("count lexical rows");
     assert_eq!(lexical_count, 2);
 
-    let _ = std::fs::remove_file(&metadata_path);
+    let _ = std::fs::remove_file(&sqlite_path);
     let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
-fn metadata_prefix_lookup_returns_exact_and_descendant_paths() {
-    let root = temp_test_root("metadata-prefix-lookup");
-    let metadata_path = root.join("rag.sqlite3");
+fn rag_file_path_lookup_returns_exact_and_descendant_paths() {
+    let root = temp_test_root("rag-file-path-lookup");
+    let sqlite_path = root.join("rag.sqlite3");
     std::fs::create_dir_all(&root).expect("create rag temp root");
 
     let exact_path = "/tmp/docs/guide.md";
     let descendant_path = "/tmp/docs/nested/child.md";
     let unrelated_path = "/tmp/other/elsewhere.md";
-    upsert_metadata_records(
-        &metadata_path,
+    upsert_rag_file_records(
+        &sqlite_path,
         &[
             RagIndexedFileRecord {
                 source_root: "/tmp/docs".to_string(),
@@ -1628,13 +2077,13 @@ fn metadata_prefix_lookup_returns_exact_and_descendant_paths() {
             },
         ],
     )
-    .expect("write metadata rows");
+    .expect("write rag file rows");
 
-    let resolved = load_metadata_paths_for_prefixes(
-        &metadata_path,
+    let resolved = load_rag_file_paths_for_prefixes(
+        &sqlite_path,
         &[exact_path.to_string(), "/tmp/docs/nested".to_string()],
     )
-    .expect("lookup descendant metadata paths");
+    .expect("lookup descendant rag file paths");
 
     assert_eq!(
         resolved,
@@ -1715,7 +2164,7 @@ fn stream_rebuild_scan_defers_stale_cleanup_until_after_reindex_candidates_are_e
 async fn execute_path_update_plans_skips_untracked_missing_prefixes() {
     let root = temp_test_root("missing-prefix-delete");
     let database_path = root.join("rag-index");
-    let metadata_path = root.join("rag.sqlite3");
+    let sqlite_path = root.join("rag.sqlite3");
     let runtime_status = Arc::new(AsyncRwLock::new(RagRuntimeStatus::default()));
     std::fs::create_dir_all(&root).expect("create rag temp root");
 
@@ -1735,7 +2184,7 @@ async fn execute_path_update_plans_skips_untracked_missing_prefixes() {
             runtime_guard: None,
         },
         &database_path,
-        &metadata_path,
+        &sqlite_path,
         &test_resolved_config(&root),
         vec![(
             root.join(".git/index.lock"),
@@ -1752,7 +2201,11 @@ async fn execute_path_update_plans_skips_untracked_missing_prefixes() {
         .await
         .expect("reopen vector store");
     let vectors = vector_store
-        .load_chunk_vectors_for_file("/tmp/docs/a.md", RagChunkState::Active)
+        .load_chunk_vectors_for_file(
+            "/tmp/docs/a.md",
+            RagChunkState::Active,
+            &test_embedding_fingerprint(),
+        )
         .await
         .expect("load surviving vectors");
     assert_eq!(vectors.len(), 1);
@@ -1761,10 +2214,10 @@ async fn execute_path_update_plans_skips_untracked_missing_prefixes() {
 }
 
 #[tokio::test]
-async fn execute_path_update_plans_deletes_prefix_chunks_without_metadata_rows() {
-    let root = temp_test_root("prefix-delete-without-metadata");
+async fn execute_path_update_plans_deletes_prefix_chunks_without_rag_file_rows() {
+    let root = temp_test_root("prefix-delete-without-rag-file-records");
     let database_path = root.join("rag-index");
-    let metadata_path = root.join("rag.sqlite3");
+    let sqlite_path = root.join("rag.sqlite3");
     let runtime_status = Arc::new(AsyncRwLock::new(RagRuntimeStatus::default()));
     std::fs::create_dir_all(&root).expect("create rag temp root");
 
@@ -1794,7 +2247,7 @@ async fn execute_path_update_plans_deletes_prefix_chunks_without_metadata_rows()
             runtime_guard: None,
         },
         &database_path,
-        &metadata_path,
+        &sqlite_path,
         &test_resolved_config(&root),
         vec![(
             PathBuf::from("/tmp/docs"),
@@ -1805,19 +2258,27 @@ async fn execute_path_update_plans_deletes_prefix_chunks_without_metadata_rows()
         RuntimeStatusUpdate::default(),
     )
     .await
-    .expect("prefix delete should remove descendant chunks without metadata rows");
+    .expect("prefix delete should remove descendant chunks without rag file rows");
 
     let vector_store = RagVectorStore::open(&database_path)
         .await
         .expect("reopen vector store");
     assert!(vector_store
-        .load_chunk_vectors_for_file("/tmp/docs/nested/a.md", RagChunkState::Active)
+        .load_chunk_vectors_for_file(
+            "/tmp/docs/nested/a.md",
+            RagChunkState::Active,
+            &test_embedding_fingerprint()
+        )
         .await
         .expect("load deleted descendant vectors")
         .is_empty());
     assert_eq!(
         vector_store
-            .load_chunk_vectors_for_file("/tmp/other/b.md", RagChunkState::Active)
+            .load_chunk_vectors_for_file(
+                "/tmp/other/b.md",
+                RagChunkState::Active,
+                &test_embedding_fingerprint()
+            )
             .await
             .expect("load surviving sibling vectors")
             .len(),
@@ -1831,7 +2292,7 @@ async fn execute_path_update_plans_deletes_prefix_chunks_without_metadata_rows()
 async fn execute_path_update_plans_treats_percent_in_prefix_as_literal_path_text() {
     let root = temp_test_root("prefix-delete-percent-literal");
     let database_path = root.join("rag-index");
-    let metadata_path = root.join("rag.sqlite3");
+    let sqlite_path = root.join("rag.sqlite3");
     let runtime_status = Arc::new(AsyncRwLock::new(RagRuntimeStatus::default()));
     std::fs::create_dir_all(&root).expect("create rag temp root");
 
@@ -1861,7 +2322,7 @@ async fn execute_path_update_plans_treats_percent_in_prefix_as_literal_path_text
             runtime_guard: None,
         },
         &database_path,
-        &metadata_path,
+        &sqlite_path,
         &test_resolved_config(&root),
         vec![(
             PathBuf::from("/tmp/docs%"),
@@ -1878,13 +2339,21 @@ async fn execute_path_update_plans_treats_percent_in_prefix_as_literal_path_text
         .await
         .expect("reopen vector store");
     assert!(vector_store
-        .load_chunk_vectors_for_file("/tmp/docs%/nested/a.md", RagChunkState::Active)
+        .load_chunk_vectors_for_file(
+            "/tmp/docs%/nested/a.md",
+            RagChunkState::Active,
+            &test_embedding_fingerprint()
+        )
         .await
         .expect("load deleted percent-prefix vectors")
         .is_empty());
     assert_eq!(
         vector_store
-            .load_chunk_vectors_for_file("/tmp/docsX/nested/b.md", RagChunkState::Active)
+            .load_chunk_vectors_for_file(
+                "/tmp/docsX/nested/b.md",
+                RagChunkState::Active,
+                &test_embedding_fingerprint()
+            )
             .await
             .expect("load surviving non-matching vectors")
             .len(),
@@ -1895,12 +2364,12 @@ async fn execute_path_update_plans_treats_percent_in_prefix_as_literal_path_text
 }
 
 #[test]
-fn metadata_table_schema_rejects_legacy_layout() {
-    let root = temp_test_root("legacy-metadata-schema");
-    let metadata_path = root.join("rag.sqlite3");
+fn rag_sqlite_schema_rejects_incompatible_layout() {
+    let root = temp_test_root("incompatible-sqlite-schema");
+    let sqlite_path = root.join("rag.sqlite3");
     std::fs::create_dir_all(&root).expect("create rag temp root");
 
-    let connection = Connection::open(&metadata_path).expect("open legacy metadata database");
+    let connection = Connection::open(&sqlite_path).expect("open incompatible sqlite database");
     connection
         .execute_batch(
             "
@@ -1918,10 +2387,10 @@ fn metadata_table_schema_rejects_legacy_layout() {
                 );
                 ",
         )
-        .expect("create legacy metadata schema");
+        .expect("create incompatible sqlite schema");
 
-    assert!(!metadata_store_has_compatible_schema(&metadata_path)
-        .expect("inspect metadata schema compatibility"));
+    assert!(!rag_sqlite_has_compatible_schema(&sqlite_path)
+        .expect("inspect sqlite schema compatibility"));
 
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -2072,7 +2541,7 @@ async fn process_event_batch_normalizes_deleted_file_paths_before_cleanup() {
     let storage_lock = Arc::new(AsyncMutex::new(()));
     let resolved = test_resolved_config(&canonical_source_root);
     let database_path = rag_database_path(&data_dir);
-    let metadata_path = rag_metadata_database_path(&data_dir);
+    let sqlite_path = rag_sqlite_database_path(&data_dir);
     let canonical_file_path = file_path
         .canonicalize()
         .expect("canonicalize watcher indexed file");
@@ -2089,8 +2558,8 @@ async fn process_event_batch_normalizes_deleted_file_paths_before_cleanup() {
         .add_chunks(&[chunk], &[vec![1.0_f32, 2.0_f32]])
         .await
         .expect("seed active vector");
-    upsert_metadata_records(
-        &metadata_path,
+    upsert_rag_file_records(
+        &sqlite_path,
         &[test_indexed_record(
             &canonical_source_root,
             &canonical_file_path,
@@ -2099,7 +2568,7 @@ async fn process_event_batch_normalizes_deleted_file_paths_before_cleanup() {
             None,
         )],
     )
-    .expect("seed watcher metadata row");
+    .expect("seed watcher rag file row");
 
     std::fs::remove_file(&file_path).expect("remove watcher file");
     let deleted_event_path = canonical_source_root.join("nested/../a.md");
@@ -2120,13 +2589,17 @@ async fn process_event_batch_normalizes_deleted_file_paths_before_cleanup() {
     .await
     .expect("watcher batch should normalize deleted file paths");
 
-    assert!(load_metadata_records(&metadata_path)
-        .expect("load metadata after normalized delete")
+    assert!(load_rag_file_records(&sqlite_path)
+        .expect("load rag file rows after normalized delete")
         .is_empty());
     assert!(RagVectorStore::open(&database_path)
         .await
         .expect("open vector store after normalized delete")
-        .load_chunk_vectors_for_file(&absolute_path, RagChunkState::Active)
+        .load_chunk_vectors_for_file(
+            &absolute_path,
+            RagChunkState::Active,
+            &test_embedding_fingerprint()
+        )
         .await
         .expect("load vectors after normalized delete")
         .is_empty());
@@ -2151,7 +2624,7 @@ async fn process_event_batch_lexically_normalizes_deleted_directory_paths_before
     let storage_lock = Arc::new(AsyncMutex::new(()));
     let resolved = test_resolved_config(&canonical_source_root);
     let database_path = rag_database_path(&data_dir);
-    let metadata_path = rag_metadata_database_path(&data_dir);
+    let sqlite_path = rag_sqlite_database_path(&data_dir);
     let canonical_file_path = file_path
         .canonicalize()
         .expect("canonicalize watcher indexed file");
@@ -2168,8 +2641,8 @@ async fn process_event_batch_lexically_normalizes_deleted_directory_paths_before
         .add_chunks(&[chunk], &[vec![1.0_f32, 2.0_f32]])
         .await
         .expect("seed active vector");
-    upsert_metadata_records(
-        &metadata_path,
+    upsert_rag_file_records(
+        &sqlite_path,
         &[test_indexed_record(
             &canonical_source_root,
             &canonical_file_path,
@@ -2178,7 +2651,7 @@ async fn process_event_batch_lexically_normalizes_deleted_directory_paths_before
             None,
         )],
     )
-    .expect("seed watcher metadata row");
+    .expect("seed watcher rag file row");
 
     std::fs::remove_dir_all(&nested_dir).expect("remove watcher nested directory");
     let deleted_event_path = canonical_source_root.join("missing-parent/../nested");
@@ -2199,15 +2672,95 @@ async fn process_event_batch_lexically_normalizes_deleted_directory_paths_before
     .await
     .expect("watcher batch should lexically normalize deleted directory paths");
 
-    assert!(load_metadata_records(&metadata_path)
-        .expect("load metadata after normalized directory delete")
+    assert!(load_rag_file_records(&sqlite_path)
+        .expect("load rag file rows after normalized directory delete")
         .is_empty());
     assert!(RagVectorStore::open(&database_path)
         .await
         .expect("open vector store after normalized directory delete")
-        .load_chunk_vectors_for_file(&absolute_path, RagChunkState::Active)
+        .load_chunk_vectors_for_file(
+            &absolute_path,
+            RagChunkState::Active,
+            &test_embedding_fingerprint()
+        )
         .await
         .expect("load vectors after normalized directory delete")
+        .is_empty());
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn process_event_batch_deletes_alias_matched_stale_records_when_file_becomes_unsupported() {
+    let root = temp_test_root("watcher-alias-skip-cleanup");
+    let source_root = root.join("docs");
+    let data_dir = root.join("app-data");
+    std::fs::create_dir_all(&source_root).expect("create watcher source root");
+    let file_path = source_root.join("stale.bin");
+    std::fs::write(&file_path, "binary-ish").expect("write unsupported watcher file");
+
+    let runtime_status = Arc::new(AsyncRwLock::new(RagRuntimeStatus::default()));
+    let storage_lock = Arc::new(AsyncMutex::new(()));
+    let canonical_source_root = source_root
+        .canonicalize()
+        .expect("canonicalize watcher source root");
+    let resolved = test_resolved_config(&canonical_source_root);
+    let database_path = rag_database_path(&data_dir);
+    let sqlite_path = rag_sqlite_database_path(&data_dir);
+    let original_absolute_path = normalize_path_string(&file_path);
+
+    let mut chunk = test_chunk(&original_absolute_path, "indexed chunk");
+    chunk.source_root = normalize_path_string(&source_root);
+    chunk.absolute_path = original_absolute_path.clone();
+    chunk.embedding_fingerprint = resolved.embedding_fingerprint.clone();
+    let mut vector_store = RagVectorStore::open(&database_path)
+        .await
+        .expect("open seeded vector store");
+    vector_store
+        .add_chunks(&[chunk], &[vec![1.0_f32, 2.0_f32]])
+        .await
+        .expect("seed active vector");
+    upsert_rag_file_records(
+        &sqlite_path,
+        &[test_indexed_record(
+            &source_root,
+            &file_path,
+            &resolved.embedding_fingerprint,
+            Some(test_active_version("seeded-md5", Some(1), 18, 1, 1)),
+            None,
+        )],
+    )
+    .expect("seed watcher rag file row using original path alias");
+
+    process_event_batch(
+        None,
+        &data_dir,
+        &resolved,
+        &runtime_status,
+        None,
+        &storage_lock,
+        vec![Ok(Event {
+            kind: EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Any)),
+            paths: vec![file_path.clone()],
+            attrs: Default::default(),
+        })],
+    )
+    .await
+    .expect("watcher batch should delete alias-matched stale records");
+
+    assert!(load_rag_file_records(&sqlite_path)
+        .expect("load watcher rag file rows after alias cleanup")
+        .is_empty());
+    assert!(RagVectorStore::open(&database_path)
+        .await
+        .expect("open vector store after alias cleanup")
+        .load_chunk_vectors_for_file(
+            &original_absolute_path,
+            RagChunkState::Active,
+            &test_embedding_fingerprint()
+        )
+        .await
+        .expect("load vectors after alias cleanup")
         .is_empty());
 
     let _ = std::fs::remove_dir_all(&root);
@@ -2368,10 +2921,10 @@ async fn vector_store_open_marks_dirty_marker_as_dirty() {
 }
 
 #[tokio::test]
-async fn prepare_index_storage_clears_legacy_metadata_schema_and_vectors() {
-    let root = temp_test_root("legacy-metadata-reset");
+async fn prepare_index_storage_clears_incompatible_sqlite_schema_and_vectors() {
+    let root = temp_test_root("incompatible-sqlite-reset");
     let database_path = root.join("rag-index");
-    let metadata_path = root.join("rag.sqlite3");
+    let sqlite_path = root.join("rag.sqlite3");
     std::fs::create_dir_all(&root).expect("create rag temp root");
 
     let chunk = test_chunk("/tmp/docs/a.md", "current chunk");
@@ -2383,7 +2936,7 @@ async fn prepare_index_storage_clears_legacy_metadata_schema_and_vectors() {
         .await
         .expect("create current rag vectors");
 
-    let connection = Connection::open(&metadata_path).expect("open legacy metadata database");
+    let connection = Connection::open(&sqlite_path).expect("open incompatible sqlite database");
     connection
         .execute_batch(
             "
@@ -2424,28 +2977,33 @@ async fn prepare_index_storage_clears_legacy_metadata_schema_and_vectors() {
                 );
                 ",
         )
-        .expect("create legacy metadata rows");
+        .expect("create incompatible sqlite rows");
 
     prepare_index_storage(
         &database_path,
-        &metadata_path,
+        &sqlite_path,
         &test_resolved_config(&root),
         true,
     )
     .await
-    .expect("prepare index storage should reset incompatible metadata");
+    .expect("prepare index storage should reset incompatible sqlite");
 
     assert!(RagVectorStore::open(&database_path)
         .await
         .expect("reopen vector store")
-        .load_chunk_vectors_for_file("/tmp/docs/a.md", RagChunkState::Active)
+        .load_chunk_vectors_for_file(
+            "/tmp/docs/a.md",
+            RagChunkState::Active,
+            &test_embedding_fingerprint()
+        )
         .await
-        .expect("load surviving vectors after metadata reset")
+        .expect("load surviving vectors after sqlite reset")
         .is_empty());
-    assert!(metadata_store_has_compatible_schema(&metadata_path)
-        .expect("inspect recreated metadata schema"));
-    assert!(load_metadata_records(&metadata_path)
-        .expect("load metadata rows")
+    assert!(
+        rag_sqlite_has_compatible_schema(&sqlite_path).expect("inspect recreated sqlite schema")
+    );
+    assert!(load_rag_file_records(&sqlite_path)
+        .expect("load rag file rows")
         .is_empty());
 
     let _ = std::fs::remove_dir_all(&root);
@@ -2455,7 +3013,7 @@ async fn prepare_index_storage_clears_legacy_metadata_schema_and_vectors() {
 async fn prepare_index_storage_clears_orphaned_vector_index_artifacts() {
     let root = temp_test_root("orphaned-vector-index-artifacts");
     let database_path = root.join("rag-index");
-    let metadata_path = root.join("rag.sqlite3");
+    let sqlite_path = root.join("rag.sqlite3");
     std::fs::create_dir_all(&database_path).expect("create rag index directory");
     std::fs::write(vector_index_file_path(&database_path), b"stale-index")
         .expect("write orphaned vector index");
@@ -2464,7 +3022,7 @@ async fn prepare_index_storage_clears_orphaned_vector_index_artifacts() {
 
     prepare_index_storage(
         &database_path,
-        &metadata_path,
+        &sqlite_path,
         &test_resolved_config(&root),
         true,
     )
@@ -2478,11 +3036,13 @@ async fn prepare_index_storage_clears_orphaned_vector_index_artifacts() {
 }
 
 #[tokio::test]
-async fn prepare_index_storage_clears_active_metadata_when_chunk_store_has_no_active_rows() {
-    let root = temp_test_root("active-metadata-without-active-chunks");
+async fn prepare_index_storage_clears_active_rag_file_records_when_chunk_store_has_no_active_rows()
+{
+    let root = temp_test_root("active-rag-file-records-without-active-chunks");
     let database_path = root.join("rag-index");
-    let metadata_path = root.join("rag.sqlite3");
+    let sqlite_path = root.join("rag.sqlite3");
     std::fs::create_dir_all(&root).expect("create rag temp root");
+    std::fs::create_dir_all(&database_path).expect("create rag index dir");
 
     let chunk = test_chunk("/tmp/docs/a.md", "current chunk");
     let mut vector_store = RagVectorStore::open(&database_path)
@@ -2505,29 +3065,35 @@ async fn prepare_index_storage_clears_active_metadata_when_chunk_store_has_no_ac
         active: Some(test_active_version("md5-a", Some(1), 10, 1, 42)),
         pending: None,
     };
-    upsert_metadata_records(&metadata_path, &[indexed_record]).expect("write metadata row");
+    upsert_rag_file_records(&sqlite_path, &[indexed_record]).expect("write rag file row");
+    std::fs::write(vector_index_file_path(&database_path), b"stale-index")
+        .expect("write stale vector index");
+    std::fs::write(database_path.join("rag-chunks.dirty"), b"dirty")
+        .expect("write stale dirty marker");
 
     prepare_index_storage(
         &database_path,
-        &metadata_path,
+        &sqlite_path,
         &test_resolved_config(&root),
         true,
     )
     .await
-    .expect("prepare index storage should clear orphaned active metadata");
+    .expect("prepare index storage should clear orphaned active rag file records");
 
-    assert!(load_metadata_records(&metadata_path)
-        .expect("load metadata rows")
+    assert!(load_rag_file_records(&sqlite_path)
+        .expect("load rag file rows")
         .is_empty());
+    assert!(!vector_index_file_path(&database_path).exists());
+    assert!(!database_path.join("rag-chunks.dirty").exists());
 
     let _ = std::fs::remove_dir_all(&root);
 }
 
 #[tokio::test]
-async fn refresh_projection_metadata_for_records_updates_chunk_and_lexical_paths() {
-    let root = temp_test_root("refresh-projection-metadata");
+async fn refresh_projection_for_rag_file_records_updates_chunk_and_lexical_paths() {
+    let root = temp_test_root("refresh-projection-fields");
     let database_path = root.join("rag-index");
-    let metadata_path = root.join("rag.sqlite3");
+    let sqlite_path = database_path.join(RAG_CHUNK_DB_FILE_NAME);
     std::fs::create_dir_all(&root).expect("create rag temp root");
 
     let mut chunk = test_chunk("/tmp/docs/guide/a.md", "projection refresh chunk");
@@ -2562,25 +3128,25 @@ async fn refresh_projection_metadata_for_records_updates_chunk_and_lexical_paths
         active: Some(test_active_version("md5-a", Some(1), 10, 1, 42)),
         pending: None,
     };
-    finalize_metadata_and_replace_lexical_chunks(
-        &metadata_path,
+    finalize_rag_file_record_and_replace_lexical_chunks(
+        &sqlite_path,
         &original_record,
         1,
         &[prepared_chunk],
     )
-    .expect("seed metadata and lexical rows");
+    .expect("seed rag file and lexical rows");
 
     let refreshed_record = RagIndexedFileRecord {
         source_root: "/tmp/docs/guide".to_string(),
         relative_path: "a.md".to_string(),
         ..original_record
     };
-    refresh_projection_metadata_for_records(
+    refresh_projection_for_rag_file_records(
         &database_path,
-        &metadata_path,
+        &sqlite_path,
         std::slice::from_ref(&refreshed_record),
     )
-    .expect("refresh projection metadata");
+    .expect("refresh projection fields");
 
     let chunk_connection =
         Connection::open(database_path.join(RAG_CHUNK_DB_FILE_NAME)).expect("open chunk db");
@@ -2593,24 +3159,28 @@ async fn refresh_projection_metadata_for_records_updates_chunk_and_lexical_paths
         .expect("load refreshed chunk source root");
     assert_eq!(chunk_source_root, refreshed_record.source_root);
 
-    let metadata_connection = Connection::open(&metadata_path).expect("open metadata db");
-    let (lexical_source_root, lexical_path): (String, String) = metadata_connection
-        .query_row(
-            &format!(
-                "SELECT source_root, path FROM {RAG_LEXICAL_TABLE_NAME} WHERE absolute_path = ?1 LIMIT 1"
-            ),
-            [&refreshed_record.absolute_path],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .expect("load refreshed lexical path metadata");
-    assert_eq!(lexical_source_root, refreshed_record.source_root);
-    assert_eq!(lexical_path, refreshed_record.relative_path);
+    let lexical_hits = search_lexical_chunks(&sqlite_path, "projection", 5)
+        .expect("search refreshed lexical rows");
+    assert_eq!(
+        Connection::open(&sqlite_path)
+            .expect("open sqlite db for lexical count")
+            .query_row("SELECT COUNT(*) FROM rag_chunk_fts", [], |row| row
+                .get::<_, i64>(0))
+            .expect("count lexical rows"),
+        1
+    );
+    assert_eq!(lexical_hits.len(), 1);
+    assert_eq!(lexical_hits[0].source_root, refreshed_record.source_root);
+    assert_eq!(
+        lexical_hits[0].absolute_path,
+        refreshed_record.absolute_path
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
-fn metadata_records_require_rebuild_when_embedding_target_changes_on_restart() {
+fn rag_file_records_require_rebuild_when_embedding_target_changes_on_restart() {
     let root = PathBuf::from("/tmp/docs");
     let current_provider =
         test_embedding_provider_with_target("embedding", "http://127.0.0.1:8000/v1", "new-model");
@@ -2628,11 +3198,11 @@ fn metadata_records_require_rebuild_when_embedding_target_changes_on_restart() {
         },
     )]);
 
-    assert!(metadata_records_require_rebuild(&stored_records, &resolved));
+    assert!(rag_file_records_require_rebuild(&stored_records, &resolved));
 }
 
 #[test]
-fn metadata_records_require_rebuild_when_source_roots_change_on_restart() {
+fn rag_file_records_require_rebuild_when_source_roots_change_on_restart() {
     let current_root = PathBuf::from("/tmp/current");
     let resolved = test_resolved_config(&current_root);
     let stored_records = HashMap::from([(
@@ -2648,11 +3218,11 @@ fn metadata_records_require_rebuild_when_source_roots_change_on_restart() {
         },
     )]);
 
-    assert!(metadata_records_require_rebuild(&stored_records, &resolved));
+    assert!(rag_file_records_require_rebuild(&stored_records, &resolved));
 }
 
 #[test]
-fn metadata_records_require_rebuild_when_extractor_fingerprint_changes_on_restart() {
+fn rag_file_records_require_rebuild_when_extractor_fingerprint_changes_on_restart() {
     let current_root = PathBuf::from("/tmp/current");
     let resolved = test_resolved_config(&current_root);
     let stored_records = HashMap::from([(
@@ -2668,14 +3238,14 @@ fn metadata_records_require_rebuild_when_extractor_fingerprint_changes_on_restar
         },
     )]);
 
-    assert!(metadata_records_require_rebuild(&stored_records, &resolved));
+    assert!(rag_file_records_require_rebuild(&stored_records, &resolved));
 }
 
 #[tokio::test]
 async fn prepare_index_storage_preserves_mismatched_embedding_rows_for_resumable_rebuild() {
     let root = temp_test_root("preserve-mismatched-embedding");
     let database_path = root.join("rag-index");
-    let metadata_path = root.join("rag.sqlite3");
+    let sqlite_path = root.join("rag.sqlite3");
     std::fs::create_dir_all(&root).expect("create rag temp root");
 
     let chunk = test_chunk("/tmp/docs/a.md", "current chunk");
@@ -2700,19 +3270,19 @@ async fn prepare_index_storage_preserves_mismatched_embedding_rows_for_resumable
         active: Some(test_active_version("md5-a", Some(1), 10, 1, 42)),
         pending: None,
     };
-    upsert_metadata_records(&metadata_path, &[indexed_record]).expect("write metadata row");
+    upsert_rag_file_records(&sqlite_path, &[indexed_record]).expect("write rag file row");
 
     let next_resolved = test_resolved_config_with_provider(
         Path::new("/tmp/docs"),
         test_embedding_provider_with_target("embedding", "http://127.0.0.1:8000/v1", "new-model"),
     );
-    prepare_index_storage(&database_path, &metadata_path, &next_resolved, true)
+    prepare_index_storage(&database_path, &sqlite_path, &next_resolved, true)
         .await
         .expect("prepare index storage should preserve resumable rows");
 
     assert_eq!(
-        load_metadata_records(&metadata_path)
-            .expect("load metadata rows")
+        load_rag_file_records(&sqlite_path)
+            .expect("load rag file rows")
             .len(),
         1
     );
@@ -2720,7 +3290,11 @@ async fn prepare_index_storage_preserves_mismatched_embedding_rows_for_resumable
         RagVectorStore::open(&database_path)
             .await
             .expect("reopen vector store")
-            .load_chunk_vectors_for_file("/tmp/docs/a.md", RagChunkState::Active)
+            .load_chunk_vectors_for_file(
+                "/tmp/docs/a.md",
+                RagChunkState::Active,
+                &test_embedding_fingerprint()
+            )
             .await
             .expect("load preserved vectors")
             .len(),
