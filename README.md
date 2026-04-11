@@ -73,6 +73,8 @@ npm run tauri:build:macos:dmg
 
 这个脚本会先启动一个本地补丁 watcher，在 `@tauri-apps/cli` 生成临时 `bundle_dmg.sh` 后立即打补丁：保留 Finder AppleScript 美化流程，但给 `osascript` 增加重试和最终降级容错，避免因为 Finder 自动化权限、前台会话时序或偶发 `-1728` 之类错误直接导致整个 DMG 构建失败。同时会把 Tauri 默认写入的 `.VolumeIcon.icns` 延后到 Finder 布局之后再复制，避免隐藏卷图标文件参与根目录排版导致图标错位。
 
+CI 环境不再复用这条 Finder 依赖很重的“漂亮 DMG”链路。`GitHub Actions` 下会改成先构建 `.app`，再用 `hdiutil` 直接生成简化 `dmg`，只保留 `Wabity.app`、`Applications` 和 `修复.command`。原因很直接：无前台 GUI 会话的 runner 上，`bundle_dmg.sh` 的 Finder 自动化链路天然脆弱，继续强行跑只是在给发布流程制造随机故障。
+
 macOS 专属配置 `src-tauri/tauri.macos.conf.json` 现在还会固定 DMG 的窗口尺寸、窗口初始位置，以及 `Wabity.app` / `Applications` 的主安装动线坐标；本地补丁则继续负责注入背景图、兜底修复脚本的坐标、隐藏扩展名，以及更适合展示的图标/文字尺寸，避免 Finder 自动排版把安装入口和辅助入口挤乱。
 
 生成出来的 DMG 现在还会额外包含一个用户可见辅助文件：

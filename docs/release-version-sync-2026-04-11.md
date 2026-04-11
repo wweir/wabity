@@ -42,6 +42,17 @@
 
 这个错误顺序会导致 CI 立即失败，而且失败是正确的，不应该通过放宽校验掩盖。
 
+## CI 打包约束
+
+GitHub Actions 上的 macOS runner 不保证存在稳定的前台 Finder 自动化会话，因此 CI 不再依赖 Tauri 生成的 `bundle_dmg.sh` 去执行 Finder 美化。
+
+当前策略分流为：
+
+1. 本地手工构建：继续走 `bundle_dmg.sh` + 仓库补丁，保留背景图、图标坐标和辅助文件布局
+2. CI 发版构建：只先产出 `.app`，再用 `hdiutil create` 生成简化 `dmg`
+
+这个退化是故意的。发布 CI 的首要目标是稳定地产出可下载工件，不是把 Finder 排版美化做到极致。
+
 ## 最小操作流程
 
 ```bash
