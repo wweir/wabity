@@ -98,18 +98,24 @@ macOS 专属配置 `src-tauri/tauri.macos.conf.json` 现在还会固定 DMG 的�
 
 仓库现在包含 tag 驱动的 GitHub Actions 工作流 [`.github/workflows/release-macos-dmg.yml`](/Users/wweir/Sites/Mine/wabity/.github/workflows/release-macos-dmg.yml)。
 
-推送形如 `v0.1.0` 的 tag 时，工作流会在 `macos-latest` 上执行下面的固定流程：
+推送形如 `v0.2.0` 的 tag 时，工作流会在 `macos-15` 上执行下面的固定流程：
 
-1. 校验 tag 版本是否和 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 一致
+1. 校验 tag 版本是否和 `package.json`、`package-lock.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 一致
 2. 执行现有的 `npm run tauri:build:macos:dmg`
 3. 把生成的 `src-tauri/target/release/bundle/dmg/*.dmg` 上传到对应的 GitHub Release
 
 示例：
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+npm version 0.2.0 --no-git-tag-version
+
+git add package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
+git commit -m "build: release 0.2.0"
+git tag v0.2.0
+git push origin main --follow-tags
 ```
+
+不要先打 tag 再补版本号。这个仓库当前存在多份版本源，顺序必须是“先统一版本文件，再打 tag”；否则 release workflow 会在版本校验阶段直接失败。详细约束见 [docs/release-version-sync-2026-04-11.md](/Users/wweir/Sites/Mine/wabity/docs/release-version-sync-2026-04-11.md)。
 
 这个工作流只负责生成并上传未签名的 `dmg`。如果后续要分发给普通 macOS 用户并降低系统拦截，还需要额外补代码签名和 notarization；那是另一条发布约束，不能和“先把 DMG 自动挂到 Release”混为一谈。
 
