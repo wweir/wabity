@@ -7,13 +7,11 @@ import type { SettingsSectionId } from "./settingsTypes";
 interface UseSettingsSectionNavigationArgs {
 	activeSection: SettingsSectionId;
 	setActiveSection: (sectionId: SettingsSectionId) => void;
-	setSelectedSkillId: (skillId: string) => void;
 }
 
 export function useSettingsSectionNavigation({
 	activeSection,
 	setActiveSection,
-	setSelectedSkillId,
 }: UseSettingsSectionNavigationArgs) {
 	const sectionTabRefs = useRef<Record<SettingsSectionId, HTMLButtonElement | null>>({
 		general: null,
@@ -22,7 +20,6 @@ export function useSettingsSectionNavigation({
 		rag: null,
 		acp: null,
 		mcp: null,
-		skills: null,
 		about: null,
 	});
 	const sectionBlockRefs = useRef<Record<string, HTMLElement | null>>({});
@@ -96,11 +93,6 @@ export function useSettingsSectionNavigation({
 		});
 	}
 
-	function handleViewSkill(skillId: string) {
-		setSelectedSkillId(skillId);
-		scrollToSectionBlock("skills-detail");
-	}
-
 	function handleSelectSection(sectionId: SettingsSectionId) {
 		setActiveSection(sectionId);
 		setActiveSectionBlockId(settingsQuickLinks[sectionId][0]?.id ?? null);
@@ -168,7 +160,6 @@ export function useSettingsSectionNavigation({
 		contentRef,
 		handleSectionTabKeyDown,
 		handleSelectSection,
-		handleViewSkill,
 		scrollToSectionBlock,
 		sectionTabRefs,
 	};

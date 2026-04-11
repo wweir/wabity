@@ -54,7 +54,6 @@ export {
 	getAcpMcpServers,
 	getAppSettings,
 	getBuiltinMcpServerStatus,
-	getPublicSkillCatalog,
 	getShortcut,
 	getShortcutRuntimeStatus,
 	listBuiltinLlmProviderTemplates,

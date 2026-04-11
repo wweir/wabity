@@ -9,5 +9,4 @@ pub mod process;
 pub mod query;
 pub mod rag;
 pub mod settings;
-pub mod skills;
 pub mod workspace;

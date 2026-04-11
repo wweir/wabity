@@ -7,15 +7,7 @@ import type {
 	PromptsSettings,
 } from "../../lib/tauri/types";
 
-export type SettingsSectionId =
-	| "general"
-	| "prompts"
-	| "llm"
-	| "rag"
-	| "acp"
-	| "mcp"
-	| "skills"
-	| "about";
+export type SettingsSectionId = "general" | "prompts" | "llm" | "rag" | "acp" | "mcp" | "about";
 
 export type McpPanelMode = "edit" | "create";
 

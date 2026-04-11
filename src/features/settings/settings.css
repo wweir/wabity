@@ -1002,12 +1002,6 @@
 	align-items: start;
 }
 
-.settings-skills-layout {
-	display: grid;
-	gap: 16px;
-	margin-top: 14px;
-}
-
 .settings-acp-sidebar,
 .settings-acp-detail,
 .settings-editor-card {
@@ -1149,8 +1143,7 @@
 	padding: 0;
 }
 
-.settings-mcp-catalog-panel,
-.settings-skill-catalog-panel {
+.settings-mcp-catalog-panel {
 	gap: 14px;
 }
 
@@ -1520,10 +1513,6 @@
 	line-height: 1.4;
 }
 
-.settings-skill-list-item-main {
-	align-content: start;
-}
-
 .settings-agent-title-wrap {
 	display: grid;
 	gap: 4px;
@@ -1837,112 +1826,6 @@
 	color: var(--text-primary);
 	font-size: 11px;
 	overflow-wrap: anywhere;
-}
-
-.settings-skill-table-wrap {
-	overflow-x: auto;
-	border: 1px solid var(--border-regular);
-	border-radius: 16px;
-	background: var(--surface-raised);
-}
-
-.settings-skill-table {
-	width: 100%;
-	border-collapse: collapse;
-	font-size: 13px;
-	color: var(--text-strong);
-}
-
-.settings-skill-table th,
-.settings-skill-table td {
-	padding: 10px 12px;
-	border-bottom: 1px solid var(--border-regular);
-	text-align: left;
-	vertical-align: top;
-}
-
-.settings-skill-table thead th {
-	background: var(--surface-panel-strong);
-	color: var(--text-secondary);
-	font-size: 12px;
-	font-weight: 600;
-}
-
-.settings-skill-table tbody th {
-	width: 132px;
-	color: var(--text-muted);
-	font-size: 12px;
-	font-weight: 600;
-	background: var(--surface-card-subtle);
-}
-
-.settings-skill-table tr:last-child th,
-.settings-skill-table tr:last-child td {
-	border-bottom: 0;
-}
-
-.settings-skill-table td {
-	overflow-wrap: anywhere;
-}
-
-.settings-skill-tree-panel {
-	--card-border: var(--border-regular);
-	--card-radius: 16px;
-	--card-background: var(--surface-raised);
-	display: grid;
-	gap: 8px;
-	padding: 12px;
-}
-
-.settings-skill-tree-directory {
-	display: grid;
-	gap: 8px;
-}
-
-.settings-skill-tree-summary {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	cursor: pointer;
-	list-style: none;
-	color: var(--text-strong);
-	font-size: 13px;
-	font-weight: 600;
-}
-
-.settings-skill-tree-summary::-webkit-details-marker {
-	display: none;
-}
-
-.settings-skill-tree-caret {
-	color: var(--text-muted);
-	font-size: 11px;
-}
-
-.settings-skill-tree-directory:not([open])
-	> .settings-skill-tree-summary
-	.settings-skill-tree-caret {
-	transform: rotate(-90deg);
-}
-
-.settings-skill-tree-children {
-	display: grid;
-	gap: 6px;
-	padding-left: 14px;
-	border-left: 1px solid var(--border-soft);
-}
-
-.settings-skill-tree-file {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-	color: var(--text-secondary);
-	font-size: 12px;
-	overflow-wrap: anywhere;
-}
-
-.settings-skill-tree-bullet {
-	color: var(--text-muted);
 }
 
 .settings-button {
@@ -3281,7 +3164,6 @@
 .settings-llm-capability-toggle {
 	padding-top: 10px;
 }
-
 
 .settings-shortcut-trigger {
 	background: var(--surface-input);

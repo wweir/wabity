@@ -47,7 +47,6 @@ use crate::{
             builtin_llm_provider_templates, AppSettings, BuiltinLlmProviderTemplate,
             LlmProviderConfig, LlmProviderModelEntry, LlmSettings, RagSettings,
         },
-        skills::PublicSkillCatalog,
         workspace::WorkspaceState,
     },
     infrastructure::config::{
@@ -55,7 +54,6 @@ use crate::{
         normalize_workspace_root, AppConfig, ConfigStore, ShortcutConfig, ShortcutKey,
         WorkspaceHistory, RECENT_WORKSPACE_LIMIT,
     },
-    services::public_skills::PublicSkillService,
 };
 
 const SHORTCUT_PRESS_STALE_AFTER: Duration = Duration::from_millis(750);
@@ -320,10 +318,6 @@ impl AppState {
 
     pub async fn builtin_llm_provider_templates(&self) -> Vec<BuiltinLlmProviderTemplate> {
         builtin_llm_provider_templates()
-    }
-
-    pub async fn public_skill_catalog(&self) -> Result<PublicSkillCatalog> {
-        PublicSkillService::load_catalog()
     }
 
     pub async fn update_shortcut(&self, key: ShortcutKey, shortcut: &str) -> Result<()> {

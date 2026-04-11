@@ -18,7 +18,6 @@ export const settingsSections: ReadonlyArray<{
 	{ id: "rag", label: "RAG" },
 	{ id: "acp", label: "ACP Agent" },
 	{ id: "mcp", label: "MCP" },
-	{ id: "skills", label: "Skill" },
 	{ id: "about", label: "关于" },
 ] as const;
 
@@ -40,7 +39,6 @@ export const settingsQuickLinks: Readonly<Record<SettingsSectionId, readonly Set
 			{ id: "acp-form", label: "基础信息", hint: "名称与命令" },
 		],
 		mcp: [],
-		skills: [],
 		about: [{ id: "about-overview", label: "关于 Wabity", hint: "版本与项目" }],
 	} as const;
 

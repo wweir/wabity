@@ -4,7 +4,6 @@ import {
 	browserAppSettings,
 	browserBuiltinLlmProviderTemplates,
 	browserBuiltinMcpServerStatus,
-	browserPublicSkillCatalog,
 	defaultRagIgnoreGlobs,
 } from "./defaults";
 import {
@@ -24,7 +23,6 @@ import type {
 	LlmProviderConfig,
 	LlmProviderModelEntry,
 	LlmSettings,
-	PublicSkillCatalog,
 	RagScanResult,
 	RagSettings,
 	ShortcutConfig,
@@ -117,10 +115,6 @@ export async function scanRagSources(
 		},
 		{ ragSettings, llmSettings },
 	);
-}
-
-export async function getPublicSkillCatalog(): Promise<PublicSkillCatalog> {
-	return invokeOrDefault("get_public_skill_catalog", browserPublicSkillCatalog);
 }
 
 export async function chooseDirectory(defaultPath?: string): Promise<string | null> {

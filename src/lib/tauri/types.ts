@@ -198,44 +198,6 @@ export interface AppSettings {
 	rag: RagSettings;
 }
 
-export interface PublicSkillMetaEntry {
-	key: string;
-	value: string;
-}
-
-export interface PublicSkillMeta {
-	name: string | null;
-	description: string | null;
-	argumentHint: string | null;
-	license: string | null;
-	metadata: PublicSkillMetaEntry[];
-}
-
-export type SkillTreeNodeKind = "directory" | "file";
-
-export interface SkillTreeNode {
-	name: string;
-	relativePath: string;
-	kind: SkillTreeNodeKind;
-	children: SkillTreeNode[];
-}
-
-export interface PublicSkillEntry {
-	id: string;
-	directoryName: string;
-	relativePath: string;
-	meta: PublicSkillMeta;
-	directoryCount: number;
-	fileCount: number;
-	tree: SkillTreeNode;
-}
-
-export interface PublicSkillCatalog {
-	rootPath: string;
-	exists: boolean;
-	skills: PublicSkillEntry[];
-}
-
 export interface WorkspaceState {
 	rootPath: string;
 	recentRoots: string[];

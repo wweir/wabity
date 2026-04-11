@@ -11,7 +11,6 @@ pub mod notification;
 pub mod ocr;
 pub mod open_target;
 pub mod process;
-pub mod public_skills;
 pub mod question_answer_backend;
 pub mod rag;
 pub mod rag_answer;

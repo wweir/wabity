@@ -10,7 +10,6 @@ pub mod clipboard;
 pub mod launcher;
 pub mod rag;
 pub mod settings;
-pub mod skills;
 pub mod workspace;
 
 // Keep IPC dispatch on plain Rust so rust-analyzer diagnostics do not depend on Tauri proc-macro expansion.
@@ -45,7 +44,6 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
         | "list_llm_provider_models"
         | "list_builtin_llm_provider_templates" => settings::handle_invoke(invoke),
         "scan_rag_sources" | "get_rag_runtime_status" => rag::handle_invoke(invoke),
-        "get_public_skill_catalog" => skills::handle_invoke(invoke),
         "get_workspace" | "set_workspace" => workspace::handle_invoke(invoke),
         "get_acp_agents"
         | "set_acp_agents"

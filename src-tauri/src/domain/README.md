@@ -4,7 +4,6 @@
 
 - 定义 launcher 的输入模型、动作模型、执行请求与结果模型
 - 定义设置页通用/外观/提示词/LLM/OCR/RAG 配置模型
-- 定义公共 skill 目录浏览模型
 - 定义 workspace、ACP session 等前后端通信结构
 - 定义历史剪贴板快照和条目模型
 - 定义文件搜索结果等前后端通信结构
@@ -29,7 +28,6 @@
 - RAG 模型必须显式表达扫描目录、忽略 glob、embedding 条目引用和一次扫描返回的统计结果，避免前后端各自拼临时结构
 - 内置 RAG MCP server 的状态也必须显式建模，避免前端把“固定 URL + 运行状态 + 最近错误”拼成匿名对象
 - RAG 问答结果必须稳定表达引用信息；当前继续复用 `ExecutionResult.structured_payload` 的弱类型 JSON，但已经固定 `kind`、`render`、`responseId`、`reasoning`、`citations`、`retrieval`、`actions` 这些字段，且 citation 必须显式带 `path`、`absolutePath`、`documentKind`、`lineStart`、`lineEnd`、`paragraphLineStart`、`pageStart`、`pageEnd`、`headingPath`、`anchorLabel`，不能让前后端各自猜 payload 形状；文本文件保留行号强语义，PDF 这类抽取型文档允许行号为空并改用页码锚点；`reasoning` 只表达次级思考内容，不能与主答案混淆；`actions` 复用 ACP action event 形状承载问答中的多步操作、tool call 输入和 tool result 输出，工具摘要额外挂在同一个 payload 上，前端可忽略但不能破坏兼容
-- 公共 skill 浏览模型必须把 meta、统计和目录树拆成显式字段，避免前端重新解析 `SKILL.md`
 - ACP agent 配置必须能表达直接启动和 shell 启动两种模式，并支持“多个已配置 agent + 一个默认 agent”的目录式管理
 - 全局 MCP 配置必须能稳定表达 MCP server 清单，至少覆盖 `stdio/http/sse` 三类 transport，以及 `args`、`env`、`headers` 这些连接参数
 - 文件搜索结果必须返回稳定路径、文件名和父目录信息

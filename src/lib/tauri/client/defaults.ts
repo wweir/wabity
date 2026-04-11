@@ -3,7 +3,6 @@ import type {
 	AppSettings,
 	BuiltinMcpServerStatus,
 	ClipboardHistorySnapshot,
-	PublicSkillCatalog,
 	RagRuntimeStatus,
 	ShortcutConfig,
 	WorkspaceState,
@@ -102,12 +101,6 @@ export const browserAppSettings: AppSettings = {
 		ignoreGlobs: [...defaultRagIgnoreGlobs],
 		embeddingProviderId: null,
 	},
-};
-
-export const browserPublicSkillCatalog: PublicSkillCatalog = {
-	rootPath: "~/.agents/skills",
-	exists: false,
-	skills: [],
 };
 
 export const browserWorkspaceState: WorkspaceState = {

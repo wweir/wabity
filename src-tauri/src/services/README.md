@@ -20,7 +20,6 @@
 - `clipboard`：后台轮询系统剪贴板，只记录少量文本历史，维护 pinned/recent 分组、连续重复去重、自写回 suppression，以及“写系统剪贴板后再向外部应用发送粘贴快捷键”所需的受控链路
 - `selection`：读取当前活跃应用复制动作产生的选中文本，并避免把旧剪贴板内容误判成新选区；macOS 下这条链路必须留在快捷键处理线程执行，不能丢进 Tokio worker
 - `translate`：读取 AI 功能配置里的翻译提示词和翻译 LLM，严格按条目协议调用 OpenAI 兼容 `responses` 或 `chat/completions` 完成翻译；所有翻译请求都会显式注入 `thinking: { type: "disabled" }` 并请求流式返回，避免把翻译这种低复杂度任务误送进思考模式或被兼容层整包缓冲；若 provider 返回 SSE delta，服务会边归并最终 payload，边把增量译文回调给上层；翻译 HTTP 请求已切到 async client 复用，不再为每次翻译单独创建 blocking client
-- `public_skills`：扫描 `~/.agents/skills`，解析 `SKILL.md` frontmatter，并构建目录树
 - 所有 OpenAI-compatible 调用共享基础设施层 `openai_compatible` 薄 client 和适配模块；底层实现已抽到 workspace 内部 crate `wabity-openai-compatible`，宿主 crate 仅保留兼容 shim 和本地域类型转换。service 不再各自维护一套 URL 清洗、鉴权注入、发送请求、错误体提取、`responses` 文本提取或 `/models` 解析
 
 边界：
@@ -55,7 +54,6 @@
 - `builtin_mcp` 的 `document` 模块只允许访问当前 workspace 根目录和显式配置的 RAG source roots，不把内置 MCP 扩成任意本地文件读取口子
 - `builtin_mcp` 的 `rag` 模块在索引仍有 pending 文件时不会把部分命中伪装成稳定成功结果；它会返回显式 error payload，并把 partial result 放进结构化字段里提醒调用方当前结果不完整
 - `acp` 会持久化 live session 快照，并在启动时尝试使用 agent 的 `session/load` 恢复；不支持或失败时只记录恢复提示
-- `public_skills` 是只读服务：只返回 skill meta、目录/文件统计和层级树，不读取普通文件内容
 - 真正的系统能力接入通过基础设施层或前端 effect 完成
 - 当前 workspace 属于运行时状态：启动默认回到 `HOME`，配置层只持久化最近 3 个目录用于快速切换
 - `ocr` 现在支持两类 provider：macOS 本地 `Vision`，以及通过 OpenAI 兼容 `responses` 接口发送图文输入的远程多模态模型

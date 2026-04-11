@@ -14,7 +14,3 @@ export {
 	type PromptsSettingsSectionProps,
 } from "./sections/PromptsSettingsSection";
 export { RagSettingsSection, type RagSettingsSectionProps } from "./sections/RagSettingsSection";
-export {
-	SkillsSettingsSection,
-	type SkillsSettingsSectionProps,
-} from "./sections/SkillsSettingsSection";

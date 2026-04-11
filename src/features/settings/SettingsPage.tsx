@@ -8,7 +8,6 @@ import {
 	getAcpAgents,
 	getAcpMcpServers,
 	getBuiltinMcpServerStatus,
-	getPublicSkillCatalog,
 	getShortcut,
 	getWorkspace,
 	hideLauncherWindow,
@@ -32,7 +31,6 @@ import type {
 	NotificationSettings,
 	OcrSettings,
 	PromptsSettings,
-	PublicSkillCatalog,
 	RagScanResult,
 	RagSettings,
 	ShortcutConfig,
@@ -48,7 +46,6 @@ import {
 	McpSettingsSection,
 	PromptsSettingsSection,
 	RagSettingsSection,
-	SkillsSettingsSection,
 } from "./SettingsSectionViews";
 import {
 	SettingsQuickJumpList,
@@ -215,16 +212,9 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 	});
 	const [builtinMcpServerStatus, setBuiltinMcpServerStatus] =
 		useState<BuiltinMcpServerStatus | null>(null);
-	const [skillCatalog, setSkillCatalog] = useState<PublicSkillCatalog>({
-		rootPath: "~/.agents/skills",
-		exists: false,
-		skills: [],
-	});
 	const [workspaceContext, setWorkspaceContext] = useState<WorkspaceState>(
 		createDefaultWorkspaceState,
 	);
-	const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
-	const [skillError, setSkillError] = useState<string | null>(null);
 
 	const [appearanceSettings, setAppearanceSettings] =
 		useState<AppearanceSettings>(defaultAppearanceSettings);
@@ -262,13 +252,11 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		contentRef,
 		handleSectionTabKeyDown,
 		handleSelectSection,
-		handleViewSkill,
 		scrollToSectionBlock,
 		sectionTabRefs,
 	} = useSettingsSectionNavigation({
 		activeSection,
 		setActiveSection,
-		setSelectedSkillId,
 	});
 
 	function applyAgentDrafts(nextAgents: AcpAgentDraft[], nextSelectedAgentId: string | null) {
@@ -691,15 +679,6 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 					availableModules: [],
 				});
 			});
-		void getPublicSkillCatalog()
-			.then((catalog) => {
-				setSkillError(null);
-				setSkillCatalog(catalog);
-				setSelectedSkillId(catalog.skills[0]?.id ?? null);
-			})
-			.catch((error: unknown) => {
-				setSkillError(getErrorMessage(error, "公共 skill 读取失败"));
-			});
 		void getWorkspace()
 			.then((workspace) => {
 				setWorkspaceContext(workspace);
@@ -885,13 +864,6 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 			window.clearTimeout(focusTimer);
 		};
 	}, [mcpServers, scrollToSectionBlock, selectedMcpServerId]);
-
-	useEffect(() => {
-		const nextSelectedSkillId = selectExistingIdOrFirst(skillCatalog.skills, selectedSkillId);
-		if (nextSelectedSkillId !== selectedSkillId) {
-			setSelectedSkillId(nextSelectedSkillId);
-		}
-	}, [selectedSkillId, skillCatalog.skills]);
 
 	const handleShortcutClick = (key: keyof ShortcutConfig) => {
 		setEditingShortcut(key);
@@ -1125,7 +1097,6 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		mcp: mcpHasUnsavedChanges
 			? "有草稿"
 			: `${mcpServers.length} 个服务 / ${builtinMcpConfig.enabledModules.length} 个内置模块`,
-		skills: skillCatalog.exists ? `${skillCatalog.skills.length} 个 skill` : "只读",
 		about: "只读",
 	};
 	const sectionDescriptionText: Record<SettingsSectionId, string> = {
@@ -1135,7 +1106,6 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		rag: "索引输入、目录与重建。",
 		acp: "本地 Agent 启动命令与模式。",
 		mcp: "全局 MCP 服务清单。",
-		skills: "浏览公共 skill 目录。",
 		about: "版本与项目信息。",
 	};
 	const activeSectionLabel =
@@ -1154,7 +1124,6 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 	const builtinMcpToggleDisabled =
 		!builtinMcpConfig.enabled &&
 		(!builtinMcpServerStatus?.running || builtinMcpServerStatus.server.transport !== "http");
-	const selectedSkill = skillCatalog.skills.find((skill) => skill.id === selectedSkillId) ?? null;
 	const selectedLlmFieldIssues = selectedLlmProvider
 		? (llmValidation.providerFieldIssues[selectedLlmProvider.id] ?? {})
 		: {};
@@ -1902,17 +1871,6 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 									selectedMcpServerId={selectedMcpServerId}
 									selectedMcpTransport={selectedMcpTransport}
 									setSelectedMcpTransport={setSelectedMcpTransport}
-								/>
-							) : null}
-
-							{activeSection === "skills" ? (
-								<SkillsSettingsSection
-									bindSectionBlockRef={bindSectionBlockRef}
-									onViewSkill={handleViewSkill}
-									selectedSkill={selectedSkill}
-									selectedSkillId={selectedSkillId}
-									skillCatalog={skillCatalog}
-									skillError={skillError}
 								/>
 							) : null}
 
