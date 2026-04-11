@@ -49,6 +49,7 @@ jobs:
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          PACKAGE_LOCK_VERSION="$(node -p "require('./package-lock.json').version")"
           TAURI_VERSION="$(node -e "const fs = require('fs'); const config = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8')); process.stdout.write(config.version);")"
           CARGO_VERSION="$(python3 - <<'PY'
           import tomllib
@@ -62,6 +63,11 @@ jobs:
 
           if [[ "$TAG_VERSION" != "$PACKAGE_VERSION" ]]; then
             echo "Tag version $TAG_VERSION does not match package.json version $PACKAGE_VERSION" >&2
+            exit 1
+          fi
+
+          if [[ "$TAG_VERSION" != "$PACKAGE_LOCK_VERSION" ]]; then
+            echo "Tag version $TAG_VERSION does not match package-lock.json version $PACKAGE_LOCK_VERSION" >&2
             exit 1
           fi
 

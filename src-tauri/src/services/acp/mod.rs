@@ -1350,7 +1350,9 @@ async fn run_session_runtime(
                             .write_text_file(false))
                         .terminal(false),
                 )
-                .client_info(acp::Implementation::new("wabity", "0.1.0").title("Wabity")),
+                .client_info(
+                    acp::Implementation::new("wabity", env!("WABITY_APP_VERSION")).title("Wabity"),
+                ),
         )
         .await
         .context("failed to initialize ACP client")?;
