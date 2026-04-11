@@ -71,9 +71,25 @@ macOS 下显式构建 `dmg`：
 npm run tauri:build:macos:dmg
 ```
 
-这个脚本会先启动一个本地补丁 watcher，在 `@tauri-apps/cli` 生成临时 `bundle_dmg.sh` 后立即打补丁：保留 Finder AppleScript 美化流程，但给 `osascript` 增加重试和最终降级容错，避免因为 Finder 自动化权限、前台会话时序或偶发 `-1728` 之类错误直接导致整个 DMG 构建失败。
+这个脚本会先启动一个本地补丁 watcher，在 `@tauri-apps/cli` 生成临时 `bundle_dmg.sh` 后立即打补丁：保留 Finder AppleScript 美化流程，但给 `osascript` 增加重试和最终降级容错，避免因为 Finder 自动化权限、前台会话时序或偶发 `-1728` 之类错误直接导致整个 DMG 构建失败。同时会把 Tauri 默认写入的 `.VolumeIcon.icns` 延后到 Finder 布局之后再复制，避免隐藏卷图标文件参与根目录排版导致图标错位。
+
+生成出来的 DMG 现在还会额外包含两个用户可见辅助文件：
+
+- `安装并修复.command`：把 `Wabity.app` 复制到 `/Applications`，尝试清理隔离属性，并自动启动应用
+- `首次打开说明.txt`：说明推荐安装路径，以及系统仍拦截时该怎么处理
 
 产物输出到 `src-tauri/target/release/bundle/dmg/`，文件名会跟随 `productName`，例如 `Wabity.dmg`、`Wabity.exe`。
+
+## 首次打开
+
+当前发布包还没有 Apple Developer ID 签名和 notarization，因此普通下载链路下，macOS 仍可能在首次打开时要求人工确认。
+
+推荐顺序：
+
+1. 把 `Wabity.app` 拖到 `Applications`
+2. 在 `Applications` 中对 `Wabity.app` 右键，选择“打开”
+3. 如果系统仍拦截，回到 DMG 后双击 `安装并修复.command`
+4. 如果还有拦截，去“系统设置 -> 隐私与安全性”里选择“仍要打开”
 
 当前把 macOS 的 bundle 目标单独放在 `src-tauri/tauri.macos.conf.json`，避免污染其他平台的默认打包目标；Tauri 会在 macOS 构建时自动合并这份平台配置。
 

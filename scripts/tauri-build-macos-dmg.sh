@@ -7,16 +7,27 @@ DMG_SCRIPT_PATH="$ROOT_DIR/src-tauri/target/release/bundle/dmg/bundle_dmg.sh"
 PATCH_SCRIPT_PATH="$ROOT_DIR/scripts/patch-bundle-dmg.mjs"
 TAURI_BIN="$ROOT_DIR/node_modules/.bin/tauri"
 RUN_DMG_PATCH_WATCHER=1
+RETRY_PATCH_MARKER="wabity-dmg-tolerance-patch"
+EXTRAS_PATCH_MARKER="wabity-dmg-extra-files-patch"
+VOLUME_ICON_PATCH_MARKER="wabity-dmg-volume-icon-patch"
 
-if [[ "${CI:-}" == "true" ]]; then
-	RUN_DMG_PATCH_WATCHER=0
-fi
+bundle_script_needs_patch() {
+	local bundle_script_path="$1"
+
+	[[ -f "$bundle_script_path" ]] ||
+		return 1
+
+	grep -q "Running AppleScript to make Finder stuff pretty" "$bundle_script_path" ||
+		return 1
+
+	! grep -q "$RETRY_PATCH_MARKER" "$bundle_script_path" ||
+		! grep -q "$EXTRAS_PATCH_MARKER" "$bundle_script_path" ||
+		! grep -q "$VOLUME_ICON_PATCH_MARKER" "$bundle_script_path"
+}
 
 watch_bundle_script_and_patch() {
 	while true; do
-		if [[ -f "$DMG_SCRIPT_PATH" ]] \
-			&& grep -q "Running AppleScript to make Finder stuff pretty" "$DMG_SCRIPT_PATH" \
-			&& ! grep -q "wabity-dmg-tolerance-patch" "$DMG_SCRIPT_PATH"; then
+		if bundle_script_needs_patch "$DMG_SCRIPT_PATH"; then
 			node "$PATCH_SCRIPT_PATH" "$DMG_SCRIPT_PATH"
 		fi
 

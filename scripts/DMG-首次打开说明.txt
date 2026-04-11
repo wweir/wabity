@@ -1,0 +1,26 @@
+Wabity 首次打开说明
+
+推荐顺序：
+
+1. 把 Wabity.app 拖到 Applications。
+2. 在 Applications 中先对 Wabity 右键，选择“打开”。
+3. 如果系统仍然拦截，回到这个 DMG，双击“安装并修复.command”。
+
+这个修复脚本会：
+
+- 把 Wabity.app 复制到 /Applications
+- 尝试清理 macOS 下载隔离属性
+- 自动识别已安装版本，并按升级 / 覆盖安装 / 降级分别提示
+- 如果 Wabity 正在运行，会先要求退出或强制结束后再替换
+- 自动启动应用
+
+如果系统仍提示无法打开：
+
+- 打开“系统设置 -> 隐私与安全性”
+- 在底部找到 Wabity 的拦截提示
+- 选择“仍要打开”
+
+说明：
+
+- 当前发布包没有 Apple Developer ID 签名和 notarization
+- 因此普通下载链路下，macOS 仍可能要求你确认一次首次打开授权
