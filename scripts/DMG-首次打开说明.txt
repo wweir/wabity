@@ -4,7 +4,7 @@ Wabity 首次打开说明
 
 1. 把 Wabity.app 拖到 Applications。
 2. 在 Applications 中先对 Wabity 右键，选择“打开”。
-3. 如果系统仍然拦截，回到这个 DMG，双击“安装并修复.command”。
+3. 如果系统仍然拦截，回到这个 DMG，双击“修复.command”。
 
 这个修复脚本会：
 

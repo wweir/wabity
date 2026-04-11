@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="420" viewBox="0 0 720 420">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f5f1e7"/>
+      <stop offset="55%" stop-color="#eef3ea"/>
+      <stop offset="100%" stop-color="#dde9e0"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.78"/>
+      <stop offset="100%" stop-color="#f7fbf7" stop-opacity="0.9"/>
+    </linearGradient>
+    <linearGradient id="arrow" x1="0%" y1="50%" x2="100%" y2="50%">
+      <stop offset="0%" stop-color="#87a773" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#2f6b43" stop-opacity="0.78"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="18" flood-color="#294533" flood-opacity="0.14"/>
+    </filter>
+  </defs>
+
+  <rect width="720" height="420" rx="26" fill="url(#bg)"/>
+  <circle cx="74" cy="54" r="118" fill="#f0d8a9" fill-opacity="0.24"/>
+  <circle cx="680" cy="32" r="90" fill="#b8d5be" fill-opacity="0.36"/>
+  <circle cx="690" cy="368" r="132" fill="#bdd9c2" fill-opacity="0.24"/>
+
+  <text x="56" y="58" fill="#224230" font-size="28" font-family="Helvetica Neue, PingFang SC, Hiragino Sans GB, Microsoft YaHei, sans-serif" font-weight="700">
+    安装 Wabity
+  </text>
+  <text x="56" y="88" fill="#4f6657" font-size="16" font-family="Helvetica Neue, PingFang SC, Hiragino Sans GB, Microsoft YaHei, sans-serif">
+    把左侧应用拖到右侧 Applications
+  </text>
+
+  <rect x="108" y="112" width="132" height="132" rx="30" fill="url(#panel)" filter="url(#shadow)"/>
+  <rect x="480" y="112" width="132" height="132" rx="30" fill="url(#panel)" filter="url(#shadow)"/>
+
+  <path d="M291 177h116" stroke="url(#arrow)" stroke-width="18" stroke-linecap="round"/>
+  <path d="M394 150l46 27-46 27" fill="none" stroke="#2f6b43" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <rect x="52" y="294" width="616" height="86" rx="24" fill="#ffffff" fill-opacity="0.72" stroke="#d9e6db" stroke-width="1.5"/>
+  <rect x="72" y="314" width="112" height="28" rx="14" fill="#e8f1e7"/>
+  <text x="93" y="333" fill="#2d5a3f" font-size="14" font-family="Helvetica Neue, PingFang SC, Hiragino Sans GB, Microsoft YaHei, sans-serif" font-weight="700">
+    首次打开被拦截？
+  </text>
+  <text x="208" y="326" fill="#334a3c" font-size="15" font-family="Helvetica Neue, PingFang SC, Hiragino Sans GB, Microsoft YaHei, sans-serif">
+    双击左下角“修复”，它会复制应用到 /Applications
+  </text>
+  <text x="208" y="348" fill="#607565" font-size="13" font-family="Helvetica Neue, PingFang SC, Hiragino Sans GB, Microsoft YaHei, sans-serif">
+    并尝试清理隔离属性，再自动启动应用
+  </text>
+</svg>

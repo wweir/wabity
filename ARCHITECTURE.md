@@ -256,6 +256,7 @@ RAG 建索引固定分两层：
 - 历史剪贴板使用独立原生窗口，而不是 launcher 内部视图切换
 - 构建产物必须注入版本和日期信息
 - `npm run tauri dev` 必须经由仓库脚本包装；开发态默认写入 `src-tauri/target`，并通过仓库脚本按需清理 `debug/deps`、`debug/incremental` 等旧缓存，避免清理口径分散
+- macOS 发布包固定走 `src-tauri/tauri.macos.conf.json` + `scripts/patch-bundle-dmg.mjs` 这条 DMG 打包链路：前者声明窗口与主安装入口坐标，后者补齐背景图、Finder 布局容错、额外辅助文件位置和卷图标延后写入，避免默认脚本把安装动线排乱
 - `application` 和 `process` 缓存不在启动时预热，也没有固定轮询刷新；首次命中时同步建快照，后续只在过旧时异步补刷新，避免把常驻扫描成本摊到空闲态
 
 ## 8. 关键设计决策
