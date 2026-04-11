@@ -25,6 +25,7 @@ const PDF_MIN_WORDLIKE_CHAR_RATIO_PERCENT: usize = 45;
 const PDF_MAX_SUSPICIOUS_CHAR_RATIO_PERCENT: usize = 10;
 const PDF_SIGNIFICANT_SCRIPT_CHAR_COUNT: usize = 6;
 const PDF_SIGNIFICANT_SCRIPT_RATIO_PERCENT: usize = 12;
+const MAX_REPORTED_PDF_WARNING_PAGES: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -60,6 +61,14 @@ struct ExtractedPdfPage {
     page_number: u32,
     lines: Vec<String>,
     extraction_warnings: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+struct PdfWarningRollup {
+    extraction_warning_count: usize,
+    extraction_warning_pages: Vec<u32>,
+    unreadable_pages: Vec<u32>,
+    corrupted_pages: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -100,6 +109,74 @@ impl ExtractedPdfPage {
             extraction_warnings,
         }
     }
+}
+
+impl PdfWarningRollup {
+    fn record_extraction_warnings(&mut self, page_number: u32, warning_count: usize) {
+        if warning_count == 0 {
+            return;
+        }
+        self.extraction_warning_count += warning_count;
+        self.extraction_warning_pages.push(page_number);
+    }
+
+    fn record_unreadable_page(&mut self, page_number: u32) {
+        self.unreadable_pages.push(page_number);
+    }
+
+    fn record_corrupted_page(&mut self, page_number: u32) {
+        self.corrupted_pages.push(page_number);
+    }
+
+    fn to_warning_messages(&self) -> Vec<String> {
+        let mut parts = Vec::new();
+        if self.extraction_warning_count > 0 {
+            parts.push(format!(
+                "{} text extraction warning(s) across {} page(s){}",
+                self.extraction_warning_count,
+                self.extraction_warning_pages.len(),
+                format_pdf_warning_page_suffix(&self.extraction_warning_pages),
+            ));
+        }
+        if !self.unreadable_pages.is_empty() {
+            parts.push(format!(
+                "{} page(s) did not produce readable text{}",
+                self.unreadable_pages.len(),
+                format_pdf_warning_page_suffix(&self.unreadable_pages),
+            ));
+        }
+        if !self.corrupted_pages.is_empty() {
+            parts.push(format!(
+                "{} page(s) looked corrupted and were skipped{}",
+                self.corrupted_pages.len(),
+                format_pdf_warning_page_suffix(&self.corrupted_pages),
+            ));
+        }
+
+        if parts.is_empty() {
+            Vec::new()
+        } else {
+            vec![format!("PDF extraction summary: {}", parts.join("; "))]
+        }
+    }
+}
+
+fn format_pdf_warning_page_suffix(page_numbers: &[u32]) -> String {
+    let sample = page_numbers
+        .iter()
+        .take(MAX_REPORTED_PDF_WARNING_PAGES)
+        .map(u32::to_string)
+        .collect::<Vec<_>>();
+    if sample.is_empty() {
+        return String::new();
+    }
+
+    let suffix = if page_numbers.len() > sample.len() {
+        ", ..."
+    } else {
+        ""
+    };
+    format!(" (pages {}{})", sample.join(", "), suffix)
 }
 
 pub(crate) fn classify_document_kind(path: &Path) -> Option<DocumentKind> {
@@ -210,26 +287,22 @@ fn extract_pdf_document(path: &Path, bytes: &[u8]) -> Result<ExtractedDocument> 
         .collect::<Vec<_>>();
     let stripped_pages = strip_repeated_pdf_page_noise(&normalized_pages);
     let mut blocks = Vec::new();
-    let mut warnings = Vec::new();
+    let mut warning_rollup = PdfWarningRollup::default();
     for (page, lines) in pages.iter().zip(stripped_pages) {
         let page_number = page.page_number;
-        let had_extraction_warning = !page.extraction_warnings.is_empty();
-        warnings.extend(page.extraction_warnings.iter().cloned());
+        warning_rollup.record_extraction_warnings(page_number, page.extraction_warnings.len());
         if !page_contains_any_text(&lines) {
-            if !had_extraction_warning {
-                warnings.push(format!("page {page_number} did not produce readable text"));
-            }
+            warning_rollup.record_unreadable_page(page_number);
             continue;
         }
         if !page_contains_readable_text(&lines) {
-            warnings.push(format!(
-                "page {page_number} text looked corrupted and was skipped"
-            ));
+            warning_rollup.record_corrupted_page(page_number);
             continue;
         }
 
         blocks.extend(split_pdf_page_into_blocks(page_number, &lines));
     }
+    let warnings = warning_rollup.to_warning_messages();
     if blocks.is_empty() {
         let detail = warnings
             .last()
@@ -1109,7 +1182,9 @@ ET";
 
         let message = extracted.to_string();
         assert!(message.contains("PDF 文档没有可提取的文本内容"));
-        assert!(message.contains("page 1 text extraction warning"));
+        assert!(message.contains("PDF extraction summary"));
+        assert!(message.contains("1 text extraction warning(s) across 1 page(s)"));
+        assert!(message.contains("1 page(s) did not produce readable text"));
     }
 
     #[test]
@@ -1140,7 +1215,27 @@ ET";
             .contains("Recovered text before invalid font."));
         assert_eq!(extracted.blocks.len(), 1);
         assert_eq!(extracted.warnings.len(), 1);
-        assert!(extracted.warnings[0].contains("page 1 text extraction warning"));
+        assert!(extracted.warnings[0].contains("PDF extraction summary"));
+        assert!(extracted.warnings[0].contains("1 text extraction warning(s) across 1 page(s)"));
+    }
+
+    #[test]
+    fn pdf_warning_rollup_keeps_single_summary_for_many_pages() {
+        let mut rollup = PdfWarningRollup::default();
+        rollup.record_extraction_warnings(1, 3);
+        rollup.record_extraction_warnings(4, 2);
+        rollup.record_unreadable_page(7);
+        rollup.record_corrupted_page(8);
+        rollup.record_corrupted_page(9);
+        rollup.record_corrupted_page(10);
+        rollup.record_corrupted_page(11);
+
+        let warnings = rollup.to_warning_messages();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("5 text extraction warning(s) across 2 page(s) (pages 1, 4)"));
+        assert!(warnings[0].contains("1 page(s) did not produce readable text (pages 7)"));
+        assert!(warnings[0]
+            .contains("4 page(s) looked corrupted and were skipped (pages 8, 9, 10, ...)"));
     }
 
     #[test]

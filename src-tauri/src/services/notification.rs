@@ -110,7 +110,10 @@ impl NotificationService {
         let settings = match self.notification_settings().await {
             Ok(settings) => settings,
             Err(error) => {
-                tracing::warn!(?error, "failed to load notification settings");
+                tracing::warn!(
+                    error = format_args!("{:#}", error),
+                    "failed to load notification settings"
+                );
                 return;
             }
         };
@@ -121,7 +124,10 @@ impl NotificationService {
         ) {
             Ok(value) => value,
             Err(error) => {
-                tracing::warn!(?error, "failed to inspect launcher foreground state");
+                tracing::warn!(
+                    error = format_args!("{:#}", error),
+                    "failed to inspect launcher foreground state"
+                );
                 return;
             }
         };
@@ -129,7 +135,10 @@ impl NotificationService {
         let permission_state = match self.backend.permission_state() {
             Ok(state) => state,
             Err(error) => {
-                tracing::warn!(?error, "failed to inspect notification permission state");
+                tracing::warn!(
+                    error = format_args!("{:#}", error),
+                    "failed to inspect notification permission state"
+                );
                 return;
             }
         };
@@ -147,7 +156,7 @@ impl NotificationService {
 
         if let Err(error) = self.backend.notify(&rendered_payload) {
             tracing::warn!(
-                ?error,
+                error = format_args!("{:#}", error),
                 trigger = ?rendered_payload.trigger,
                 outcome = ?rendered_payload.outcome,
                 "failed to show system notification"

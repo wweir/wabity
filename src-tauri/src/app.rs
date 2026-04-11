@@ -6,6 +6,7 @@ use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_global_shortcut::{Builder as GlobalShortcutBuilder, ShortcutState};
 use time::{format_description::well_known::Rfc3339, UtcOffset};
 use tokio::task;
+use tracing::level_filters::LevelFilter;
 use tracing_subscriber::fmt::time::OffsetTime;
 use tracing_subscriber::EnvFilter;
 
@@ -79,7 +80,7 @@ fn handle_secondary_launch(app: &tauri::AppHandle<Wry>, argv_count: usize) {
     );
     if let Err(error) = window::reveal_main_window(app) {
         tracing::error!(
-            ?error,
+            error = format_args!("{:#}", error),
             "failed to reveal existing instance after secondary launch"
         );
     }
@@ -162,7 +163,7 @@ pub fn run() -> Result<()> {
                                 ShortcutAction::ToggleLauncher => {
                                     if let Err(error) = window::toggle_main_window(_app) {
                                         tracing::error!(
-                                            ?error,
+                                            error = format_args!("{:#}", error),
                                             "failed to toggle main window from shortcut"
                                         );
                                     }
@@ -178,7 +179,7 @@ pub fn run() -> Result<()> {
                                     let selected_text = selection::get_selected_text()
                                         .inspect_err(|error| {
                                             tracing::warn!(
-                                                ?error,
+                                                error = format_args!("{:#}", error),
                                                 "failed to get selected text for shortcut"
                                             )
                                         })
@@ -196,7 +197,7 @@ pub fn run() -> Result<()> {
 
                                         if let Err(error) = flow_result {
                                             tracing::error!(
-                                                ?error,
+                                                error = format_args!("{:#}", error),
                                                 "failed to complete translate shortcut"
                                             );
                                             if shortcut_state.is_clipboard_history_visible() {
@@ -224,7 +225,7 @@ pub fn run() -> Result<()> {
                                         window::show_main_window_with_clipboard_history_panel(_app)
                                     {
                                         tracing::error!(
-                                            ?error,
+                                            error = format_args!("{:#}", error),
                                             "failed to show clipboard history panel from shortcut"
                                         );
                                     }
@@ -298,7 +299,7 @@ pub fn run() -> Result<()> {
                 commands::launcher::emit_shortcut_runtime_status(app.handle(), &shortcut_state)
             {
                 tracing::warn!(
-                    ?error,
+                    error = format_args!("{:#}", error),
                     "failed to emit initial shortcut runtime status on startup"
                 );
             }
@@ -331,7 +332,10 @@ fn reconcile_configured_autostart(app: &tauri::AppHandle, app_state: &AppState) 
     let configured_enabled = match tauri::async_runtime::block_on(app_state.app_config()) {
         Ok(config) => config.general.auto_start,
         Err(error) => {
-            tracing::warn!(?error, "failed to load config for autostart reconciliation");
+            tracing::warn!(
+                error = format_args!("{:#}", error),
+                "failed to load config for autostart reconciliation"
+            );
             return;
         }
     };
@@ -339,7 +343,7 @@ fn reconcile_configured_autostart(app: &tauri::AppHandle, app_state: &AppState) 
     // Startup reconciliation is best-effort because login-item drift should not block launcher startup.
     if let Err(error) = autostart::sync_autostart(app, configured_enabled) {
         tracing::warn!(
-            ?error,
+            error = format_args!("{:#}", error),
             enabled = configured_enabled,
             "failed to reconcile autostart state on startup"
         );
@@ -349,7 +353,10 @@ fn reconcile_configured_autostart(app: &tauri::AppHandle, app_state: &AppState) 
 fn prewarm_process_cache(process: crate::services::process::ProcessService) {
     tauri::async_runtime::spawn(async move {
         if let Err(error) = process.refresh_now().await {
-            tracing::warn!(?error, "failed to prewarm process cache");
+            tracing::warn!(
+                error = format_args!("{:#}", error),
+                "failed to prewarm process cache"
+            );
         }
     });
 }
@@ -366,7 +373,9 @@ fn application_context() -> tauri::Context<Wry> {
 }
 
 fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"))
+        .add_directive("lopdf=error".parse().unwrap_or(LevelFilter::ERROR.into()));
     let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
     let timer = OffsetTime::new(local_offset, Rfc3339);
 
@@ -470,7 +479,7 @@ async fn register_startup_shortcut(
                     error
                 );
                 tracing::error!(
-                    ?error,
+                    error = format_args!("{:#}", error),
                     shortcut_key = %key.as_str(),
                     configured_shortcut = %configured_value,
                     "failed to register required shortcut"
@@ -493,7 +502,7 @@ async fn register_startup_shortcut(
                     error
                 );
                 tracing::warn!(
-                    ?error,
+                    error = format_args!("{:#}", error),
                     shortcut_key = %key.as_str(),
                     configured_shortcut = %configured_value,
                     "failed to register optional shortcut"
@@ -744,7 +753,10 @@ async fn perform_shortcut_ocr(
 fn prewarm_application_cache(application: crate::services::application::ApplicationService) {
     tauri::async_runtime::spawn(async move {
         if let Err(error) = application.refresh_now().await {
-            tracing::warn!(?error, "failed to warm application cache on startup");
+            tracing::warn!(
+                error = format_args!("{:#}", error),
+                "failed to warm application cache on startup"
+            );
         }
     });
 }

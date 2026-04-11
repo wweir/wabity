@@ -62,7 +62,10 @@ impl ClipboardService {
         tauri::async_runtime::spawn(async move {
             loop {
                 if let Err(error) = service.poll_once().await {
-                    tracing::warn!(?error, "failed to poll clipboard history");
+                    tracing::warn!(
+                        error = format_args!("{:#}", error),
+                        "failed to poll clipboard history"
+                    );
                 }
                 sleep(CLIPBOARD_POLL_INTERVAL).await;
             }
@@ -200,7 +203,10 @@ impl ClipboardService {
             .app_handle
             .emit(CLIPBOARD_HISTORY_UPDATED_EVENT, snapshot.clone())
         {
-            tracing::warn!(?error, "failed to emit clipboard history update event");
+            tracing::warn!(
+                error = format_args!("{:#}", error),
+                "failed to emit clipboard history update event"
+            );
         }
         Ok(())
     }

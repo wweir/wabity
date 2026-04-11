@@ -29,7 +29,7 @@ pub(super) fn build_acp_session_persist_hook(
             {
                 tracing::warn!(
                     session_id = %summary.session_id,
-                    ?error,
+                    error = format_args!("{:#}", error),
                     "failed to persist ACP session snapshot"
                 );
             }

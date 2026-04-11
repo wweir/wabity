@@ -393,7 +393,7 @@ pub fn configure_main_window(window: &WebviewWindow) -> Result<()> {
                             }
                             Err(error) => {
                                 tracing::warn!(
-                                    ?error,
+                                    error = format_args!("{:#}", error),
                                     window_label,
                                     "failed to inspect macOS panel state after blur while blur auto-hide is disabled"
                                 );
@@ -504,7 +504,7 @@ pub fn configure_main_window(window: &WebviewWindow) -> Result<()> {
                         Ok(window) => window,
                         Err(error) => {
                             tracing::warn!(
-                                ?error,
+                                error = format_args!("{:#}", error),
                                 window_label,
                                 blur_auto_hide_sequence = sequence,
                                 "failed to reacquire launcher window for confirmed auto-hide"
@@ -528,7 +528,7 @@ pub fn configure_main_window(window: &WebviewWindow) -> Result<()> {
                         Ok(false) => {}
                         Err(error) => {
                             tracing::warn!(
-                                ?error,
+                                error = format_args!("{:#}", error),
                                 window_label,
                                 blur_auto_hide_sequence = sequence,
                                 "failed to verify launcher focus state before confirmed auto-hide"
@@ -541,7 +541,7 @@ pub fn configure_main_window(window: &WebviewWindow) -> Result<()> {
                         &launcher_state,
                         "focus_lost_confirmed",
                     ) {
-                        tracing::warn!(?error, "failed to auto-hide launcher window on blur");
+                        tracing::warn!(error = format_args!("{:#}", error), "failed to auto-hide launcher window on blur");
                     }
                 });
             }
@@ -571,7 +571,7 @@ pub fn configure_clipboard_window(window: &WebviewWindow) -> Result<()> {
 
             if let Err(error) = hide_clipboard_window_by_label(&app_handle, "focus_lost", false) {
                 tracing::warn!(
-                    ?error,
+                    error = format_args!("{:#}", error),
                     window_label,
                     "failed to auto-hide clipboard history window on blur"
                 );
@@ -620,7 +620,7 @@ pub fn toggle_main_window(app: &AppHandle) -> Result<()> {
             }
             Err(error) => {
                 tracing::warn!(
-                    ?error,
+                    error = format_args!("{:#}", error),
                     window_label = window.label(),
                     "failed to inspect macOS panel state for launcher toggle"
                 );
@@ -942,7 +942,7 @@ pub fn show_main_window_with_clipboard_history_panel(app: &AppHandle) -> Result<
             Err(error) => {
                 let clipboard_window = clipboard_window(app)?;
                 tracing::warn!(
-                    ?error,
+                    error = format_args!("{:#}", error),
                     window_label = clipboard_window.label(),
                     "failed to inspect launcher foreground state before opening clipboard history"
                 );
@@ -1687,7 +1687,7 @@ fn schedule_macos_panel_visibility_reinforcement(
             Ok(window) => window,
             Err(error) => {
                 tracing::warn!(
-                    ?error,
+                    error = format_args!("{:#}", error),
                     window_label,
                     "failed to reacquire launcher window for macOS visibility reinforcement"
                 );
@@ -1724,7 +1724,7 @@ fn schedule_macos_panel_visibility_reinforcement(
 
                 if let Err(error) = show_macos_panel_without_focus(&window) {
                     tracing::warn!(
-                        ?error,
+                        error = format_args!("{:#}", error),
                         window_label,
                         "failed to reinforce macOS panel visibility without focus"
                     );
@@ -1744,7 +1744,7 @@ fn schedule_macos_panel_visibility_reinforcement(
                     }
                     Err(error) => {
                         tracing::warn!(
-                            ?error,
+                            error = format_args!("{:#}", error),
                             window_label,
                             "failed to inspect macOS panel state after visibility reinforcement"
                         );
@@ -1753,7 +1753,7 @@ fn schedule_macos_panel_visibility_reinforcement(
             }
             Err(error) => {
                 tracing::warn!(
-                    ?error,
+                    error = format_args!("{:#}", error),
                     window_label,
                     "failed to inspect macOS panel state before visibility reinforcement"
                 );

@@ -237,7 +237,10 @@ impl ProcessService {
         let should_refresh = match self.snapshot_needs_refresh(max_age) {
             Ok(should_refresh) => should_refresh,
             Err(error) => {
-                tracing::warn!(?error, "failed to inspect process cache state");
+                tracing::warn!(
+                    error = format_args!("{:#}", error),
+                    "failed to inspect process cache state"
+                );
                 return;
             }
         };
@@ -252,7 +255,10 @@ impl ProcessService {
         let service = self.clone();
         tauri::async_runtime::spawn(async move {
             if let Err(error) = service.refresh_now().await {
-                tracing::warn!(?error, "failed to refresh process cache");
+                tracing::warn!(
+                    error = format_args!("{:#}", error),
+                    "failed to refresh process cache"
+                );
             }
         });
     }

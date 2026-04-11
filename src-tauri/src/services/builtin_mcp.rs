@@ -147,7 +147,10 @@ impl BuiltinMcpServerService {
                         INTERNAL_HTTP_HOST, INTERNAL_HTTP_PORT
                     ))
                     .await;
-                    tracing::warn!(?error, "failed to start built-in MCP server");
+                    tracing::warn!(
+                        error = format_args!("{:#}", error),
+                        "failed to start built-in MCP server"
+                    );
                     return;
                 }
             };
@@ -165,7 +168,10 @@ impl BuiltinMcpServerService {
 
         tauri::async_runtime::spawn(async move {
             if let Err(error) = axum::serve(listener, router).await {
-                tracing::warn!(?error, "built-in MCP server exited unexpectedly");
+                tracing::warn!(
+                    error = format_args!("{:#}", error),
+                    "built-in MCP server exited unexpectedly"
+                );
                 let mut guard = status.write().await;
                 guard.running = false;
                 guard.last_error =

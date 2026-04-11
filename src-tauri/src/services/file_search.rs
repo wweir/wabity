@@ -160,7 +160,7 @@ impl FileSearchService {
                 }
                 Err(error) => {
                     tracing::warn!(
-                        ?error,
+                        error = format_args!("{:#}", error),
                         query_len = needle.chars().count(),
                         "spotlight search failed, falling back"
                     );
@@ -348,13 +348,19 @@ fn start_workspace_watcher(
     }) {
         Ok(watcher) => watcher,
         Err(error) => {
-            tracing::warn!(?error, "failed to create file search watcher");
+            tracing::warn!(
+                error = format_args!("{:#}", error),
+                "failed to create file search watcher"
+            );
             return None;
         }
     };
 
     if let Err(error) = watcher.watch(&root, RecursiveMode::Recursive) {
-        tracing::warn!(?error, "failed to watch workspace for file search updates");
+        tracing::warn!(
+            error = format_args!("{:#}", error),
+            "failed to watch workspace for file search updates"
+        );
         return None;
     }
 
@@ -370,7 +376,10 @@ fn start_workspace_watcher(
         }) {
         Ok(worker) => worker,
         Err(error) => {
-            tracing::warn!(?error, "failed to spawn file search watcher worker");
+            tracing::warn!(
+                error = format_args!("{:#}", error),
+                "failed to spawn file search watcher worker"
+            );
             return None;
         }
     };
@@ -416,7 +425,10 @@ fn run_workspace_watch_loop(
         }
 
         if let Err(error) = apply_event_batch(&root, &records, &snapshot, events) {
-            tracing::warn!(?error, "failed to apply incremental file search update");
+            tracing::warn!(
+                error = format_args!("{:#}", error),
+                "failed to apply incremental file search update"
+            );
         }
     }
 }
@@ -476,7 +488,10 @@ fn collect_update_targets(
         let event = match event {
             Ok(event) => event,
             Err(error) => {
-                tracing::warn!(?error, "file search watcher received invalid event");
+                tracing::warn!(
+                    error = format_args!("{:#}", error),
+                    "file search watcher received invalid event"
+                );
                 continue;
             }
         };

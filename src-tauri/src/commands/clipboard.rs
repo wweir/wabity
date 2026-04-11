@@ -68,7 +68,7 @@ pub async fn paste_clipboard_history_entry(
         Ok(None) => {}
         Err(error) => {
             tracing::warn!(
-                ?error,
+                error = format_args!("{:#}", error),
                 "failed to reactivate remembered application before clipboard paste"
             );
         }

@@ -26,7 +26,7 @@ impl MacOsSystemNotificationBackend {
         NOTIFICATION_APPLICATION_INIT.get_or_init(|| {
             if let Err(error) = set_application(bundle_identifier.as_str()) {
                 tracing::warn!(
-                    ?error,
+                    error = format_args!("{:#}", error),
                     bundle_identifier,
                     "failed to bind macOS notification sender to Wabity bundle identifier; falling back to default notification sender"
                 );

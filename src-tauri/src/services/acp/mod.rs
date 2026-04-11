@@ -335,7 +335,10 @@ impl AcpService {
         tauri::async_runtime::spawn(async move {
             while let Some(event) = receiver.recv().await {
                 if let Err(error) = service.apply_runtime_event(event).await {
-                    tracing::warn!(?error, "failed to apply acp runtime event");
+                    tracing::warn!(
+                        error = format_args!("{:#}", error),
+                        "failed to apply acp runtime event"
+                    );
                 }
             }
         });
@@ -1274,7 +1277,10 @@ fn spawn_session_runtime(
                     if let Some(started_tx) = started_tx.take() {
                         let _ = started_tx.send(Err(anyhow::anyhow!(error.to_string())));
                     }
-                    tracing::warn!(?error, "acp session runtime stopped with error");
+                    tracing::warn!(
+                        error = format_args!("{:#}", error),
+                        "acp session runtime stopped with error"
+                    );
                 }
             });
         })
@@ -1330,7 +1336,7 @@ async fn run_session_runtime(
     let connection = Rc::new(connection);
     tokio::task::spawn_local(async move {
         if let Err(error) = handle_io.await {
-            tracing::warn!(?error, "acp io loop stopped");
+            tracing::warn!(error = format_args!("{:#}", error), "acp io loop stopped");
         }
     });
 
@@ -1437,7 +1443,7 @@ async fn run_session_runtime(
                                     PromptCompletion { error: None }
                                 }
                                 Err(error) => {
-                                    tracing::error!(?error, session_id = ?prompt_session_id, "prompt failed");
+                                    tracing::error!(error = format_args!("{:#}", error), session_id = ?prompt_session_id, "prompt failed");
                                     PromptCompletion {
                                     error: Some(anyhow::Error::new(error).context("ACP prompt failed").to_string()),
                                 }

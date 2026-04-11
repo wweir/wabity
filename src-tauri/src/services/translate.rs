@@ -213,7 +213,7 @@ async fn request_translation(
             Ok(translated) => translated,
             Err(error) if should_retry_without_stream(true, &error) => {
                 tracing::warn!(
-                    ?error,
+                    error = format_args!("{:#}", error),
                     protocol = translation_protocol_label(protocol),
                     "translation provider rejected streaming output, retrying without stream"
                 );

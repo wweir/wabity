@@ -251,10 +251,16 @@ fn emit_shortcut_update_events(
     config: crate::infrastructure::config::ShortcutConfig,
 ) {
     if let Err(error) = app.emit("shortcut-updated", config) {
-        tracing::warn!(?error, "failed to emit shortcut-updated event");
+        tracing::warn!(
+            error = format_args!("{:#}", error),
+            "failed to emit shortcut-updated event"
+        );
     }
     if let Err(error) = emit_shortcut_runtime_status(app, shortcut_state) {
-        tracing::warn!(?error, "failed to emit shortcut runtime status event");
+        tracing::warn!(
+            error = format_args!("{:#}", error),
+            "failed to emit shortcut runtime status event"
+        );
     }
 }
 

@@ -20,7 +20,10 @@ pub async fn set_workspace(
         .map_err(|error| error.to_string())?;
 
     if let Err(error) = app.emit("workspace-updated", workspace.clone()) {
-        tracing::warn!(?error, "failed to emit workspace-updated event");
+        tracing::warn!(
+            error = format_args!("{:#}", error),
+            "failed to emit workspace-updated event"
+        );
     }
 
     Ok(workspace)
