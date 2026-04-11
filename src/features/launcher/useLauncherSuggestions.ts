@@ -35,6 +35,15 @@ interface UseLauncherSuggestionsArgs {
 }
 
 export function useLauncherSuggestions(args: UseLauncherSuggestionsArgs) {
+	const {
+		currentFileNeedle,
+		killSearchQuery,
+		launcherMode,
+		setError,
+		suggestionMode,
+		suggestionQuery,
+		textBeforeCaret,
+	} = args;
 	const [actionMatches, setActionMatches] = useState<ActionMatch[]>([]);
 	const [fileMatches, setFileMatches] = useState<FileSearchMatch[]>([]);
 	const [appMatches, setAppMatches] = useState<InstalledAppMatch[]>([]);
@@ -67,9 +76,9 @@ export function useLauncherSuggestions(args: UseLauncherSuggestionsArgs) {
 			setKillMatches(nextSuggestions.killMatches ?? []);
 			setSuggestionsHidden(false);
 			setSelectedIndex(0);
-			args.setError(null);
+			setError(null);
 		},
-		[args.setError],
+		[setError],
 	);
 
 	const warmKillSuggestionsFromCache = useCallback(
@@ -126,14 +135,14 @@ export function useLauncherSuggestions(args: UseLauncherSuggestionsArgs) {
 
 		async function loadSuggestions() {
 			const startedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
-			if (args.suggestionMode === "file") {
+			if (suggestionMode === "file") {
 				setSuggestionLoading(true);
 				try {
-					const nextMatches = await searchFiles(args.currentFileNeedle, 8);
+					const nextMatches = await searchFiles(currentFileNeedle, 8);
 					console.debug("[launcher] file suggestions completed", {
 						elapsedMs:
 							(typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt,
-						queryLength: args.currentFileNeedle.trim().length,
+						queryLength: currentFileNeedle.trim().length,
 						resultCount: nextMatches.length,
 					});
 					if (!cancelled) {
@@ -142,7 +151,7 @@ export function useLauncherSuggestions(args: UseLauncherSuggestionsArgs) {
 				} catch (loadError) {
 					if (!cancelled) {
 						resetSuggestions();
-						args.setError(getErrorMessage(loadError, "文件搜索失败"));
+						setError(getErrorMessage(loadError, "文件搜索失败"));
 					}
 				} finally {
 					if (!cancelled) {
@@ -153,19 +162,19 @@ export function useLauncherSuggestions(args: UseLauncherSuggestionsArgs) {
 				return;
 			}
 
-			if (args.suggestionMode === "action") {
+			if (suggestionMode === "action") {
 				setSuggestionLoading(true);
 				try {
-					const nextMatches = await matchActions(args.suggestionQuery);
+					const nextMatches = await matchActions(suggestionQuery);
 					console.debug("[launcher] action suggestions completed", {
 						elapsedMs:
 							(typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt,
-						queryLength: args.suggestionQuery.rawText.trim().length,
+						queryLength: suggestionQuery.rawText.trim().length,
 						resultCount: nextMatches.length,
 					});
 					if (!cancelled) {
 						showSuggestions({
-							actionMatches: args.suggestionQuery.rawText.trim().startsWith("/")
+							actionMatches: suggestionQuery.rawText.trim().startsWith("/")
 								? nextMatches
 								: nextMatches.slice(0, 8),
 						});
@@ -173,7 +182,7 @@ export function useLauncherSuggestions(args: UseLauncherSuggestionsArgs) {
 				} catch (loadError) {
 					if (!cancelled) {
 						resetSuggestions();
-						args.setError(getErrorMessage(loadError, "动作匹配失败"));
+						setError(getErrorMessage(loadError, "动作匹配失败"));
 					}
 				} finally {
 					if (!cancelled) {
@@ -184,14 +193,14 @@ export function useLauncherSuggestions(args: UseLauncherSuggestionsArgs) {
 				return;
 			}
 
-			if (args.suggestionMode === "app") {
+			if (suggestionMode === "app") {
 				setSuggestionLoading(true);
 				try {
-					const nextMatches = await searchApps(args.textBeforeCaret, 8);
+					const nextMatches = await searchApps(textBeforeCaret, 8);
 					console.debug("[launcher] app suggestions completed", {
 						elapsedMs:
 							(typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt,
-						queryLength: args.textBeforeCaret.trim().length,
+						queryLength: textBeforeCaret.trim().length,
 						resultCount: nextMatches.length,
 					});
 					if (!cancelled) {
@@ -200,7 +209,7 @@ export function useLauncherSuggestions(args: UseLauncherSuggestionsArgs) {
 				} catch (loadError) {
 					if (!cancelled) {
 						resetSuggestions();
-						args.setError(getErrorMessage(loadError, "应用搜索失败"));
+						setError(getErrorMessage(loadError, "应用搜索失败"));
 					}
 				} finally {
 					if (!cancelled) {
@@ -211,19 +220,19 @@ export function useLauncherSuggestions(args: UseLauncherSuggestionsArgs) {
 				return;
 			}
 
-			if (args.suggestionMode === "kill") {
+			if (suggestionMode === "kill") {
 				setSuggestionLoading(true);
 				try {
-					const nextMatches = await searchProcesses(args.killSearchQuery, 8);
+					const nextMatches = await searchProcesses(killSearchQuery, 8);
 					console.debug("[launcher] kill suggestions completed", {
 						elapsedMs:
 							(typeof performance !== "undefined" ? performance.now() : Date.now()) - startedAt,
-						queryLength: args.killSearchQuery.trim().length,
+						queryLength: killSearchQuery.trim().length,
 						resultCount: nextMatches.length,
 					});
 					if (!cancelled) {
 						killSuggestionCacheRef.current.set(
-							args.killSearchQuery.trim().toLowerCase(),
+							killSearchQuery.trim().toLowerCase(),
 							nextMatches,
 						);
 						showSuggestions({ killMatches: nextMatches });
@@ -231,7 +240,7 @@ export function useLauncherSuggestions(args: UseLauncherSuggestionsArgs) {
 				} catch (loadError) {
 					if (!cancelled) {
 						resetSuggestions();
-						args.setError(getErrorMessage(loadError, "进程搜索失败"));
+						setError(getErrorMessage(loadError, "进程搜索失败"));
 					}
 				} finally {
 					if (!cancelled) {
@@ -242,7 +251,7 @@ export function useLauncherSuggestions(args: UseLauncherSuggestionsArgs) {
 				return;
 			}
 
-			if (!args.launcherMode) {
+			if (!launcherMode) {
 				resetSuggestions();
 				setSuggestionLoading(false);
 				return;
@@ -252,8 +261,8 @@ export function useLauncherSuggestions(args: UseLauncherSuggestionsArgs) {
 			setSuggestionLoading(false);
 		}
 
-		if (args.suggestionMode === "file") {
-			if (!isFileSearchReady(args.currentFileNeedle)) {
+		if (suggestionMode === "file") {
+			if (!isFileSearchReady(currentFileNeedle)) {
 				resetSuggestions(true);
 				setSuggestionLoading(false);
 				return () => {
@@ -264,8 +273,8 @@ export function useLauncherSuggestions(args: UseLauncherSuggestionsArgs) {
 			debounceTimer = window.setTimeout(() => {
 				void loadSuggestions();
 			}, fileSearchDebounceMs);
-		} else if (args.suggestionMode === "app") {
-			if (!isAppSearchReady(args.textBeforeCaret)) {
+		} else if (suggestionMode === "app") {
+			if (!isAppSearchReady(textBeforeCaret)) {
 				resetSuggestions(true);
 				setSuggestionLoading(false);
 				return () => {
@@ -276,8 +285,8 @@ export function useLauncherSuggestions(args: UseLauncherSuggestionsArgs) {
 			debounceTimer = window.setTimeout(() => {
 				void loadSuggestions();
 			}, appSearchDebounceMs);
-		} else if (args.suggestionMode === "kill") {
-			if (!isKillSearchReady(args.killSearchQuery)) {
+		} else if (suggestionMode === "kill") {
+			if (!isKillSearchReady(killSearchQuery)) {
 				resetSuggestions(true);
 				setSuggestionLoading(false);
 				return () => {
@@ -285,11 +294,11 @@ export function useLauncherSuggestions(args: UseLauncherSuggestionsArgs) {
 				};
 			}
 
-			warmKillSuggestionsFromCache(args.killSearchQuery);
+			warmKillSuggestionsFromCache(killSearchQuery);
 			debounceTimer = window.setTimeout(() => {
 				void loadSuggestions();
 			}, killSearchDebounceMs);
-		} else if (args.suggestionMode === "action") {
+		} else if (suggestionMode === "action") {
 			void loadSuggestions();
 		} else {
 			resetSuggestions();
@@ -303,13 +312,13 @@ export function useLauncherSuggestions(args: UseLauncherSuggestionsArgs) {
 			}
 		};
 	}, [
-		args.currentFileNeedle,
-		args.killSearchQuery,
-		args.launcherMode,
-		args.setError,
-		args.suggestionMode,
-		args.suggestionQuery,
-		args.textBeforeCaret,
+		currentFileNeedle,
+		killSearchQuery,
+		launcherMode,
+		setError,
+		suggestionMode,
+		suggestionQuery,
+		textBeforeCaret,
 		resetSuggestions,
 		showSuggestions,
 		warmKillSuggestionsFromCache,

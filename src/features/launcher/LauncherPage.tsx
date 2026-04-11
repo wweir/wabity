@@ -1032,7 +1032,7 @@ export function LauncherPage({
 				setResult(null);
 			}
 		},
-		[activeSessionId, restoreLauncherBlurAutoHide],
+		[activeSessionId, restoreLauncherBlurAutoHide, setSuggestionsHidden],
 	);
 
 	const focusLauncherInput = useCallback(() => {
@@ -1150,6 +1150,7 @@ export function LauncherPage({
 		isTrackedLauncherRequestCurrent,
 		resetSuggestions,
 		resetQaConversation,
+		setSuggestionsHidden,
 	]);
 
 	const dismissLauncher = useCallback(
@@ -1396,7 +1397,7 @@ export function LauncherPage({
 	useEffect(() => {
 		setSuggestionsHidden(false);
 		setSelectedIndex(0);
-	}, [suggestionMode, textBeforeCaret]);
+	}, [setSelectedIndex, setSuggestionsHidden, suggestionMode, textBeforeCaret]);
 
 	useEffect(() => {
 		if (flattenedClipboardEntries.length === 0) {
@@ -1427,7 +1428,7 @@ export function LauncherPage({
 		if (selectedIndex >= suggestionCount) {
 			setSelectedIndex(suggestionCount - 1);
 		}
-	}, [selectedIndex, suggestionCount]);
+	}, [selectedIndex, setSelectedIndex, suggestionCount]);
 
 	useLayoutEffect(() => {
 		if (!hasSuggestions) {
@@ -1689,7 +1690,7 @@ export function LauncherPage({
 			active = false;
 			unlistenCallbacks.forEach((unlisten) => unlisten());
 		};
-	}, []);
+	}, [setSelectedIndex, setSuggestionsHidden]);
 
 	useEffect(() => {
 		let active = true;
@@ -2441,7 +2442,7 @@ export function LauncherPage({
 				shouldCloseLauncher: false,
 			});
 		},
-		[replaceKillPayload, resetSuggestions, updateRawText, visibleKillMatches],
+		[replaceKillPayload, resetSuggestions, setSelectedIndex, updateRawText, visibleKillMatches],
 	);
 
 	function acceptCompletion() {
