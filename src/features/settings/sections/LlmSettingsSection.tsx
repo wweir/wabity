@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, RefObject } from "react";
 import type {
 	BuiltinLlmProviderTemplate,
@@ -45,8 +45,6 @@ export interface LlmSettingsSectionProps {
 	savingLlm: boolean;
 	openLlmModelPickerId: string | null;
 	llmModelMenuRef: RefObject<HTMLDivElement | null>;
-	selectedLlmProviderTriggersRagReindex: boolean;
-	selectedLlmProviderUsedByPersistedRag: boolean;
 	builtinLlmTemplates: BuiltinLlmProviderTemplate[];
 	onAddLlmProvider: () => void;
 	onSelectLlmProvider: (providerId: string) => void;
@@ -147,6 +145,7 @@ export function LlmSettingsSection({
 	getLlmProviderModelPlaceholder,
 }: LlmSettingsSectionProps) {
 	const [llmModelFilter, setLlmModelFilter] = useState("");
+	const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
 
 	function handleProviderCatalogKeyDown(
 		event: ReactKeyboardEvent<HTMLButtonElement>,
@@ -237,38 +236,65 @@ export function LlmSettingsSection({
 		options[nextIndex]?.focus();
 	}
 
-	function focusRenderedLlmModelOption(
-		providerId: string,
-		target: "selected" | "first" | "last" = "selected",
-	) {
-		requestAnimationFrame(() => {
-			requestAnimationFrame(() => {
-				const listbox = document.getElementById(`llm-provider-model-menu-${providerId}`);
-				if (!(listbox instanceof HTMLElement)) {
-					return;
-				}
+	const pendingModelFocusRef = useRef<{
+		providerId: string;
+		target: "selected" | "first" | "last";
+	} | null>(null);
 
-				const options = Array.from(listbox.querySelectorAll<HTMLButtonElement>('[role="option"]'));
-				if (options.length === 0) {
-					return;
-				}
+	const focusRenderedLlmModelOption = useCallback(
+		(providerId: string, target: "selected" | "first" | "last" = "selected") => {
+			pendingModelFocusRef.current = { providerId, target };
+		},
+		[],
+	);
 
-				if (target === "first") {
-					options[0]?.focus();
-					return;
-				}
+	useEffect(() => {
+		const pending = pendingModelFocusRef.current;
+		if (!pending) {
+			return;
+		}
 
-				if (target === "last") {
-					options[options.length - 1]?.focus();
-					return;
-				}
+		const listbox = document.getElementById(`llm-provider-model-menu-${pending.providerId}`);
+		if (!(listbox instanceof HTMLElement)) {
+			return;
+		}
 
-				const selectedOption =
-					options.find((option) => option.getAttribute("aria-selected") === "true") ?? options[0];
-				selectedOption?.focus();
-			});
+		function tryFocus() {
+			const options = Array.from(listbox!.querySelectorAll<HTMLButtonElement>('[role="option"]'));
+			if (options.length === 0) {
+				return false;
+			}
+
+			pendingModelFocusRef.current = null;
+
+			if (pending!.target === "first") {
+				options[0]?.focus();
+				return true;
+			}
+
+			if (pending!.target === "last") {
+				options[options.length - 1]?.focus();
+				return true;
+			}
+
+			const selectedOption =
+				options.find((option) => option.getAttribute("aria-selected") === "true") ?? options[0];
+			selectedOption?.focus();
+			return true;
+		}
+
+		if (tryFocus()) {
+			return;
+		}
+
+		const observer = new MutationObserver(() => {
+			if (tryFocus()) {
+				observer.disconnect();
+			}
 		});
-	}
+		observer.observe(listbox, { childList: true, subtree: true });
+		return () => observer.disconnect();
+	}, [openLlmModelPickerId]);
 
 	function formatLlmProviderCatalogEndpoint(baseUrl: string) {
 		const trimmed = baseUrl.trim();
@@ -331,9 +357,6 @@ export function LlmSettingsSection({
 	const saveStatusDetail =
 		selectedProviderIssueCount > 0 ? `${selectedProviderIssueCount} 个问题待修复` : "";
 	const selectedProviderHasModel = selectedLlmProvider?.model.trim().length ? true : false;
-	const selectedProviderProtocolLabel = selectedLlmProviderKind
-		? getLlmProviderKindLabel(selectedLlmProviderKind)
-		: "";
 	const selectedProviderOcrReady = selectedLlmProvider
 		? providerCanHandleOcr(selectedLlmProvider)
 		: false;
@@ -365,121 +388,47 @@ export function LlmSettingsSection({
 		filteredLlmProviderModels.length === selectedLlmProviderModels.length
 			? `远端目录 · 已拉取 ${selectedLlmProviderModels.length} 个模型`
 			: `远端目录 · 显示 ${filteredLlmProviderModels.length} / ${selectedLlmProviderModels.length} 个模型`;
-	const selectedProviderRouteSummary = selectedLlmProvider
-		? providerIsLlmModel(selectedLlmProvider)
-			? selectedLlmProviderKind === "llm_chat_completions"
-				? selectedProviderHasModel
-					? "这是普通 LLM 条目。它会出现在翻译和文档问答的模型列表里，但不会进入 OCR 列表。"
-					: "这是普通 LLM 条目。补全模型名后，它才会出现在翻译和文档问答的模型列表里；OCR 仍不可用。"
-				: selectedLlmProviderKind === "llm_responses_stateful"
-					? selectedProviderHasModel
-						? "这是普通 LLM 条目。它会走 responses stateful，并可供翻译和文档问答复用；OCR 资格取决于下方多模态开关。"
-						: "这是普通 LLM 条目。补全模型名后，它会按 responses stateful 进入翻译和文档问答列表；OCR 资格再由下方多模态开关决定。"
-					: selectedProviderHasModel
-						? "这是普通 LLM 条目。它会走 responses stateless，并可供翻译和文档问答复用；OCR 资格取决于下方多模态开关。"
-						: "这是普通 LLM 条目。补全模型名后，它会按 responses stateless 进入翻译和文档问答列表；OCR 资格再由下方多模态开关决定。"
-			: selectedProviderHasModel
-				? "这是 Embedding 条目，只会出现在 RAG 的 Embedding 列表里，不会进入翻译、文档问答或 OCR。"
-				: "这是 Embedding 条目。补全模型名后，它才会出现在 RAG 的 Embedding 列表里；不会进入翻译、文档问答或 OCR。"
-		: "";
+	const isLlmModel = selectedLlmProvider ? providerIsLlmModel(selectedLlmProvider) : false;
+	const ocrAvailable =
+		isLlmModel && selectedLlmProviderKind !== "llm_chat_completions";
+
+	function getAvailabilityTone(available: boolean): "success" | "info" | "warn" {
+		if (!available) {
+			return "warn";
+		}
+
+		return selectedProviderHasModel ? "success" : "info";
+	}
+
 	const selectedProviderAvailabilityItems = selectedLlmProvider
 		? [
-				{
-					key: "translation",
-					label: "翻译",
-					status: providerIsLlmModel(selectedLlmProvider)
-						? selectedProviderHasModel
-							? "可选"
-							: "待补全"
-						: "不可用",
-					statusTone: providerIsLlmModel(selectedLlmProvider)
-						? selectedProviderHasModel
-							? "success"
-							: "info"
-						: "warn",
-					description: providerIsLlmModel(selectedLlmProvider)
-						? selectedProviderHasModel
-							? "会出现在 AI 功能页的翻译模型下拉里。"
-							: "先补全模型名，之后才会出现在 AI 功能页的翻译模型下拉里。"
-						: "Embedding 条目不会出现在翻译模型下拉里。",
-				},
-				{
-					key: "question-answer",
-					label: "文档问答",
-					status: providerIsLlmModel(selectedLlmProvider)
-						? selectedProviderHasModel
-							? "可选"
-							: "待补全"
-						: "不可用",
-					statusTone: providerIsLlmModel(selectedLlmProvider)
-						? selectedProviderHasModel
-							? "success"
-							: "info"
-						: "warn",
-					description: providerIsLlmModel(selectedLlmProvider)
-						? selectedProviderHasModel
-							? "会出现在 AI 功能页的文档问答模型下拉里。"
-							: "先补全模型名，之后才会出现在 AI 功能页的文档问答模型下拉里。"
-						: "Embedding 条目不会出现在文档问答模型下拉里。",
-				},
+				{ key: "translation", label: "翻译", tone: getAvailabilityTone(isLlmModel) },
+				{ key: "question-answer", label: "文档问答", tone: getAvailabilityTone(isLlmModel) },
 				{
 					key: "ocr",
 					label: "OCR",
-					status: !providerIsLlmModel(selectedLlmProvider)
-						? "不可用"
-						: selectedLlmProviderKind === "llm_chat_completions"
-							? "不可用"
-							: !selectedProviderHasModel
-								? "待补全"
-								: selectedProviderOcrReady
-									? "可选"
-									: "待开启",
-					statusTone:
-						!providerIsLlmModel(selectedLlmProvider) ||
-						selectedLlmProviderKind === "llm_chat_completions"
-							? "warn"
-							: !selectedProviderHasModel || !selectedProviderOcrReady
-								? "info"
-								: "success",
-					description: !providerIsLlmModel(selectedLlmProvider)
-						? "Embedding 条目不会出现在通用页的 OCR 模型下拉里。"
-						: selectedLlmProviderKind === "llm_chat_completions"
-							? "OCR 只接受 responses 协议；chat/completions 条目不会进入 OCR 列表。"
-							: !selectedProviderHasModel
-								? "先补全模型名，再决定是否加入通用页的 OCR 模型下拉。"
-								: selectedProviderOcrReady
-									? "已经满足条件，会出现在通用页的 OCR 模型下拉里。"
-									: "打开下方“OCR 多模态资格”后，才会出现在通用页的 OCR 模型下拉里。",
+					tone: getAvailabilityTone(ocrAvailable && selectedProviderOcrReady),
 				},
 				{
 					key: "rag-embedding",
 					label: "RAG Embedding",
-					status: providerIsLlmModel(selectedLlmProvider)
-						? "不可用"
-						: selectedProviderHasModel
-							? "可选"
-							: "待补全",
-					statusTone: providerIsLlmModel(selectedLlmProvider)
-						? "warn"
-						: selectedProviderHasModel
-							? "success"
-							: "info",
-					description: providerIsLlmModel(selectedLlmProvider)
-						? "只有 Embedding 条目会出现在 RAG 页的 Embedding 列表里。"
-						: selectedProviderHasModel
-							? "会出现在 RAG 页的 Embedding 条目列表里。"
-							: "先补全模型名，之后才会出现在 RAG 页的 Embedding 条目列表里。",
+					tone: getAvailabilityTone(!isLlmModel),
 				},
 			]
 		: [];
-	const ocrToggleDescription = selectedProviderOcrReady
-		? "已开启。这个条目现在会出现在通用页的 OCR 模型下拉里。"
-		: selectedProviderHasModel
-			? "打开后，这个条目才会出现在通用页的 OCR 模型下拉里。"
-			: "先补全模型名，才能决定是否加入通用页的 OCR 模型下拉。";
+	const modelPanelRef = useCallback((node: HTMLDivElement | null) => {
+		if (!node) {
+			return;
+		}
+
+		const rect = node.getBoundingClientRect();
+		const available = window.innerHeight - rect.top - 24;
+		node.style.maxHeight = `${Math.max(120, Math.min(260, available))}px`;
+	}, []);
 
 	useEffect(() => {
 		setLlmModelFilter("");
+		setConfirmingDeleteId(null);
 	}, [selectedLlmProvider?.id, isSelectedModelPickerOpen]);
 
 	return (
@@ -523,13 +472,14 @@ export function LlmSettingsSection({
 			) : (
 				<div className="settings-acp-form-layout settings-llm-layout">
 					<aside
+						aria-labelledby="llm-catalog-title"
 						className="settings-acp-sidebar settings-acp-sidebar-secondary settings-llm-sidebar"
 						id="llm-catalog"
 						ref={bindSectionBlockRef("llm-catalog")}
 					>
 						<div className="settings-acp-sidebar-header">
 							<div className="settings-acp-sidebar-copy">
-								<h3 className="settings-subsection-title">模型条目</h3>
+								<h3 className="settings-subsection-title" id="llm-catalog-title">模型条目</h3>
 							</div>
 							<button
 								className="settings-button settings-button-compact"
@@ -651,13 +601,35 @@ export function LlmSettingsSection({
 												恢复已保存
 											</button>
 										) : null}
-										<button
-											className="settings-text-link settings-text-link-action settings-text-link-danger"
-											onClick={() => onRemoveLlmProvider(selectedLlmProvider.id)}
-											type="button"
-										>
-											删除条目
-										</button>
+										{confirmingDeleteId === selectedLlmProvider.id ? (
+											<>
+												<button
+													className="settings-text-link settings-text-link-action settings-text-link-danger"
+													onClick={() => {
+														onRemoveLlmProvider(selectedLlmProvider.id);
+														setConfirmingDeleteId(null);
+													}}
+													type="button"
+												>
+													确认删除
+												</button>
+												<button
+													className="settings-text-link settings-text-link-action"
+													onClick={() => setConfirmingDeleteId(null)}
+													type="button"
+												>
+													取消
+												</button>
+											</>
+										) : (
+											<button
+												className="settings-text-link settings-text-link-action settings-text-link-danger"
+												onClick={() => setConfirmingDeleteId(selectedLlmProvider.id)}
+												type="button"
+											>
+												删除条目
+											</button>
+										)}
 										{llmHasUnsavedChanges ? (
 											<button
 												className="settings-button"
@@ -848,6 +820,7 @@ export function LlmSettingsSection({
 												<label className="settings-label settings-label-stacked settings-llm-form-row">
 													<span>API Key</span>
 													<input
+														aria-describedby="llm-provider-api-key-help"
 														autoComplete="off"
 														className="settings-input settings-input-wide settings-input-mono"
 														disabled={savingLlm}
@@ -863,6 +836,12 @@ export function LlmSettingsSection({
 														type="password"
 														value={selectedLlmProvider.apiKey}
 													/>
+													<span
+														className="settings-help-text settings-help-text-tight"
+														id="llm-provider-api-key-help"
+													>
+														来自供应商控制台的密钥，仅存储在本地配置文件中。
+													</span>
 												</label>
 											</div>
 										</div>
@@ -980,6 +959,7 @@ export function LlmSettingsSection({
 																aria-labelledby={`llm-provider-model-label-${selectedLlmProvider.id}`}
 																className="settings-combobox-panel settings-llm-model-panel"
 																id={`llm-provider-model-menu-${selectedLlmProvider.id}`}
+																ref={modelPanelRef}
 																role="listbox"
 															>
 																<div className="settings-llm-model-panel-header">
@@ -1134,43 +1114,16 @@ export function LlmSettingsSection({
 														{providerKindSummary}
 													</span>
 												</label>
-											</div>
-										</div>
-
-										<div className="settings-rag-editor-panel settings-llm-editor-panel">
-											<div className="settings-editor-card-header settings-task-card-header">
-												<div className="settings-task-card-title-row">
-													<strong className="settings-agent-name">会出现在这些位置</strong>
-													<span className="settings-status-chip">
-														{selectedProviderProtocolLabel}
-													</span>
-												</div>
-												<span className="settings-help-text settings-help-text-tight">
-													{selectedProviderRouteSummary}
-												</span>
-											</div>
-											<div className="settings-agent-fields settings-llm-panel-fields">
-												<div className="settings-llm-availability-list">
-													{selectedProviderAvailabilityItems.map((item) => (
-														<div className="settings-llm-availability-item" key={item.key}>
-															<div className="settings-llm-availability-item-header">
-																<strong>{item.label}</strong>
-																<span
-																	className={`settings-status-chip settings-status-chip-${item.statusTone}`}
-																>
-																	{item.status}
-																</span>
-															</div>
-															<span className="settings-agent-meta">{item.description}</span>
-														</div>
-													))}
-												</div>
 												{providerIsLlmModel(selectedLlmProvider) &&
 												selectedLlmProviderKind !== "llm_chat_completions" ? (
-													<label className="settings-llm-capability-toggle settings-llm-availability-toggle">
+													<label className="settings-llm-capability-toggle">
 														<div className="settings-llm-capability-copy">
-															<strong>OCR 多模态资格</strong>
-															<span className="settings-agent-meta">{ocrToggleDescription}</span>
+															<strong>OCR 多模态</strong>
+															<span className="settings-agent-meta">
+																{selectedProviderOcrReady
+																	? "已开启，可被 OCR 选用。"
+																	: "开启后可被 OCR 选用。"}
+															</span>
 														</div>
 														<input
 															checked={selectedLlmProvider.supportsMultimodal}
@@ -1189,6 +1142,17 @@ export function LlmSettingsSection({
 														/>
 													</label>
 												) : null}
+												<div className="settings-llm-availability-badges">
+													<span className="settings-agent-meta">可用于</span>
+													{selectedProviderAvailabilityItems.map((item) => (
+														<span
+															className={`settings-status-chip settings-status-chip-${item.tone}`}
+															key={item.key}
+														>
+															{item.label}
+														</span>
+													))}
+												</div>
 											</div>
 										</div>
 									</div>

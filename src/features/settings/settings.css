@@ -474,7 +474,7 @@
 	left: 2px;
 	width: 20px;
 	height: 20px;
-	background: white;
+	background: var(--surface-card);
 	border-radius: 50%;
 	transition: transform 0.2s ease;
 	box-shadow: 0 1px 3px color-mix(in srgb, var(--text-strong) 15%, transparent);
@@ -1037,7 +1037,8 @@
 }
 
 .settings-editor-card.settings-editor-card-shortcuts,
-.settings-editor-card.settings-task-card {
+.settings-editor-card.settings-task-card,
+.settings-editor-card.settings-about-card {
 	grid-template-columns: minmax(0, 1fr);
 }
 
@@ -2255,78 +2256,6 @@
 	max-width: 100%;
 }
 
-.settings-shortcut-summary-card {
-	gap: 14px;
-}
-
-.settings-shortcut-summary-header {
-	align-items: center;
-}
-
-.settings-shortcut-summary-list {
-	display: grid;
-	gap: 10px;
-}
-
-.settings-shortcut-summary-item {
-	appearance: none;
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: 14px;
-	width: 100%;
-	padding: 12px 14px;
-	border: 1px solid var(--border-soft);
-	border-radius: 14px;
-	background: var(--surface-panel);
-	text-align: left;
-	cursor: pointer;
-}
-
-.settings-shortcut-summary-item:hover {
-	border-color: var(--border-selected);
-	background: color-mix(in srgb, var(--surface-card-selected) 44%, var(--surface-panel));
-}
-
-.settings-shortcut-summary-item-copy {
-	display: grid;
-	gap: 4px;
-	min-width: 0;
-}
-
-.settings-shortcut-summary-item-label {
-	color: var(--text-primary);
-	font-size: var(--text-sm);
-	font-weight: 600;
-}
-
-.settings-shortcut-summary-item-value {
-	color: var(--text-secondary);
-	font-family: var(--font-mono);
-	font-size: var(--text-xs);
-	overflow-wrap: anywhere;
-}
-
-.settings-shortcut-summary-item-message {
-	color: var(--text-muted);
-	font-size: var(--text-xs);
-	line-height: 1.4;
-}
-
-.settings-shortcut-summary-state {
-	flex-shrink: 0;
-	font-size: var(--text-xs);
-	font-weight: 700;
-}
-
-.settings-shortcut-summary-state.is-ok {
-	color: var(--success-strong);
-}
-
-.settings-shortcut-summary-state.is-error {
-	color: var(--error-strong);
-}
-
 .settings-main-title {
 	margin: 0;
 	color: var(--text-strong);
@@ -2922,6 +2851,30 @@
 	color: var(--text-contrast);
 }
 
+.settings-status-chip-success {
+	background: var(--status-success-bg);
+	color: var(--status-success-fg);
+}
+
+.settings-status-chip-info {
+	background: var(--status-info-bg);
+	color: var(--status-info-fg);
+}
+
+.settings-status-chip-warn {
+	background: var(--status-warn-bg);
+	color: var(--status-warn-fg);
+}
+
+.settings-llm-availability-badges {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+	padding: 10px 0 0;
+	border-top: 1px solid var(--border-soft);
+}
+
 .settings-help-text,
 .settings-agent-meta,
 .settings-install-guide-summary,
@@ -3094,7 +3047,7 @@
 }
 
 .settings-text-link-action-quiet {
-	min-height: 40px;
+	min-height: 44px;
 	padding: 6px 10px;
 	border-color: var(--border-soft);
 	background: transparent;
@@ -3329,40 +3282,6 @@
 	padding-top: 10px;
 }
 
-.settings-llm-availability-list {
-	display: grid;
-	gap: 0;
-}
-
-.settings-llm-availability-item {
-	display: grid;
-	gap: 4px;
-	padding: 10px 0;
-	border-top: 1px solid var(--border-soft);
-}
-
-.settings-llm-availability-item:first-child {
-	padding-top: 0;
-	border-top: 0;
-}
-
-.settings-llm-availability-item:last-child {
-	padding-bottom: 0;
-}
-
-.settings-llm-availability-item-header {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: 8px;
-	flex-wrap: wrap;
-}
-
-.settings-llm-availability-toggle {
-	margin-top: 10px;
-	padding-top: 12px;
-	border-top: 1px solid var(--border-soft);
-}
 
 .settings-shortcut-trigger {
 	background: var(--surface-input);

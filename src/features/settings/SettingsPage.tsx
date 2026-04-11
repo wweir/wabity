@@ -10,12 +10,10 @@ import {
 	getBuiltinMcpServerStatus,
 	getPublicSkillCatalog,
 	getShortcut,
-	getShortcutRuntimeStatus,
 	getWorkspace,
 	hideLauncherWindow,
 	listBuiltinLlmProviderTemplates,
 	listLlmProviderModels,
-	onShortcutRuntimeStatusChanged,
 	onShortcutUpdated,
 	scanRagSources,
 	setShortcut,
@@ -38,8 +36,6 @@ import type {
 	RagScanResult,
 	RagSettings,
 	ShortcutConfig,
-	ShortcutKey,
-	ShortcutRuntimeStatus,
 	WorkspaceState,
 } from "../../lib/tauri/types";
 import { useSettingsWindowFrame } from "./useSettingsWindowFrame";
@@ -56,7 +52,6 @@ import {
 } from "./SettingsSectionViews";
 import {
 	SettingsQuickJumpList,
-	ShortcutSummaryCard,
 	acpAgentOptions,
 	getMcpTransportMeta,
 	getSettingsPanelId,
@@ -153,14 +148,9 @@ import "./settings.css";
 interface SettingsPageProps {
 	onBack: () => void;
 	onAppearanceChange?: (appearance: AppearanceSettings) => void;
-	shortcutRuntimeStatus?: ShortcutRuntimeStatus;
 }
 
-export function SettingsPage({
-	onBack,
-	onAppearanceChange,
-	shortcutRuntimeStatus: shortcutRuntimeStatusProp,
-}: SettingsPageProps) {
+export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) {
 	const [activeSection, setActiveSection] = useState<SettingsSectionId>("general");
 	const [translationPromptExpanded, setTranslationPromptExpanded] = useState(false);
 	const [questionAnswerPromptExpanded, setQuestionAnswerPromptExpanded] = useState(false);
@@ -174,25 +164,6 @@ export function SettingsPage({
 
 	const [shortcutSettings, setShortcutSettings] = useState<ShortcutConfig>(
 		createDefaultShortcutSettings,
-	);
-	const [shortcutRuntimeStatus, setShortcutRuntimeStatus] = useState<ShortcutRuntimeStatus>(
-		shortcutRuntimeStatusProp ?? {
-			toggle_launcher: {
-				configuredShortcut: "Alt+Space",
-				registered: true,
-				message: null,
-			},
-			ocr_translate: {
-				configuredShortcut: "Alt+D",
-				registered: true,
-				message: null,
-			},
-			open_clipboard_history: {
-				configuredShortcut: "Alt+V",
-				registered: true,
-				message: null,
-			},
-		},
 	);
 	const [llmSettings, setLlmSettings] = useState<LlmSettings>(createDefaultLlmSettings);
 	const [builtinLlmTemplates, setBuiltinLlmTemplates] = useState<BuiltinLlmProviderTemplate[]>([]);
@@ -682,9 +653,6 @@ export function SettingsPage({
 		void getShortcut().then((config) => {
 			setShortcutSettings(config);
 		});
-		void getShortcutRuntimeStatus().then((status) => {
-			setShortcutRuntimeStatus(status);
-		});
 		void getAcpAgents().then((catalog) => {
 			const draftAgents = catalog.agents.map((agent) => ({
 				id: agent.id,
@@ -744,13 +712,9 @@ export function SettingsPage({
 		const unlistenPromise = onShortcutUpdated((config) => {
 			setShortcutSettings(config);
 		});
-		const unlistenRuntimeStatusPromise = onShortcutRuntimeStatusChanged((status) => {
-			setShortcutRuntimeStatus(status);
-		});
 
 		return () => {
 			void unlistenPromise.then((unlisten) => unlisten?.());
-			void unlistenRuntimeStatusPromise.then((unlisten) => unlisten?.());
 		};
 	}, [syncAppearanceState]);
 
@@ -815,12 +779,6 @@ export function SettingsPage({
 			window.removeEventListener("keyup", handleKeyUp, true);
 		};
 	}, [editingShortcut]);
-
-	useEffect(() => {
-		if (shortcutRuntimeStatusProp) {
-			setShortcutRuntimeStatus(shortcutRuntimeStatusProp);
-		}
-	}, [shortcutRuntimeStatusProp]);
 
 	useEffect(() => {
 		const nextSelectedLlmProviderId = selectExistingIdOrFirst(
@@ -938,23 +896,6 @@ export function SettingsPage({
 	const handleShortcutClick = (key: keyof ShortcutConfig) => {
 		setEditingShortcut(key);
 	};
-
-	const handleJumpToShortcutSettings = useCallback(
-		(key?: ShortcutKey) => {
-			scrollToSectionBlock("general-shortcuts");
-			if (key) {
-				const triggerIdByKey: Record<ShortcutKey, string> = {
-					toggle_launcher: "shortcut-toggle-launcher-trigger",
-					ocr_translate: "shortcut-ocr-translate-trigger",
-					open_clipboard_history: "shortcut-open-clipboard-history-trigger",
-				};
-				window.setTimeout(() => {
-					document.getElementById(triggerIdByKey[key])?.focus();
-				}, 180);
-			}
-		},
-		[scrollToSectionBlock],
-	);
 
 	const isRecording = (key: keyof ShortcutConfig) => editingShortcut === key;
 	const llmValidation = validateLlmSettings(llmSettings, builtinLlmTemplates);
@@ -1173,15 +1114,6 @@ export function SettingsPage({
 				{ label: "警告", value: String(ragScanResult.warningCount) },
 			]
 		: [];
-	const selectedLlmProviderUsedByPersistedRag =
-		selectedLlmProvider !== null &&
-		persistedAppSettings.rag.embeddingProviderId === selectedLlmProvider.id;
-	const selectedLlmProviderUsedByRagDraft =
-		selectedLlmProvider !== null && ragSettings.embeddingProviderId === selectedLlmProvider.id;
-	const selectedLlmProviderTriggersRagReindex =
-		selectedLlmProvider !== null &&
-		providerCanHandleRagEmbedding(selectedLlmProvider) &&
-		(selectedLlmProviderUsedByPersistedRag || selectedLlmProviderUsedByRagDraft);
 	const selectedAgent = acpAgents.find((agent) => agent.id === selectedAgentId) ?? null;
 	const selectedMcpServer = mcpServers.find((server) => server.id === selectedMcpServerId) ?? null;
 	const sectionSummaryText: Record<SettingsSectionId, string> = {
@@ -1204,7 +1136,7 @@ export function SettingsPage({
 		acp: "本地 Agent 启动命令与模式。",
 		mcp: "全局 MCP 服务清单。",
 		skills: "浏览公共 skill 目录。",
-		about: "版本与产品定位。",
+		about: "版本与项目信息。",
 	};
 	const activeSectionLabel =
 		settingsSections.find((section) => section.id === activeSection)?.label ?? "设置";
@@ -1775,13 +1707,6 @@ export function SettingsPage({
 							</div>
 
 							{activeSection === "general" ? (
-								<ShortcutSummaryCard
-									onJumpToShortcuts={handleJumpToShortcutSettings}
-									runtimeStatus={shortcutRuntimeStatus}
-								/>
-							) : null}
-
-							{activeSection === "general" ? (
 								<GeneralSettingsSection
 									appearanceSettings={appearanceSettings}
 									bindSectionBlockRef={bindSectionBlockRef}
@@ -1879,8 +1804,6 @@ export function SettingsPage({
 									selectedLlmProviderKind={selectedLlmProviderKind}
 									selectedLlmProviderModels={selectedLlmProviderModels}
 									selectedLlmProviderModelsError={selectedLlmProviderModelsError}
-									selectedLlmProviderTriggersRagReindex={selectedLlmProviderTriggersRagReindex}
-									selectedLlmProviderUsedByPersistedRag={selectedLlmProviderUsedByPersistedRag}
 									summarizeLlmProviderProfile={summarizeLlmProviderProfile}
 								/>
 							) : null}
@@ -1994,7 +1917,10 @@ export function SettingsPage({
 							) : null}
 
 							{activeSection === "about" ? (
-								<AboutSettingsSection bindSectionBlockRef={bindSectionBlockRef} />
+								<AboutSettingsSection
+									bindSectionBlockRef={bindSectionBlockRef}
+									onOpenUrl={(url) => void openUrl(url)}
+								/>
 							) : null}
 						</div>
 					</div>

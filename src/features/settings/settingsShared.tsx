@@ -1,10 +1,6 @@
 import type { ReactNode } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import type {
-	AcpAgentLaunchMode,
-	ShortcutConfig,
-	ShortcutRuntimeStatus,
-} from "../../lib/tauri/types";
+import type { AcpAgentLaunchMode } from "../../lib/tauri/types";
 import type {
 	AcpMcpServerDraft,
 	McpTransport,
@@ -45,7 +41,7 @@ export const settingsQuickLinks: Readonly<Record<SettingsSectionId, readonly Set
 		],
 		mcp: [],
 		skills: [],
-		about: [{ id: "about-overview", label: "关于 Wabity", hint: "版本与定位" }],
+		about: [{ id: "about-overview", label: "关于 Wabity", hint: "版本与项目" }],
 	} as const;
 
 function joinClassNames(...classNames: Array<string | false | null | undefined>): string {
@@ -258,84 +254,6 @@ export function ShortcutRecorderField({
 						{actionLabel}
 					</span>
 				</button>
-			</div>
-		</div>
-	);
-}
-
-const shortcutSummaryItems: Array<{
-	key: keyof ShortcutConfig;
-	label: string;
-}> = [
-	{ key: "toggle_launcher", label: "启动器" },
-	{ key: "ocr_translate", label: "翻译" },
-	{ key: "open_clipboard_history", label: "历史剪贴板" },
-];
-
-export function ShortcutSummaryCard({
-	runtimeStatus,
-	onJumpToShortcuts,
-}: {
-	runtimeStatus: ShortcutRuntimeStatus;
-	onJumpToShortcuts: (key?: keyof ShortcutConfig) => void;
-}) {
-	const failureCount = shortcutSummaryItems.filter(
-		(item) => !runtimeStatus[item.key].registered,
-	).length;
-
-	return (
-		<div className="settings-editor-card settings-editor-card-subtle settings-shortcut-summary-card">
-			<div className="settings-editor-card-header settings-shortcut-summary-header">
-				<div className="settings-general-card-copy">
-					<h3 className="settings-subsection-title">当前快捷键</h3>
-					<span className="settings-help-text settings-help-text-tight">
-						这里显示已保存快捷键及其运行时是否真正生效。
-					</span>
-				</div>
-				<button
-					className="settings-button settings-button-quiet"
-					onClick={() => onJumpToShortcuts()}
-					type="button"
-				>
-					跳到快捷键设置
-				</button>
-			</div>
-			{failureCount > 0 ? (
-				<div className="settings-banner settings-banner-warn">
-					有 {failureCount} 个快捷键当前不可用，请修改冲突项。
-				</div>
-			) : null}
-			<div className="settings-shortcut-summary-list">
-				{shortcutSummaryItems.map((item) => {
-					const entry = runtimeStatus[item.key];
-					return (
-						<button
-							className="settings-shortcut-summary-item"
-							key={item.key}
-							onClick={() => onJumpToShortcuts(item.key)}
-							type="button"
-						>
-							<span className="settings-shortcut-summary-item-copy">
-								<span className="settings-shortcut-summary-item-label">{item.label}</span>
-								<span className="settings-shortcut-summary-item-value">
-									{entry.configuredShortcut}
-								</span>
-								{entry.message ? (
-									<span className="settings-shortcut-summary-item-message">{entry.message}</span>
-								) : null}
-							</span>
-							<span
-								className={
-									entry.registered
-										? "settings-shortcut-summary-state is-ok"
-										: "settings-shortcut-summary-state is-error"
-								}
-							>
-								{entry.registered ? "已生效" : "注册失败"}
-							</span>
-						</button>
-					);
-				})}
 			</div>
 		</div>
 	);

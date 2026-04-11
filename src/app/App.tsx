@@ -173,7 +173,6 @@ export function App() {
 					<SettingsPage
 						onAppearanceChange={setAppearanceSettings}
 						onBack={() => setCurrentView("launcher")}
-						shortcutRuntimeStatus={shortcutRuntimeStatus}
 					/>
 				</Suspense>
 			) : null}
