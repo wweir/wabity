@@ -23,7 +23,7 @@
 
 ### LLM / 设置
 
-- [llm-model-settings.md](/Users/wweir/Sites/Mine/wabity/docs/llm-model-settings.md): 单模型条目建模与兼容迁移
+- [llm-model-settings.md](/Users/wweir/Sites/Mine/wabity/docs/llm-model-settings.md): provider 分组 / model 最小单元建模与兼容迁移
 - [llm-builtin-provider-catalog.md](/Users/wweir/Sites/Mine/wabity/docs/llm-builtin-provider-catalog.md): 内置 provider 模板目录
 
 ### RAG / MCP / ACP

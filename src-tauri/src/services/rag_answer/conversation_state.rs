@@ -5,7 +5,7 @@ use crate::domain::{
     execution::{
         ExecutionCitation, ExecutionConversationState, ExecutionConversationTurn, ExecutionToolCall,
     },
-    settings::{LlmProviderConfig, LlmProviderProtocol},
+    settings::{LlmProviderProtocol, ResolvedLlmModelBinding},
 };
 
 pub(super) struct PreparedConversationState<'a> {
@@ -28,18 +28,18 @@ fn normalize_continuation_scope(continuation_scope: Option<&str>) -> Option<Stri
 }
 
 pub(super) fn provider_continuation_scope(
-    provider: &LlmProviderConfig,
+    binding: ResolvedLlmModelBinding<'_>,
     workspace_root: &Path,
 ) -> String {
     let workspace = workspace_root.to_string_lossy();
     let scope_seed = format!(
         "rag-answer|{}|{}|{}|{}",
-        match provider.protocol {
+        match binding.provider().protocol {
             LlmProviderProtocol::Responses => "responses",
             LlmProviderProtocol::ChatCompletions => "chat_completions",
         },
-        provider.base_url.trim().trim_end_matches('/'),
-        provider.model_name(),
+        binding.provider().base_url.trim().trim_end_matches('/'),
+        binding.model_name().unwrap_or_default(),
         workspace
     );
     format!("{:x}", md5::compute(scope_seed))
@@ -48,10 +48,10 @@ pub(super) fn provider_continuation_scope(
 pub(super) fn prepare_conversation_state<'a>(
     conversation: &'a [ExecutionConversationTurn],
     conversation_state: Option<&ExecutionConversationState>,
-    provider: &LlmProviderConfig,
+    binding: ResolvedLlmModelBinding<'_>,
     workspace_root: &Path,
 ) -> PreparedConversationState<'a> {
-    let expected_scope = provider_continuation_scope(provider, workspace_root);
+    let expected_scope = provider_continuation_scope(binding, workspace_root);
     let scope_matches = conversation_state
         .and_then(|state| normalize_continuation_scope(state.continuation_scope.as_deref()))
         .is_some_and(|scope| scope == expected_scope);
@@ -81,7 +81,7 @@ pub(super) fn prepare_conversation_state<'a>(
 
 pub(super) fn build_answer_conversation_state(
     response_id: Option<String>,
-    provider: &LlmProviderConfig,
+    binding: ResolvedLlmModelBinding<'_>,
     workspace_root: &Path,
     citations: &[ExecutionCitation],
     actions: &[AcpActionEvent],
@@ -89,7 +89,7 @@ pub(super) fn build_answer_conversation_state(
 ) -> ExecutionConversationState {
     ExecutionConversationState {
         previous_response_id: response_id,
-        continuation_scope: Some(provider_continuation_scope(provider, workspace_root)),
+        continuation_scope: Some(provider_continuation_scope(binding, workspace_root)),
         citations: citations.to_vec(),
         actions: actions.to_vec(),
         tool_calls: tool_calls.to_vec(),

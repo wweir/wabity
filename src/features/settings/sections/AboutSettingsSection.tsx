@@ -1,8 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getVersion, getName } from "@tauri-apps/api/app";
 import { isTauri } from "@tauri-apps/api/core";
 import { getSettingsPanelId, getSettingsTabId } from "../settingsShared";
 import type { BindSectionBlockRef } from "../sectionViewShared";
+import {
+	RELEASE_CHECK_TIMEOUT_MS,
+	resolveReleaseUpdate,
+	type GithubReleaseSummary,
+} from "./aboutUpdate";
 
 const GITHUB_REPO = "wweir/wabity";
 const GITHUB_URL = `https://github.com/${GITHUB_REPO}`;
@@ -24,6 +29,7 @@ export function AboutSettingsSection({
 	const [updateStatus, setUpdateStatus] = useState<UpdateStatus>("idle");
 	const [latestVersion, setLatestVersion] = useState("");
 	const [releaseUrl, setReleaseUrl] = useState("");
+	const updateCheckAbortRef = useRef<AbortController | null>(null);
 
 	useEffect(() => {
 		if (!isTauri()) {
@@ -32,31 +38,59 @@ export function AboutSettingsSection({
 
 		void getName().then(setAppName);
 		void getVersion().then(setAppVersion);
+
+		return () => {
+			updateCheckAbortRef.current?.abort();
+			updateCheckAbortRef.current = null;
+		};
 	}, []);
 
-	function checkForUpdates() {
+	async function checkForUpdates() {
 		if (!appVersion) {
 			return;
 		}
 
-		setUpdateStatus("checking");
-		fetch(RELEASES_API)
-			.then((response) => {
-				if (!response.ok) {
-					throw new Error(`GitHub API ${response.status}`);
-				}
+		updateCheckAbortRef.current?.abort();
+		const controller = new AbortController();
+		updateCheckAbortRef.current = controller;
+		let timedOut = false;
+		const timeoutId = window.setTimeout(() => {
+			timedOut = true;
+			controller.abort();
+		}, RELEASE_CHECK_TIMEOUT_MS);
 
-				return response.json() as Promise<{ tag_name: string; html_url: string }>;
-			})
-			.then((release) => {
-				const remote = release.tag_name.replace(/^v/, "");
-				setLatestVersion(remote);
-				setReleaseUrl(release.html_url);
-				setUpdateStatus(remote === appVersion ? "up-to-date" : "available");
-			})
-			.catch(() => {
-				setUpdateStatus("error");
+		setLatestVersion("");
+		setReleaseUrl("");
+		setUpdateStatus("checking");
+
+		try {
+			const response = await fetch(RELEASES_API, {
+				headers: {
+					Accept: "application/vnd.github+json",
+				},
+				signal: controller.signal,
 			});
+			if (!response.ok) {
+				throw new Error(`GitHub API ${response.status}`);
+			}
+
+			const release = (await response.json()) as GithubReleaseSummary;
+			const nextUpdate = resolveReleaseUpdate(appVersion, release, `${GITHUB_URL}/releases/latest`);
+			setLatestVersion(nextUpdate.latestVersion);
+			setReleaseUrl(nextUpdate.releaseUrl);
+			setUpdateStatus(nextUpdate.status);
+		} catch {
+			if (controller.signal.aborted && !timedOut) {
+				return;
+			}
+
+			setUpdateStatus("error");
+		} finally {
+			window.clearTimeout(timeoutId);
+			if (updateCheckAbortRef.current === controller) {
+				updateCheckAbortRef.current = null;
+			}
+		}
 	}
 
 	const updateLabel =

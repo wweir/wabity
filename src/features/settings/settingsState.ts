@@ -8,6 +8,7 @@ import type {
 	BuiltinLlmProviderTemplate,
 	BuiltinLlmProviderTemplateModel,
 	GeneralSettings,
+	LlmModelConfig,
 	LlmProviderConfig,
 	LlmSettings,
 	NotificationSettings,
@@ -184,15 +185,15 @@ export function createDefaultShortcutSettings(): ShortcutConfig {
 export function createDefaultLlmSettings(): LlmSettings {
 	return {
 		providers: [],
-		translationProviderId: null,
-		questionAnswerProviderId: null,
+		translationModelId: null,
+		questionAnswerModelId: null,
 	};
 }
 
 export function createDefaultOcrSettings(): OcrSettings {
 	return {
 		provider: "system",
-		llmProviderId: null,
+		llmModelId: null,
 	};
 }
 
@@ -200,7 +201,7 @@ export function createDefaultRagSettings(): RagSettings {
 	return {
 		sourceDirectories: [],
 		ignoreGlobs: normalizeRagIgnoreGlobs([...defaultRagIgnoreGlobs]),
-		embeddingProviderId: null,
+		embeddingModelId: null,
 	};
 }
 
@@ -444,6 +445,12 @@ export function cloneSavedMcpDraftState(state: SavedMcpDraftState): SavedMcpDraf
 export function cloneLlmProviderDraft(provider: LlmProviderConfig): LlmProviderConfig {
 	return {
 		...provider,
+		models: provider.models.map((model) => ({
+			...model,
+		})),
+		modelConfig:
+			(provider.modelConfig && { ...provider.modelConfig }) ??
+			(provider.models[0] ? { ...provider.models[0] } : undefined),
 	};
 }
 
@@ -457,7 +464,7 @@ function cloneSavedRagDraftState(state: SavedRagDraftState): SavedRagDraftState 
 	return {
 		sourceDirectories: [...state.sourceDirectories],
 		ignoreGlobs: [...state.ignoreGlobs],
-		embeddingProviderId: state.embeddingProviderId,
+		embeddingModelId: state.embeddingModelId,
 	};
 }
 
@@ -494,18 +501,29 @@ export function createAgentDraft(
 }
 
 export function createLlmProviderDraft(): LlmProviderConfig {
+	const initialModel = createLlmModelDraft("llm");
 	return {
 		id: nextDraftId("llm"),
 		name: "",
 		baseUrl: "https://api.openai.com/v1",
 		apiKey: "",
-		modelType: "llm",
 		protocol: "responses",
+		models: [initialModel],
+		modelConfig: initialModel,
+		builtinPresetId: null,
+		managedBaseUrl: false,
+	};
+}
+
+export function createLlmModelDraft(
+	modelType: LlmModelConfig["modelType"] = "llm",
+): LlmModelConfig {
+	return {
+		id: nextDraftId("llm-model"),
+		modelType,
 		model: "",
 		modelIdentityHint: null,
-		builtinPresetId: null,
 		builtinPresetModelId: null,
-		managedBaseUrl: false,
 		supportsMultimodal: false,
 		supportsStateful: false,
 	};
@@ -552,22 +570,33 @@ export function findBuiltinTemplateModelByModelName(
 export function applyBuiltinTemplateModelMetadata(
 	provider: LlmProviderConfig,
 	templateModel: BuiltinLlmProviderTemplateModel | null,
+	modelId: string | null = provider.models[0]?.id ?? null,
 ) {
+	const currentModel =
+		provider.models.find((model) => model.id === modelId) ??
+		provider.models[0] ??
+		createLlmModelDraft(templateModel?.modelType === "embedding" ? "embedding" : "llm");
 	if (!templateModel) {
 		return sanitizeLlmProviderDraft({
 			...provider,
-			builtinPresetModelId: null,
+			models: provider.models.map((model) =>
+				model.id === currentModel.id ? { ...model, builtinPresetModelId: null } : model,
+			),
 		});
 	}
 
 	return sanitizeLlmProviderDraft({
 		...provider,
-		model: templateModel.model,
-		modelType: templateModel.modelType === "embedding" ? "embedding" : "llm",
 		protocol: templateModel.protocol === "chat_completions" ? "chat_completions" : "responses",
-		supportsMultimodal: templateModel.supportsMultimodal && templateModel.protocol === "responses",
-		supportsStateful: templateModel.supportsStateful && templateModel.protocol === "responses",
-		builtinPresetModelId: templateModel.id,
+		models: upsertProviderModel(provider, {
+			...currentModel,
+			model: templateModel.model,
+			modelType: templateModel.modelType === "embedding" ? "embedding" : "llm",
+			supportsMultimodal:
+				templateModel.supportsMultimodal && templateModel.protocol === "responses",
+			supportsStateful: templateModel.supportsStateful && templateModel.protocol === "responses",
+			builtinPresetModelId: templateModel.id,
+		}),
 	});
 }
 
@@ -585,8 +614,11 @@ export function applyBuiltinTemplateToProvider(
 		name: nextName,
 		baseUrl: template.defaultBaseUrl,
 		builtinPresetId: template.id,
+		models: provider.models.map((model) => ({
+			...model,
+			builtinPresetModelId: null,
+		})),
 		managedBaseUrl: true,
-		builtinPresetModelId: null,
 	});
 }
 
@@ -594,17 +626,38 @@ export function detachBuiltinTemplateFromProvider(provider: LlmProviderConfig) {
 	return sanitizeLlmProviderDraft({
 		...provider,
 		builtinPresetId: null,
-		builtinPresetModelId: null,
+		models: provider.models.map((model) => ({
+			...model,
+			builtinPresetModelId: null,
+		})),
 		managedBaseUrl: false,
 	});
 }
 
-export function providerIsLlmModel(provider: Pick<LlmProviderConfig, "modelType">) {
-	return provider.modelType === "llm";
+function getProviderModel(
+	provider: Pick<LlmProviderConfig, "models">,
+	modelId?: string | null,
+): LlmModelConfig | null {
+	if (modelId) {
+		return provider.models.find((model) => model.id === modelId) ?? null;
+	}
+
+	return provider.models[0] ?? null;
 }
 
-export function providerIsEmbeddingModel(provider: Pick<LlmProviderConfig, "modelType">) {
-	return provider.modelType === "embedding";
+function upsertProviderModel(provider: LlmProviderConfig, nextModel: LlmModelConfig) {
+	const existingModels = provider.models.filter((model) => model.id !== nextModel.id);
+	return [...existingModels, nextModel];
+}
+
+export function clearProviderModelIdentityHints(provider: LlmProviderConfig): LlmProviderConfig {
+	return {
+		...provider,
+		models: provider.models.map((model) => ({
+			...model,
+			modelIdentityHint: null,
+		})),
+	};
 }
 
 interface ResolvedLlmProviderProfile {
@@ -618,13 +671,11 @@ interface ResolvedLlmProviderProfile {
 }
 
 function resolveLlmProviderProfile(
-	provider: Pick<
-		LlmProviderConfig,
-		"modelType" | "model" | "protocol" | "supportsMultimodal" | "supportsStateful"
-	>,
+	provider: Pick<LlmProviderConfig, "protocol">,
+	model: LlmModelConfig | null,
 ): ResolvedLlmProviderProfile {
-	const configured = provider.model.trim().length > 0;
-	if (provider.modelType === "embedding") {
+	const configured = Boolean(model?.model.trim());
+	if (model?.modelType === "embedding") {
 		return {
 			configured,
 			kind: "embedding",
@@ -648,8 +699,8 @@ function resolveLlmProviderProfile(
 		};
 	}
 
-	const supportsMultimodal = configured && provider.supportsMultimodal;
-	const supportsStateful = configured && provider.supportsStateful;
+	const supportsMultimodal = configured && Boolean(model?.supportsMultimodal);
+	const supportsStateful = configured && Boolean(model?.supportsStateful);
 	return {
 		configured,
 		kind: supportsStateful ? "llm_responses_stateful" : "llm_responses_stateless",
@@ -661,14 +712,25 @@ function resolveLlmProviderProfile(
 	};
 }
 
-export function providerHasResponsesModel(
-	provider: Pick<LlmProviderConfig, "modelType" | "model" | "protocol">,
+export function providerIsLlmModel(
+	provider: Pick<LlmProviderConfig, "models">,
+	modelId?: string | null,
 ) {
-	const profile = resolveLlmProviderProfile({
-		...provider,
-		supportsMultimodal: false,
-		supportsStateful: false,
-	});
+	return getProviderModel(provider, modelId)?.modelType === "llm";
+}
+
+export function providerIsEmbeddingModel(
+	provider: Pick<LlmProviderConfig, "models">,
+	modelId?: string | null,
+) {
+	return getProviderModel(provider, modelId)?.modelType === "embedding";
+}
+
+export function providerHasResponsesModel(
+	provider: Pick<LlmProviderConfig, "models" | "protocol">,
+	modelId?: string | null,
+) {
+	const profile = resolveLlmProviderProfile(provider, getProviderModel(provider, modelId));
 	return (
 		profile.configured &&
 		(profile.kind === "llm_responses_stateless" || profile.kind === "llm_responses_stateful")
@@ -676,64 +738,62 @@ export function providerHasResponsesModel(
 }
 
 export function providerCanHandleAiTask(
-	provider: Pick<LlmProviderConfig, "modelType" | "model" | "protocol">,
+	provider: Pick<LlmProviderConfig, "models" | "protocol">,
+	modelId?: string | null,
 ) {
-	return resolveLlmProviderProfile({
-		...provider,
-		supportsMultimodal: false,
-		supportsStateful: false,
-	}).canHandleAiTask;
+	return resolveLlmProviderProfile(provider, getProviderModel(provider, modelId)).canHandleAiTask;
 }
 
 export function providerCanHandleOcr(
-	provider: Pick<LlmProviderConfig, "modelType" | "model" | "protocol" | "supportsMultimodal">,
+	provider: Pick<LlmProviderConfig, "models" | "protocol">,
+	modelId?: string | null,
 ) {
-	return resolveLlmProviderProfile({
-		...provider,
-		supportsStateful: false,
-	}).canHandleOcr;
+	return resolveLlmProviderProfile(provider, getProviderModel(provider, modelId)).canHandleOcr;
 }
 
 export function providerCanHandleRagEmbedding(
-	provider: Pick<LlmProviderConfig, "modelType" | "model">,
+	provider: Pick<LlmProviderConfig, "models" | "protocol">,
+	modelId?: string | null,
 ) {
-	return resolveLlmProviderProfile({
-		...provider,
-		protocol: "responses",
-		supportsMultimodal: false,
-		supportsStateful: false,
-	}).canHandleRagEmbedding;
+	return resolveLlmProviderProfile(provider, getProviderModel(provider, modelId))
+		.canHandleRagEmbedding;
 }
 
 function sanitizeLlmProviderDraft(provider: LlmProviderConfig) {
-	const sanitized = { ...provider };
-	const profile = resolveLlmProviderProfile(sanitized);
-	if (profile.kind !== "llm_responses_stateless" && profile.kind !== "llm_responses_stateful") {
-		sanitized.supportsMultimodal = false;
-		sanitized.supportsStateful = false;
-	}
-	if (sanitized.supportsMultimodal && !profile.canHandleOcr) {
-		sanitized.supportsMultimodal = false;
-	}
-	if (sanitized.supportsStateful && !profile.supportsStateful) {
-		sanitized.supportsStateful = false;
-	}
-	if (!sanitized.model.trim()) {
-		sanitized.modelIdentityHint = null;
-	}
-	if (!sanitized.builtinPresetId) {
-		sanitized.builtinPresetModelId = null;
-	}
-
-	return sanitized;
+	const models = provider.models.map((model) => {
+		const sanitizedModel = { ...model };
+		const profile = resolveLlmProviderProfile(provider, sanitizedModel);
+		if (profile.kind !== "llm_responses_stateless" && profile.kind !== "llm_responses_stateful") {
+			sanitizedModel.supportsMultimodal = false;
+			sanitizedModel.supportsStateful = false;
+		}
+		if (sanitizedModel.supportsMultimodal && !profile.canHandleOcr) {
+			sanitizedModel.supportsMultimodal = false;
+		}
+		if (sanitizedModel.supportsStateful && !profile.supportsStateful) {
+			sanitizedModel.supportsStateful = false;
+		}
+		if (!sanitizedModel.model.trim()) {
+			sanitizedModel.modelIdentityHint = null;
+		}
+		if (!provider.builtinPresetId) {
+			sanitizedModel.builtinPresetModelId = null;
+		}
+		return sanitizedModel;
+	});
+	return {
+		...provider,
+		models,
+		modelConfig:
+			(provider.modelConfig && models.find((model) => model.id === provider.modelConfig?.id)) ??
+			models[0] ??
+			createLlmModelDraft("llm"),
+	};
 }
 
-function resolveLlmRouteProviderId(providers: LlmProviderConfig[], providerId: string | null) {
-	if (
-		providerId &&
-		providers.some((provider) => provider.id === providerId && providerCanHandleAiTask(provider))
-	) {
-		return providerId;
+function resolveLlmRouteModelId(providers: LlmProviderConfig[], modelId: string | null) {
+	if (modelId && providers.some((provider) => providerCanHandleAiTask(provider, modelId))) {
+		return modelId;
 	}
 
 	return null;
@@ -743,11 +803,8 @@ export function reconcileLlmSettings(settings: LlmSettings): LlmSettings {
 	const providers = settings.providers.map(sanitizeLlmProviderDraft);
 	return {
 		providers,
-		translationProviderId: resolveLlmRouteProviderId(providers, settings.translationProviderId),
-		questionAnswerProviderId: resolveLlmRouteProviderId(
-			providers,
-			settings.questionAnswerProviderId,
-		),
+		translationModelId: resolveLlmRouteModelId(providers, settings.translationModelId),
+		questionAnswerModelId: resolveLlmRouteModelId(providers, settings.questionAnswerModelId),
 	};
 }
 
@@ -755,21 +812,17 @@ export function reconcileOcrSettings(
 	settings: OcrSettings,
 	providers: LlmProviderConfig[],
 ): OcrSettings {
-	if (settings.provider !== "llm_ocr" || !settings.llmProviderId) {
+	if (settings.provider !== "llm_ocr" || !settings.llmModelId) {
 		return settings;
 	}
 
-	if (
-		providers.some(
-			(provider) => provider.id === settings.llmProviderId && providerCanHandleOcr(provider),
-		)
-	) {
+	if (providers.some((provider) => providerCanHandleOcr(provider, settings.llmModelId))) {
 		return settings;
 	}
 
 	return {
 		...settings,
-		llmProviderId: null,
+		llmModelId: null,
 	};
 }
 
@@ -778,7 +831,7 @@ export function reconcileRagSettings(
 	providers: LlmProviderConfig[],
 ): RagSettings {
 	const normalizedIgnoreGlobs = normalizeRagIgnoreGlobs(settings.ignoreGlobs);
-	if (!settings.embeddingProviderId) {
+	if (!settings.embeddingModelId) {
 		return {
 			...settings,
 			ignoreGlobs: normalizedIgnoreGlobs,
@@ -786,10 +839,7 @@ export function reconcileRagSettings(
 	}
 
 	if (
-		providers.some(
-			(provider) =>
-				provider.id === settings.embeddingProviderId && providerCanHandleRagEmbedding(provider),
-		)
+		providers.some((provider) => providerCanHandleRagEmbedding(provider, settings.embeddingModelId))
 	) {
 		return {
 			...settings,
@@ -800,31 +850,36 @@ export function reconcileRagSettings(
 	return {
 		...settings,
 		ignoreGlobs: normalizedIgnoreGlobs,
-		embeddingProviderId: null,
+		embeddingModelId: null,
 	};
 }
 
 export function summarizeLlmProviderProfile(provider: LlmProviderConfig) {
-	const profile = resolveLlmProviderProfile(provider);
-	if (profile.canHandleAiTask) {
-		const kindLabel = getLlmProviderKindLabel(profile.kind);
-		return profile.supportsMultimodal ? `${kindLabel} · 多模态` : kindLabel;
+	const modelCount = provider.models.length;
+	if (modelCount === 0) {
+		return provider.protocol === "chat_completions"
+			? "LLM 组 · 未配置模型"
+			: "Provider 组 · 未配置模型";
 	}
-	if (profile.canHandleRagEmbedding) {
-		return "Embedding";
+	const llmCount = provider.models.filter((model) => model.modelType === "llm").length;
+	const embeddingCount = provider.models.filter((model) => model.modelType === "embedding").length;
+	if (llmCount > 0 && embeddingCount > 0) {
+		return `${llmCount} 个 LLM · ${embeddingCount} 个 Embedding`;
 	}
-
-	return providerIsEmbeddingModel(provider) ? "Embedding · 未配置模型" : "LLM · 未配置模型";
+	if (llmCount > 0) {
+		return `${llmCount} 个 LLM`;
+	}
+	return `${embeddingCount} 个 Embedding`;
 }
 
 export function getLlmProviderKind(
-	provider: Pick<LlmProviderConfig, "modelType" | "protocol" | "supportsStateful">,
+	provider: Pick<LlmProviderConfig, "models" | "protocol">,
+	modelId?: string | null,
 ): LlmProviderKind {
-	return resolveLlmProviderProfile({
-		...provider,
+	return resolveLlmProviderProfile(provider, {
+		...getProviderModel(provider, modelId),
 		model: "__resolved__",
-		supportsMultimodal: false,
-	}).kind;
+	} as LlmModelConfig).kind;
 }
 
 export function getLlmProviderKindLabel(kind: LlmProviderKind) {
@@ -843,51 +898,66 @@ export function getLlmProviderKindLabel(kind: LlmProviderKind) {
 export function applyLlmProviderKind(
 	provider: LlmProviderConfig,
 	kind: LlmProviderKind,
+	modelId: string | null = provider.models[0]?.id ?? null,
 ): LlmProviderConfig {
+	const currentModel =
+		provider.models.find((model) => model.id === modelId) ??
+		provider.models[0] ??
+		createLlmModelDraft(kind === "embedding" ? "embedding" : "llm");
 	switch (kind) {
 		case "llm_responses_stateless":
 			return {
 				...provider,
-				modelType: "llm",
 				protocol: "responses",
-				supportsStateful: false,
+				models: upsertProviderModel(provider, {
+					...currentModel,
+					modelType: "llm",
+					supportsStateful: false,
+				}),
 			};
 		case "llm_responses_stateful":
 			return {
 				...provider,
-				modelType: "llm",
 				protocol: "responses",
-				supportsStateful: true,
+				models: upsertProviderModel(provider, {
+					...currentModel,
+					modelType: "llm",
+					supportsStateful: true,
+				}),
 			};
 		case "llm_chat_completions":
 			return {
 				...provider,
-				modelType: "llm",
 				protocol: "chat_completions",
-				supportsMultimodal: false,
-				supportsStateful: false,
+				models: upsertProviderModel(provider, {
+					...currentModel,
+					modelType: "llm",
+					supportsMultimodal: false,
+					supportsStateful: false,
+				}),
 			};
 		case "embedding":
 			return {
 				...provider,
-				modelType: "embedding",
 				protocol: "responses",
-				supportsMultimodal: false,
-				supportsStateful: false,
+				models: upsertProviderModel(provider, {
+					...currentModel,
+					modelType: "embedding",
+					supportsMultimodal: false,
+					supportsStateful: false,
+				}),
 			};
 	}
 }
 
 export function getLlmProviderUsageBadges(
-	provider: Pick<
-		LlmProviderConfig,
-		"modelType" | "protocol" | "supportsMultimodal" | "supportsStateful"
-	>,
+	provider: Pick<LlmProviderConfig, "models" | "protocol">,
+	modelId?: string | null,
 ): string[] {
-	const profile = resolveLlmProviderProfile({
-		...provider,
+	const profile = resolveLlmProviderProfile(provider, {
+		...getProviderModel(provider, modelId),
 		model: "__resolved__",
-	});
+	} as LlmModelConfig);
 	if (profile.kind === "embedding") {
 		return ["RAG 索引", "RAG 检索"];
 	}
@@ -909,15 +979,13 @@ export function getLlmProviderUsageBadges(
 }
 
 export function getLlmProviderUsageDescription(
-	provider: Pick<
-		LlmProviderConfig,
-		"modelType" | "protocol" | "supportsMultimodal" | "supportsStateful"
-	>,
+	provider: Pick<LlmProviderConfig, "models" | "protocol">,
+	modelId?: string | null,
 ): string {
-	const profile = resolveLlmProviderProfile({
-		...provider,
+	const profile = resolveLlmProviderProfile(provider, {
+		...getProviderModel(provider, modelId),
 		model: "__resolved__",
-	});
+	} as LlmModelConfig);
 	if (profile.kind === "embedding") {
 		return "Embedding 条目只会出现在 RAG 的 embedding 列表，不会进入翻译 LLM、问答 LLM 或 OCR。";
 	}
@@ -938,9 +1006,12 @@ export function getLlmProviderUsageDescription(
 }
 
 export function getLlmProviderModelPlaceholder(
-	provider: Pick<LlmProviderConfig, "modelType">,
+	provider: Pick<LlmProviderConfig, "models">,
+	modelId?: string | null,
 ): string {
-	return provider.modelType === "embedding" ? "text-embedding-3-small" : "gpt-4.1-mini";
+	return getProviderModel(provider, modelId)?.modelType === "embedding"
+		? "text-embedding-3-small"
+		: "gpt-4.1-mini";
 }
 
 function parseMcpRemoteUrl(url: string): URL | null {
@@ -1011,7 +1082,7 @@ export function buildSavedRagDraftState(settings: RagSettings): SavedRagDraftSta
 	return cloneSavedRagDraftState({
 		sourceDirectories: settings.sourceDirectories,
 		ignoreGlobs: settings.ignoreGlobs,
-		embeddingProviderId: settings.embeddingProviderId,
+		embeddingModelId: settings.embeddingModelId,
 	});
 }
 
@@ -1051,48 +1122,51 @@ export function buildLlmDraftSnapshot(settings: Pick<LlmSettings, "providers">) 
 			name: provider.name,
 			baseUrl: provider.baseUrl,
 			apiKey: provider.apiKey,
-			modelType: provider.modelType,
 			protocol: provider.protocol,
-			model: provider.model,
-			modelIdentityHint: provider.modelIdentityHint,
+			models: provider.models.map((model) => ({
+				id: model.id,
+				modelType: model.modelType,
+				model: model.model,
+				modelIdentityHint: model.modelIdentityHint,
+				builtinPresetModelId: model.builtinPresetModelId,
+				supportsMultimodal: model.supportsMultimodal,
+				supportsStateful: model.supportsStateful,
+			})),
 			builtinPresetId: provider.builtinPresetId,
-			builtinPresetModelId: provider.builtinPresetModelId,
 			managedBaseUrl: provider.managedBaseUrl,
-			supportsMultimodal: provider.supportsMultimodal,
-			supportsStateful: provider.supportsStateful,
 		})),
 	});
 }
 
 export function buildPromptsDraftSnapshot(
 	settings: PromptsSettings,
-	llmSettings: Pick<LlmSettings, "translationProviderId" | "questionAnswerProviderId">,
+	llmSettings: Pick<LlmSettings, "translationModelId" | "questionAnswerModelId">,
 ) {
 	return JSON.stringify({
 		translationPrompt: settings.translationPrompt,
 		ragAnswerSystemPrompt: settings.ragAnswerSystemPrompt,
-		translationProviderId: llmSettings.translationProviderId,
-		questionAnswerProviderId: llmSettings.questionAnswerProviderId,
+		translationModelId: llmSettings.translationModelId,
+		questionAnswerModelId: llmSettings.questionAnswerModelId,
 	});
 }
 
 export function buildTranslationTaskDraftSnapshot(
 	settings: Pick<PromptsSettings, "translationPrompt">,
-	llmSettings: Pick<LlmSettings, "translationProviderId">,
+	llmSettings: Pick<LlmSettings, "translationModelId">,
 ) {
 	return JSON.stringify({
 		translationPrompt: settings.translationPrompt,
-		translationProviderId: llmSettings.translationProviderId,
+		translationModelId: llmSettings.translationModelId,
 	});
 }
 
 export function buildQuestionAnswerTaskDraftSnapshot(
 	settings: Pick<PromptsSettings, "ragAnswerSystemPrompt">,
-	llmSettings: Pick<LlmSettings, "questionAnswerProviderId">,
+	llmSettings: Pick<LlmSettings, "questionAnswerModelId">,
 ) {
 	return JSON.stringify({
 		ragAnswerSystemPrompt: settings.ragAnswerSystemPrompt,
-		questionAnswerProviderId: llmSettings.questionAnswerProviderId,
+		questionAnswerModelId: llmSettings.questionAnswerModelId,
 	});
 }
 
@@ -1100,7 +1174,7 @@ export function buildRagDraftSnapshot(settings: RagSettings) {
 	return JSON.stringify({
 		sourceDirectories: settings.sourceDirectories,
 		ignoreGlobs: settings.ignoreGlobs,
-		embeddingProviderId: settings.embeddingProviderId,
+		embeddingModelId: settings.embeddingModelId,
 	});
 }
 
@@ -1190,7 +1264,7 @@ export function findFirstLlmIssue(
 			};
 		}
 
-		if (!provider.model.trim()) {
+		if (provider.models.length === 0 || provider.models.some((model) => !model.model.trim())) {
 			return {
 				providerId: provider.id,
 				fieldKey: "model",
@@ -1270,20 +1344,28 @@ export function validateLlmSettings(
 			currentProviderIssues.push(`第 ${providerIndex + 1} 个模型条目缺少 Base URL。`);
 			currentProviderFieldIssues.baseUrl = "请输入 Base URL。";
 		}
-		if (!provider.model.trim()) {
-			currentProviderIssues.push(`第 ${providerIndex + 1} 个模型条目缺少模型名。`);
+		if (provider.models.length === 0) {
+			currentProviderIssues.push(`第 ${providerIndex + 1} 个 Provider 组至少需要一个模型。`);
 			currentProviderFieldIssues.model = "请输入模型名。";
 		}
-		if (provider.supportsMultimodal && !providerHasResponsesModel(provider)) {
-			currentProviderIssues.push(
-				`第 ${providerIndex + 1} 个模型条目只有 responses 协议才能开启多模态。`,
-			);
-		}
-		if (provider.supportsStateful && !providerHasResponsesModel(provider)) {
-			currentProviderIssues.push(
-				`第 ${providerIndex + 1} 个模型条目只有 responses 协议才能开启 stateful 请求。`,
-			);
-		}
+		provider.models.forEach((model, modelIndex) => {
+			if (!model.model.trim()) {
+				currentProviderIssues.push(
+					`第 ${providerIndex + 1} 个 Provider 组的第 ${modelIndex + 1} 个模型缺少模型名。`,
+				);
+				currentProviderFieldIssues.model = "请输入模型名。";
+			}
+			if (model.supportsMultimodal && !providerHasResponsesModel(provider, model.id)) {
+				currentProviderIssues.push(
+					`第 ${providerIndex + 1} 个 Provider 组的第 ${modelIndex + 1} 个模型只有 responses 协议才能开启多模态。`,
+				);
+			}
+			if (model.supportsStateful && !providerHasResponsesModel(provider, model.id)) {
+				currentProviderIssues.push(
+					`第 ${providerIndex + 1} 个 Provider 组的第 ${modelIndex + 1} 个模型只有 responses 协议才能开启 stateful 请求。`,
+				);
+			}
+		});
 		const template = findBuiltinTemplate(builtinTemplates, provider.builtinPresetId);
 		if (provider.builtinPresetId && !template) {
 			currentProviderIssues.push(`第 ${providerIndex + 1} 个模型条目引用了未知内置模板。`);
@@ -1334,20 +1416,19 @@ export function validateRagSettings(
 		}
 	});
 
-	if (settings.sourceDirectories.length > 0 && !settings.embeddingProviderId) {
-		issues.push("配置扫描目录时，必须选择一个 embedding provider。");
-		fieldIssues.embeddingProviderId ??= "配置扫描目录时，必须先选择一个 Embedding 条目。";
+	if (settings.sourceDirectories.length > 0 && !settings.embeddingModelId) {
+		issues.push("配置扫描目录时，必须选择一个 embedding 模型。");
+		fieldIssues.embeddingModelId ??= "配置扫描目录时，必须先选择一个 Embedding 条目。";
 	}
 
 	if (
-		settings.embeddingProviderId &&
-		!llmSettings.providers.some(
-			(provider) =>
-				provider.id === settings.embeddingProviderId && providerCanHandleRagEmbedding(provider),
+		settings.embeddingModelId &&
+		!llmSettings.providers.some((provider) =>
+			providerCanHandleRagEmbedding(provider, settings.embeddingModelId),
 		)
 	) {
-		issues.push("RAG 选择的 embedding provider 不存在，或者没有启用 embedding 能力。");
-		fieldIssues.embeddingProviderId ??= "当前选择的 Embedding 条目不可用于 RAG。";
+		issues.push("RAG 选择的 embedding 模型不存在，或者没有启用 embedding 能力。");
+		fieldIssues.embeddingModelId ??= "当前选择的 Embedding 条目不可用于 RAG。";
 	}
 
 	return {

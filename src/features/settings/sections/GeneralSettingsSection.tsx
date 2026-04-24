@@ -356,10 +356,10 @@ export function GeneralSettingsSection({
 									setOcrSettings((current) => ({
 										...current,
 										provider: event.target.value as OcrSettings["provider"],
-										llmProviderId:
+										llmModelId:
 											event.target.value === "llm_ocr"
-												? (current.llmProviderId ?? eligibleOcrProviders[0]?.id ?? null)
-												: current.llmProviderId,
+												? (current.llmModelId ?? eligibleOcrProviders[0]?.models[0]?.id ?? null)
+												: current.llmModelId,
 									}))
 								}
 								disabled={savingOcr}
@@ -386,15 +386,18 @@ export function GeneralSettingsSection({
 								onChange={(event) =>
 									setOcrSettings((current) => ({
 										...current,
-										llmProviderId: event.target.value || null,
+										llmModelId: event.target.value || null,
 									}))
 								}
-								value={ocrSettings.llmProviderId ?? ""}
+								value={ocrSettings.llmModelId ?? ""}
 							>
 								<option value="">选择一个已开启多模态的模型条目</option>
 								{eligibleOcrProviders.map((provider) => (
-									<option key={provider.id} value={provider.id}>
-										{provider.name || provider.model || provider.baseUrl}
+									<option
+										key={provider.models[0]?.id ?? provider.id}
+										value={provider.models[0]?.id ?? ""}
+									>
+										{provider.name || provider.models[0]?.model || provider.baseUrl}
 										{` · ${summarizeLlmProviderProfile(provider)}`}
 									</option>
 								))}

@@ -19,8 +19,8 @@ use crate::domain::acp::{
 };
 use crate::domain::notification::NotificationSettings;
 use crate::domain::settings::{
-    fixed_rag_ignore_globs, AppearanceSettings, GeneralSettings, LlmModelType, LlmProviderConfig,
-    LlmProviderProtocol, LlmSettings, OcrSettings, PromptsSettings, RagSettings,
+    fixed_rag_ignore_globs, AppearanceSettings, GeneralSettings, LlmModelConfig, LlmModelType,
+    LlmProviderConfig, LlmProviderProtocol, LlmSettings, OcrSettings, PromptsSettings, RagSettings,
 };
 
 const CONFIG_FILE_NAME: &str = "config.toml";
@@ -375,9 +375,9 @@ impl AppConfig {
         self.prompts
             .adopt_legacy_translation_prompt(legacy_translation_prompt);
         self.prompts.normalize();
-        let llm_provider_id_mapping = self.llm.normalize();
-        self.ocr.normalize(&self.llm, &llm_provider_id_mapping);
-        self.rag.normalize(&self.llm, &llm_provider_id_mapping);
+        let llm_model_id_mapping = self.llm.normalize();
+        self.ocr.normalize(&self.llm, &llm_model_id_mapping);
+        self.rag.normalize(&self.llm, &llm_model_id_mapping);
         self.acp.normalize()?;
         Ok(())
     }
@@ -515,177 +515,143 @@ impl ConfigStore {
 }
 
 #[derive(Debug, Clone, Default)]
-struct LlmProviderIdTargets {
-    llm_id: Option<String>,
-    embedding_id: Option<String>,
+struct LlmModelIdMapping {
+    direct: HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Default)]
-struct LlmProviderIdMapping {
-    entries: HashMap<String, LlmProviderIdTargets>,
-}
-
-impl LlmProviderIdMapping {
-    fn insert(&mut self, original_id: &str, targets: LlmProviderIdTargets) {
-        let trimmed = original_id.trim();
-        if trimmed.is_empty() {
+impl LlmModelIdMapping {
+    fn insert_direct(&mut self, original_id: &str, normalized_id: &str) {
+        let original_id = original_id.trim();
+        let normalized_id = normalized_id.trim();
+        if original_id.is_empty() || normalized_id.is_empty() {
             return;
         }
 
-        self.entries.insert(trimmed.to_string(), targets);
+        self.direct
+            .insert(original_id.to_string(), normalized_id.to_string());
     }
 
-    fn resolve_llm_id(&self, provider_id: &str) -> Option<String> {
-        self.entries
-            .get(provider_id)
-            .and_then(|targets| targets.llm_id.clone())
-    }
-
-    fn resolve_embedding_id(&self, provider_id: &str) -> Option<String> {
-        self.entries
-            .get(provider_id)
-            .and_then(|targets| targets.embedding_id.clone())
+    fn resolve_model_id(&self, model_id: &str) -> Option<String> {
+        self.direct.get(model_id).cloned()
     }
 }
 
 impl LlmSettings {
-    fn normalize(&mut self) -> LlmProviderIdMapping {
-        let original_translation_provider_id = self
-            .translation_provider_id
-            .clone()
-            .or_else(|| self.legacy_default_provider_id.clone());
-        let original_question_answer_provider_id = self
-            .question_answer_provider_id
-            .clone()
-            .or_else(|| self.legacy_default_provider_id.clone());
+    fn normalize(&mut self) -> LlmModelIdMapping {
+        let original_translation_model_id = self.translation_model_id.clone();
+        let original_question_answer_model_id = self.question_answer_model_id.clone();
         let original_providers = std::mem::take(&mut self.providers);
         let mut normalized_providers = Vec::new();
-        let mut used_ids = HashSet::new();
-        let mut id_mapping = LlmProviderIdMapping::default();
+        let mut used_provider_ids = HashSet::new();
+        let mut used_model_ids = HashSet::new();
+        let mut id_mapping = LlmModelIdMapping::default();
 
-        for (index, provider) in original_providers.into_iter().enumerate() {
-            let original_id = provider.id.clone();
-            let expanded_providers = expand_llm_provider(provider);
-            let split_from_single_entry = expanded_providers.len() > 1;
-            let mut targets = LlmProviderIdTargets::default();
+        for (index, mut provider) in original_providers.into_iter().enumerate() {
+            let provider_model_type = provider_group_model_type(&provider);
+            provider.name = normalize_llm_provider_name(
+                &provider.name,
+                provider.first_configured_model_name().unwrap_or_default(),
+                &provider.base_url,
+                provider_model_type,
+            );
+            provider.base_url = provider.base_url.trim().trim_end_matches('/').to_string();
+            provider.api_key = provider.api_key.trim().to_string();
 
-            for mut expanded_provider in expanded_providers {
-                expanded_provider.name = normalize_llm_provider_name(
-                    &expanded_provider.name,
-                    expanded_provider.model_name(),
-                    &expanded_provider.base_url,
-                    expanded_provider.model_type,
-                    split_from_single_entry,
-                );
-                expanded_provider.base_url = expanded_provider
-                    .base_url
-                    .trim()
-                    .trim_end_matches('/')
-                    .to_string();
-                expanded_provider.api_key = expanded_provider.api_key.trim().to_string();
-                expanded_provider.model = expanded_provider.model_name().to_string();
-                let can_handle_ai_task = expanded_provider.resolved_profile().can_handle_ai_task();
-                let can_handle_embedding =
-                    expanded_provider.resolved_profile().can_handle_embedding();
-                let uses_responses_api = expanded_provider.resolved_profile().uses_responses_api();
-                if !uses_responses_api {
-                    expanded_provider.supports_multimodal = false;
-                    expanded_provider.supports_stateful = false;
-                }
-                if !can_handle_ai_task {
-                    expanded_provider.supports_multimodal = false;
-                }
-                expanded_provider.id = make_llm_provider_id(
-                    &build_llm_provider_id_seed(
-                        &expanded_provider.id,
-                        &expanded_provider.name,
-                        expanded_provider.model_type,
-                        split_from_single_entry,
+            for model in &mut provider.models {
+                let original_model_id = model.id.clone();
+                normalize_llm_model_config(provider.protocol, model);
+                model.id = make_llm_model_id(
+                    &build_llm_model_id_seed(
+                        &original_model_id,
+                        &provider.id,
+                        &provider.name,
+                        model,
                     ),
-                    &expanded_provider.name,
-                    index,
-                    &used_ids,
+                    &provider.id,
+                    model,
+                    &used_model_ids,
                 );
-                used_ids.insert(expanded_provider.id.clone());
-
-                if can_handle_ai_task {
-                    targets.llm_id = Some(expanded_provider.id.clone());
-                }
-                if can_handle_embedding {
-                    targets.embedding_id = Some(expanded_provider.id.clone());
-                }
-
-                normalized_providers.push(expanded_provider);
+                used_model_ids.insert(model.id.clone());
+                id_mapping.insert_direct(&original_model_id, &model.id);
             }
 
-            id_mapping.insert(&original_id, targets);
+            provider.id = make_llm_provider_id(
+                &build_llm_provider_id_seed(&provider.id, &provider.name),
+                &provider.name,
+                index,
+                &used_provider_ids,
+            );
+            used_provider_ids.insert(provider.id.clone());
+            normalized_providers.push(provider);
         }
 
         self.providers = normalized_providers;
-        self.translation_provider_id = normalize_llm_provider_reference(
+        self.translation_model_id = normalize_llm_reference(
             &self.providers,
             &id_mapping,
-            original_translation_provider_id.as_deref(),
+            original_translation_model_id.as_deref(),
+            |binding| binding.can_handle_ai_task(),
         );
-        self.question_answer_provider_id = normalize_llm_provider_reference(
+        self.question_answer_model_id = normalize_llm_reference(
             &self.providers,
             &id_mapping,
-            original_question_answer_provider_id.as_deref(),
+            original_question_answer_model_id.as_deref(),
+            |binding| binding.can_handle_ai_task(),
         );
 
         id_mapping
     }
 }
 
-fn normalize_llm_provider_reference(
+fn normalize_llm_reference(
     providers: &[LlmProviderConfig],
-    id_mapping: &LlmProviderIdMapping,
-    provider_id: Option<&str>,
+    id_mapping: &LlmModelIdMapping,
+    model_id: Option<&str>,
+    predicate: fn(crate::domain::settings::ResolvedLlmModelBinding<'_>) -> bool,
 ) -> Option<String> {
-    provider_id
-        .and_then(|provider_id| {
+    model_id
+        .and_then(|model_id| {
             id_mapping
-                .resolve_llm_id(provider_id)
-                .or_else(|| Some(provider_id.to_string()))
+                .resolve_model_id(model_id)
+                .or_else(|| Some(model_id.to_string()))
         })
-        .filter(|provider_id| {
-            providers.iter().any(|provider| {
-                &provider.id == provider_id && provider.resolved_profile().can_handle_ai_task()
-            })
+        .filter(|model_id| {
+            providers
+                .iter()
+                .any(|provider| provider.find_model_binding(model_id).is_some_and(predicate))
         })
 }
 
 impl OcrSettings {
-    fn normalize(&mut self, llm_settings: &LlmSettings, id_mapping: &LlmProviderIdMapping) {
-        let resolved_provider_id = self.llm_provider_id.as_deref().and_then(|provider_id| {
+    fn normalize(&mut self, llm_settings: &LlmSettings, id_mapping: &LlmModelIdMapping) {
+        let resolved_model_id = self.llm_model_id.as_deref().and_then(|model_id| {
             id_mapping
-                .resolve_llm_id(provider_id)
-                .or_else(|| Some(provider_id.to_string()))
+                .resolve_model_id(model_id)
+                .or_else(|| Some(model_id.to_string()))
         });
 
-        if resolved_provider_id
+        if resolved_model_id
             .as_ref()
-            .map(|provider_id| {
-                llm_settings.providers.iter().any(|provider| {
-                    &provider.id == provider_id && provider.resolved_profile().can_handle_ocr()
-                })
+            .map(|model_id| {
+                llm_settings
+                    .find_model_binding(model_id)
+                    .is_some_and(|binding| binding.can_handle_ocr())
             })
             .unwrap_or(false)
         {
-            self.llm_provider_id = resolved_provider_id;
+            self.llm_model_id = resolved_model_id;
             return;
         }
 
-        self.llm_provider_id = llm_settings
-            .providers
-            .iter()
-            .find(|provider| provider.resolved_profile().can_handle_ocr())
-            .map(|provider| provider.id.clone());
+        self.llm_model_id = llm_settings
+            .iter_model_bindings()
+            .find(|binding| binding.can_handle_ocr())
+            .map(|binding| binding.model().id.clone());
     }
 }
 
 impl RagSettings {
-    fn normalize(&mut self, llm_settings: &LlmSettings, id_mapping: &LlmProviderIdMapping) {
+    fn normalize(&mut self, llm_settings: &LlmSettings, id_mapping: &LlmModelIdMapping) {
         let mut seen_directories = HashSet::new();
         self.source_directories = self
             .source_directories
@@ -713,34 +679,29 @@ impl RagSettings {
             )
             .collect();
 
-        let resolved_provider_id = self
-            .embedding_provider_id
-            .as_deref()
-            .and_then(|provider_id| {
-                id_mapping
-                    .resolve_embedding_id(provider_id)
-                    .or_else(|| Some(provider_id.to_string()))
-            });
+        let resolved_model_id = self.embedding_model_id.as_deref().and_then(|model_id| {
+            id_mapping
+                .resolve_model_id(model_id)
+                .or_else(|| Some(model_id.to_string()))
+        });
 
-        if resolved_provider_id
+        if resolved_model_id
             .as_ref()
-            .map(|provider_id| {
-                llm_settings.providers.iter().any(|provider| {
-                    &provider.id == provider_id
-                        && provider.resolved_profile().can_handle_embedding()
-                })
+            .map(|model_id| {
+                llm_settings
+                    .find_model_binding(model_id)
+                    .is_some_and(|binding| binding.can_handle_embedding())
             })
             .unwrap_or(false)
         {
-            self.embedding_provider_id = resolved_provider_id;
+            self.embedding_model_id = resolved_model_id;
             return;
         }
 
-        self.embedding_provider_id = llm_settings
-            .providers
-            .iter()
-            .find(|provider| provider.resolved_profile().can_handle_embedding())
-            .map(|provider| provider.id.clone());
+        self.embedding_model_id = llm_settings
+            .iter_model_bindings()
+            .find(|binding| binding.can_handle_embedding())
+            .map(|binding| binding.model().id.clone());
     }
 }
 
@@ -791,117 +752,94 @@ fn legacy_builtin_module_key_for_server(
     }
 }
 
-fn expand_llm_provider(provider: LlmProviderConfig) -> Vec<LlmProviderConfig> {
-    let explicit_model = provider.model_name().to_string();
-    let legacy_responses_model = provider.legacy_responses_model_name().to_string();
-    let legacy_embedding_model = provider.legacy_embedding_model_name().to_string();
-    let has_legacy_split_fields =
-        !legacy_responses_model.is_empty() || !legacy_embedding_model.is_empty();
-    let has_legacy_protocol_fields =
-        provider.legacy_model_type().is_some() || provider.legacy_supports_embedding;
-    let mut llm_model = String::new();
-    let mut embedding_model = String::new();
-    let mut llm_supports_multimodal = false;
-    let mut llm_supports_stateful = false;
-    let mut llm_protocol = provider.protocol;
-
-    if has_legacy_split_fields {
-        llm_model = legacy_responses_model;
-        embedding_model = legacy_embedding_model;
-        llm_supports_multimodal = provider.supports_multimodal;
-        llm_supports_stateful = provider.supports_stateful;
-        llm_protocol = LlmProviderProtocol::Responses;
-    } else if has_legacy_protocol_fields {
-        match provider.legacy_model_type().unwrap_or_default() {
-            LlmModelType::Llm => {
-                llm_model = explicit_model.clone();
-                llm_supports_multimodal = provider.supports_multimodal;
-                llm_supports_stateful = provider.supports_stateful;
-                llm_protocol = provider
-                    .legacy_llm_protocol()
-                    .unwrap_or(LlmProviderProtocol::Responses);
-                if provider.legacy_supports_embedding {
-                    embedding_model = explicit_model;
-                }
-            }
-            LlmModelType::Embedding => {
-                embedding_model = explicit_model;
-            }
-        }
-    } else {
-        match provider.model_type {
-            LlmModelType::Llm => {
-                llm_model = explicit_model;
-                llm_supports_multimodal = provider.supports_multimodal;
-                llm_supports_stateful = provider.supports_stateful;
-                llm_protocol = provider.protocol;
-            }
-            LlmModelType::Embedding => {
-                embedding_model = explicit_model;
-            }
-        }
-    }
-
-    if llm_model.is_empty() && embedding_model.is_empty() {
-        let mut fallback_provider = provider;
-        fallback_provider.model.clear();
-        fallback_provider.supports_multimodal = false;
-        fallback_provider.supports_stateful = false;
-        clear_legacy_llm_provider_fields(&mut fallback_provider);
-        return vec![fallback_provider];
-    }
-
-    let mut expanded_providers = Vec::new();
-    if !llm_model.is_empty() {
-        let mut llm_provider = provider.clone();
-        llm_provider.model_type = LlmModelType::Llm;
-        llm_provider.protocol = llm_protocol;
-        llm_provider.model = llm_model;
-        llm_provider.supports_multimodal = llm_supports_multimodal;
-        llm_provider.supports_stateful = llm_supports_stateful;
-        clear_legacy_llm_provider_fields(&mut llm_provider);
-        expanded_providers.push(llm_provider);
-    }
-    if !embedding_model.is_empty() {
-        let mut embedding_provider = provider;
-        embedding_provider.model_type = LlmModelType::Embedding;
-        embedding_provider.protocol = LlmProviderProtocol::Responses;
-        embedding_provider.model = embedding_model;
-        embedding_provider.supports_multimodal = false;
-        embedding_provider.supports_stateful = false;
-        clear_legacy_llm_provider_fields(&mut embedding_provider);
-        expanded_providers.push(embedding_provider);
-    }
-
-    expanded_providers
-}
-
-fn clear_legacy_llm_provider_fields(provider: &mut LlmProviderConfig) {
-    provider.legacy_protocol = None;
-    provider.legacy_supports_embedding = false;
-    provider.legacy_responses_model.clear();
-    provider.legacy_embedding_model.clear();
-}
-
-fn build_llm_provider_id_seed(
-    current_id: &str,
-    name: &str,
-    model_type: LlmModelType,
-    split_from_single_entry: bool,
-) -> String {
+fn build_llm_provider_id_seed(current_id: &str, name: &str) -> String {
     let seed = if current_id.trim().is_empty() {
         name.trim().to_string()
     } else {
         current_id.trim().to_string()
     };
-    if !split_from_single_entry || model_type == LlmModelType::Llm {
-        return seed;
+    seed
+}
+
+fn build_llm_model_id_seed(
+    current_id: &str,
+    provider_id: &str,
+    provider_name: &str,
+    model: &LlmModelConfig,
+) -> String {
+    if !current_id.trim().is_empty() {
+        return current_id.trim().to_string();
     }
 
-    if seed.is_empty() {
-        "embedding".to_string()
-    } else {
-        format!("{seed}-embedding")
+    if !model.model.trim().is_empty() {
+        return model.model.trim().to_string();
+    }
+
+    if !provider_id.trim().is_empty() {
+        return format!(
+            "{}-{}",
+            provider_id.trim(),
+            match model.model_type {
+                LlmModelType::Llm => "llm",
+                LlmModelType::Embedding => "embedding",
+            }
+        );
+    }
+
+    if !provider_name.trim().is_empty() {
+        return format!(
+            "{}-{}",
+            provider_name.trim(),
+            match model.model_type {
+                LlmModelType::Llm => "llm",
+                LlmModelType::Embedding => "embedding",
+            }
+        );
+    }
+
+    match model.model_type {
+        LlmModelType::Llm => "llm-model".to_string(),
+        LlmModelType::Embedding => "embedding-model".to_string(),
+    }
+}
+
+fn provider_group_model_type(provider: &LlmProviderConfig) -> LlmModelType {
+    provider
+        .models
+        .iter()
+        .find(|model| model.model_type == LlmModelType::Llm)
+        .map(|_| LlmModelType::Llm)
+        .or_else(|| provider.models.first().map(|model| model.model_type))
+        .unwrap_or_default()
+}
+
+fn normalize_llm_model_config(protocol: LlmProviderProtocol, model: &mut LlmModelConfig) {
+    model.model = model.model.trim().to_string();
+    model.model_identity_hint = model
+        .model_identity_hint
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    model.builtin_preset_model_id = model
+        .builtin_preset_model_id
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+
+    if model.model_type == LlmModelType::Llm && protocol != LlmProviderProtocol::Responses {
+        model.supports_multimodal = false;
+        model.supports_stateful = false;
+    }
+    if model.model.trim().is_empty() {
+        model.supports_multimodal = false;
+        model.supports_stateful = false;
+        model.model_identity_hint = None;
+        model.builtin_preset_model_id = None;
+    }
+    if model.model_type == LlmModelType::Embedding {
+        model.supports_stateful = false;
     }
 }
 
@@ -910,13 +848,9 @@ fn normalize_llm_provider_name(
     model: &str,
     base_url: &str,
     model_type: LlmModelType,
-    split_from_single_entry: bool,
 ) -> String {
     let trimmed = name.trim();
     if !trimmed.is_empty() {
-        if split_from_single_entry {
-            return format!("{trimmed} · {}", llm_model_type_label(model_type));
-        }
         return trimmed.to_string();
     }
 
@@ -927,9 +861,6 @@ fn normalize_llm_provider_name(
 
     let trimmed_base_url = base_url.trim();
     if !trimmed_base_url.is_empty() {
-        if split_from_single_entry {
-            return format!("{trimmed_base_url} · {}", llm_model_type_label(model_type));
-        }
         return trimmed_base_url.to_string();
     }
 
@@ -1030,6 +961,48 @@ fn make_llm_provider_id(
     base = base.trim_matches('-').to_string();
     if base.is_empty() {
         base = format!("llm-provider-{}", index + 1);
+    }
+
+    let mut candidate = base.clone();
+    let mut suffix = 2_u32;
+    while used_ids.contains(&candidate) {
+        candidate = format!("{base}-{suffix}");
+        suffix = suffix.saturating_add(1);
+    }
+    candidate
+}
+
+fn make_llm_model_id(
+    current_id: &str,
+    provider_id: &str,
+    model: &LlmModelConfig,
+    used_ids: &HashSet<String>,
+) -> String {
+    let seed = if current_id.trim().is_empty() {
+        match model.model_type {
+            LlmModelType::Llm => format!("{provider_id}-llm"),
+            LlmModelType::Embedding => format!("{provider_id}-embedding"),
+        }
+    } else {
+        current_id.trim().to_string()
+    };
+
+    let mut base = seed
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    base = base.trim_matches('-').to_string();
+    if base.is_empty() {
+        base = match model.model_type {
+            LlmModelType::Llm => "llm-model".to_string(),
+            LlmModelType::Embedding => "embedding-model".to_string(),
+        };
     }
 
     let mut candidate = base.clone();
@@ -1228,15 +1201,19 @@ mod tests {
             name: "OpenAI".to_string(),
             base_url: "https://api.openai.com/v1".to_string(),
             api_key: "sk-test".to_string(),
-            model_type: crate::domain::settings::LlmModelType::Llm,
-            model: "gpt-4.1-mini".to_string(),
-            supports_multimodal: true,
+            models: vec![crate::domain::settings::LlmModelConfig {
+                id: "openai".to_string(),
+                model_type: crate::domain::settings::LlmModelType::Llm,
+                model: "gpt-4.1-mini".to_string(),
+                supports_multimodal: true,
+                ..crate::domain::settings::LlmModelConfig::default()
+            }],
             ..crate::domain::settings::LlmProviderConfig::default()
         }];
-        config.llm.translation_provider_id = Some("openai".to_string());
-        config.llm.question_answer_provider_id = Some("openai".to_string());
+        config.llm.translation_model_id = Some("openai".to_string());
+        config.llm.question_answer_model_id = Some("openai".to_string());
         config.ocr.provider = crate::domain::settings::OcrProviderKind::LlmOcr;
-        config.ocr.llm_provider_id = Some("openai".to_string());
+        config.ocr.llm_model_id = Some("openai".to_string());
         config.rag.source_directories = vec!["/tmp/workspace".to_string()];
         config.rag.ignore_globs = vec!["**/*.png".to_string()];
         config.acp.agents.push(AcpAgentConfig {
@@ -1287,7 +1264,7 @@ mod tests {
         assert_eq!(parsed.prompts, config.prompts);
         assert_eq!(parsed.llm, config.llm);
         assert_eq!(parsed.ocr.provider, config.ocr.provider);
-        assert_eq!(parsed.ocr.llm_provider_id, config.ocr.llm_provider_id);
+        assert_eq!(parsed.ocr.llm_model_id, config.ocr.llm_model_id);
         assert_eq!(parsed.rag, config.rag);
         assert_eq!(parsed.acp.mcp_servers, config.acp.mcp_servers);
     }
@@ -1636,110 +1613,6 @@ ocr_translate = "Alt+D"
     }
 
     #[test]
-    fn parse_config_content_migrates_legacy_default_llm_provider_id() {
-        let content = r#"
-[llm]
-defaultProviderId = "missing"
-
-[[llm.providers]]
-id = ""
-name = "OpenAI"
-protocol = "openai_compatible"
-baseUrl = "https://api.openai.com/v1/"
-apiKey = ""
-model = "gpt-4.1-mini"
-supportsMultimodal = true
-"#;
-
-        let parsed = parse_config_content(content).expect("llm config should parse");
-
-        assert_eq!(parsed.llm.providers.len(), 1);
-        assert_eq!(parsed.llm.providers[0].id, "openai");
-        assert_eq!(
-            parsed.llm.providers[0].base_url,
-            "https://api.openai.com/v1"
-        );
-        assert_eq!(parsed.llm.translation_provider_id.as_deref(), None);
-        assert_eq!(parsed.llm.question_answer_provider_id.as_deref(), None);
-        assert_eq!(parsed.ocr.llm_provider_id, None);
-    }
-
-    #[test]
-    fn parse_config_content_maps_legacy_chat_protocol_to_chat_completions() {
-        let content = r#"
-[llm]
-
-[[llm.providers]]
-id = "chat"
-name = "Chat"
-protocol = "openai_compatible"
-baseUrl = "https://api.example.com/v1"
-apiKey = ""
-model = "gpt-4.1-mini"
-"#;
-
-        let parsed = parse_config_content(content).expect("legacy chat config should parse");
-
-        assert_eq!(parsed.llm.providers.len(), 1);
-        assert_eq!(
-            parsed.llm.providers[0].protocol,
-            crate::domain::settings::LlmProviderProtocol::ChatCompletions
-        );
-    }
-
-    #[test]
-    fn parse_config_content_splits_combined_provider_and_repairs_references() {
-        let content = r#"
-[llm]
-defaultProviderId = "combo"
-
-[[llm.providers]]
-id = "combo"
-name = "OpenAI"
-baseUrl = "https://api.openai.com/v1/"
-apiKey = ""
-responsesModel = "gpt-4.1-mini"
-supportsMultimodal = true
-embeddingModel = "text-embedding-3-small"
-
-[ocr]
-provider = "llm_ocr"
-llmProviderId = "combo"
-
-[rag]
-embeddingProviderId = "combo"
-"#;
-
-        let parsed = parse_config_content(content).expect("combined provider config should parse");
-
-        assert_eq!(parsed.llm.providers.len(), 2);
-        let llm_provider = parsed
-            .llm
-            .providers
-            .iter()
-            .find(|provider| provider.resolved_profile().can_handle_ai_task())
-            .expect("llm provider should exist");
-        let embedding_provider = parsed
-            .llm
-            .providers
-            .iter()
-            .find(|provider| provider.resolved_profile().can_handle_embedding())
-            .expect("embedding provider should exist");
-        assert_eq!(llm_provider.id, "combo");
-        assert_eq!(embedding_provider.id, "combo-embedding");
-        assert_eq!(parsed.llm.translation_provider_id.as_deref(), Some("combo"));
-        assert_eq!(
-            parsed.llm.question_answer_provider_id.as_deref(),
-            Some("combo")
-        );
-        assert_eq!(parsed.ocr.llm_provider_id.as_deref(), Some("combo"));
-        assert_eq!(
-            parsed.rag.embedding_provider_id.as_deref(),
-            Some("combo-embedding")
-        );
-    }
-
-    #[test]
     fn normalize_rag_settings_deduplicates_inputs_and_repairs_provider_reference() {
         let mut config = AppConfig::default();
         config.llm.providers = vec![
@@ -1748,9 +1621,13 @@ embeddingProviderId = "combo"
                 name: "Chat".to_string(),
                 base_url: "https://api.example.com/v1".to_string(),
                 api_key: String::new(),
-                model_type: crate::domain::settings::LlmModelType::Llm,
-                model: "gpt-4.1-mini".to_string(),
-                supports_multimodal: true,
+                models: vec![crate::domain::settings::LlmModelConfig {
+                    id: "chat".to_string(),
+                    model_type: crate::domain::settings::LlmModelType::Llm,
+                    model: "gpt-4.1-mini".to_string(),
+                    supports_multimodal: true,
+                    ..crate::domain::settings::LlmModelConfig::default()
+                }],
                 ..crate::domain::settings::LlmProviderConfig::default()
             },
             crate::domain::settings::LlmProviderConfig {
@@ -1758,9 +1635,13 @@ embeddingProviderId = "combo"
                 name: "Embedding".to_string(),
                 base_url: "https://api.example.com/v1".to_string(),
                 api_key: String::new(),
-                model_type: crate::domain::settings::LlmModelType::Embedding,
-                model: "text-embedding-3-small".to_string(),
-                supports_multimodal: false,
+                models: vec![crate::domain::settings::LlmModelConfig {
+                    id: "embedding".to_string(),
+                    model_type: crate::domain::settings::LlmModelType::Embedding,
+                    model: "text-embedding-3-small".to_string(),
+                    supports_multimodal: false,
+                    ..crate::domain::settings::LlmModelConfig::default()
+                }],
                 ..crate::domain::settings::LlmProviderConfig::default()
             },
         ];
@@ -1774,7 +1655,7 @@ embeddingProviderId = "combo"
             "**/*.png".to_string(),
             " **/node_modules/** ".to_string(),
         ];
-        config.rag.embedding_provider_id = Some("missing".to_string());
+        config.rag.embedding_model_id = Some("missing".to_string());
 
         config.normalize().expect("config should normalize");
 
@@ -1789,10 +1670,7 @@ embeddingProviderId = "combo"
                 .chain(["**/*.png".to_string()])
                 .collect::<Vec<_>>()
         );
-        assert_eq!(
-            config.rag.embedding_provider_id.as_deref(),
-            Some("embedding")
-        );
+        assert_eq!(config.rag.embedding_model_id.as_deref(), Some("embedding"));
     }
 
     #[test]
@@ -1834,20 +1712,21 @@ sourceDirectories = ["/tmp/docs"]
                 name: "Chat".to_string(),
                 base_url: "https://api.example.com/v1".to_string(),
                 api_key: String::new(),
-                model_type: crate::domain::settings::LlmModelType::Llm,
                 protocol: crate::domain::settings::LlmProviderProtocol::ChatCompletions,
-                model: "   ".to_string(),
-                model_identity_hint: None,
+                models: vec![crate::domain::settings::LlmModelConfig {
+                    id: "chat".to_string(),
+                    model_type: crate::domain::settings::LlmModelType::Llm,
+                    model: "   ".to_string(),
+                    model_identity_hint: None,
+                    builtin_preset_model_id: None,
+                    supports_multimodal: true,
+                    supports_stateful: true,
+                }],
                 builtin_preset_id: None,
-                builtin_preset_model_id: None,
                 managed_base_url: false,
-                supports_multimodal: true,
-                supports_stateful: true,
-                ..crate::domain::settings::LlmProviderConfig::default()
             }],
-            translation_provider_id: Some("chat".to_string()),
-            question_answer_provider_id: Some("chat".to_string()),
-            ..LlmSettings::default()
+            translation_model_id: Some("chat".to_string()),
+            question_answer_model_id: Some("chat".to_string()),
         };
 
         settings.normalize();
@@ -1858,12 +1737,43 @@ sourceDirectories = ["/tmp/docs"]
             crate::domain::settings::LlmProviderProtocol::ChatCompletions
         );
         assert_eq!(
-            settings.providers[0].model_type,
+            settings.providers[0].models[0].model_type,
             crate::domain::settings::LlmModelType::Llm
         );
-        assert_eq!(settings.providers[0].model, "");
-        assert_eq!(settings.translation_provider_id, None);
-        assert_eq!(settings.question_answer_provider_id, None);
+        assert_eq!(settings.providers[0].models[0].model, "");
+        assert_eq!(settings.translation_model_id, None);
+        assert_eq!(settings.question_answer_model_id, None);
+    }
+
+    #[test]
+    fn normalize_llm_settings_keeps_embedding_multimodal_flag() {
+        let mut settings = LlmSettings {
+            providers: vec![crate::domain::settings::LlmProviderConfig {
+                id: "embedding".to_string(),
+                name: "Embedding".to_string(),
+                base_url: "https://api.example.com/v1".to_string(),
+                api_key: String::new(),
+                protocol: crate::domain::settings::LlmProviderProtocol::Responses,
+                models: vec![crate::domain::settings::LlmModelConfig {
+                    id: "embedding".to_string(),
+                    model_type: crate::domain::settings::LlmModelType::Embedding,
+                    model: "multimodal-embedding-1".to_string(),
+                    supports_multimodal: true,
+                    ..crate::domain::settings::LlmModelConfig::default()
+                }],
+                ..crate::domain::settings::LlmProviderConfig::default()
+            }],
+            ..LlmSettings::default()
+        };
+
+        settings.normalize();
+
+        assert_eq!(settings.providers.len(), 1);
+        assert_eq!(
+            settings.providers[0].models[0].model_type,
+            crate::domain::settings::LlmModelType::Embedding
+        );
+        assert!(settings.providers[0].models[0].supports_multimodal);
     }
 
     #[tokio::test]

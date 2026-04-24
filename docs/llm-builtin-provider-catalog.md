@@ -241,7 +241,27 @@ SiliconFlow 免费语言模型目录按 2026-03-23 官方定价页列出以下 1
 - 这些模型里存在 OCR / 视觉理解模型，但 Wabity 当前 OCR 入口仍要求 `responses`；因此这里可以把它们作为普通 LLM 条目创建，用于翻译或问答试配，但不会自动进入 OCR 可选列表
 - 只收录官方定价页当前明确标为免费的语言模型；未标免费、已下线或不在当前页面中的模型不进白名单
 
-### 5. OpenAI / OpenRouter / DeepSeek / Ollama 模板补充
+### 5. 百炼 / 火山方舟 / 腾讯混元 模板补充
+
+当前目录继续补三类国内常见 OpenAI-compatible 服务：
+
+- `阿里云百炼`
+  - `defaultBaseUrl = https://dashscope.aliyuncs.com/compatible-mode/v1`
+  - 当前白名单先收录 `qwen-plus-latest`、`qwen-max-latest`、`qwen-vl-max-latest` 和 `text-embedding-v4`
+  - 文本与视觉模型按 `chat_completions` 模板接入；`text-embedding-v4` 作为 `Embedding` 条目进入 RAG
+  - 当前先不假设兼容 `/models` 稳定可用，模板动作重点放在官方控制台、API Key 文档和兼容接入文档
+- `火山方舟`
+  - `defaultBaseUrl = https://ark.cn-beijing.volces.com/api/v3`
+  - 火山方舟官方主链路是“先创建推理接入点，再通过 Endpoint ID 调用”；这和直接填写固定模型名不是一回事
+  - 因此模板只提供官方文档、API Key 入口和默认接入点，不内置固定模型白名单，也不默认暴露远端目录按钮
+  - 用户应在模型字段里填写当前接入点对应的 `Endpoint ID`
+- `腾讯混元`
+  - `defaultBaseUrl = https://api.hunyuan.cloud.tencent.com/v1`
+  - 当前白名单先收录 `hunyuan-turbos-latest`、`hunyuan-t1-latest`、`hunyuan-vision-1.5-instruct`、`hunyuan-translation-lite` 和 `hunyuan-embedding`
+  - 文本、推理、视觉、翻译模型按 `chat_completions` 模板接入；`hunyuan-embedding` 作为 `Embedding` 条目进入 RAG
+  - 视觉模型当前同样不会进入 OCR 列表，因为现有 OCR 入口仍要求 `responses + multimodal`
+
+### 6. OpenAI / OpenRouter / DeepSeek / Ollama 模板补充
 
 当前目录已额外补四类常见供应商：
 
@@ -591,3 +611,4 @@ UI 必须写清楚“是否可调用仍取决于供应商账户权限”。
 - 2026-03-23：落地首期实现：Rust/前端已接入智谱内置模板目录、白名单模型选择、模型一句话说明，以及“目录可见但当前不可选”的禁用模型展示
 - 2026-03-23：扩展第二批内置模板，新增 SiliconFlow 官方免费语言模型目录，来源对齐 `https://www.siliconflow.cn/pricing#bmf0`
 - 2026-03-31：扩展常见供应商模板，新增 OpenAI / DeepSeek / Ollama；同时把模板动作按钮改成供应商自定义标签，避免本地 provider 被误渲染成“注册 / API Key”流程
+- 2026-04-20：继续扩展国内常见兼容服务模板，新增阿里云百炼、火山方舟、腾讯混元；其中火山方舟按官方 Endpoint ID 模式只提供接入点模板，不预置固定模型白名单

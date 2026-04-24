@@ -3111,6 +3111,38 @@
 	border-bottom: 1px solid var(--border-soft);
 }
 
+.settings-llm-model-switcher {
+	display: grid;
+	gap: 10px;
+	min-width: 0;
+	padding: 0 0 12px;
+	border-bottom: 1px solid var(--border-soft);
+}
+
+.settings-llm-model-switcher-copy {
+	display: grid;
+	gap: 4px;
+	min-width: 0;
+}
+
+.settings-llm-model-actions {
+	align-items: stretch;
+	gap: 6px;
+}
+
+.settings-llm-model-tab {
+	max-width: 100%;
+	min-width: 0;
+	overflow-wrap: anywhere;
+	text-align: left;
+}
+
+.settings-llm-model-tab-selected {
+	border-color: var(--border-selected);
+	background: var(--surface-card-selected);
+	color: var(--text-strong);
+}
+
 .settings-llm-model-field {
 	grid-template-columns: clamp(5.75rem, 14%, 7.5rem) minmax(0, 1fr);
 	align-items: start;
@@ -3138,7 +3170,10 @@
 }
 
 .settings-llm-model-toggle,
-.settings-llm-model-refresh,
+.settings-llm-model-refresh {
+	min-height: 44px;
+}
+
 .settings-llm-mode-links .settings-text-link-action {
 	min-height: 40px;
 }

@@ -404,19 +404,9 @@ impl AppState {
     }
 
     pub async fn update_app_settings(&self, settings: AppSettings) -> Result<AppSettings> {
-        validate_llm_settings(&settings.llm)?;
-        validate_ocr_settings(&settings.ocr, &settings.llm)?;
-        validate_rag_settings(&settings.rag, &settings.llm)?;
         let store = self.config_store.write().await;
         let mut config = store.load().await?;
-        config.general = settings.general.clone();
-        config.notification = settings.notification.clone();
-        config.appearance = settings.appearance.clone();
-        config.prompts = settings.prompts.clone();
-        config.llm = settings.llm.clone();
-        config.ocr = settings.ocr.clone();
-        config.rag = settings.rag.clone();
-        config.normalize()?;
+        apply_app_settings_to_config(&mut config, settings)?;
         store.save(&config).await?;
         *write_runtime_lock(&self.ocr_provider, "ocr provider") =
             build_ocr_provider(&config.ocr, &config.llm);
@@ -675,6 +665,21 @@ impl AppState {
             .find(|agent| agent.id == selected_agent_id)
             .with_context(|| format!("unknown ACP agent: {selected_agent_id}"))
     }
+}
+
+fn apply_app_settings_to_config(config: &mut AppConfig, settings: AppSettings) -> Result<()> {
+    config.general = settings.general;
+    config.notification = settings.notification;
+    config.appearance = settings.appearance;
+    config.prompts = settings.prompts;
+    config.llm = settings.llm;
+    config.ocr = settings.ocr;
+    config.rag = settings.rag;
+    config.normalize()?;
+    validate_llm_settings(&config.llm)?;
+    validate_ocr_settings(&config.ocr, &config.llm)?;
+    validate_rag_settings(&config.rag, &config.llm)?;
+    Ok(())
 }
 
 fn read_runtime_lock<'a, T>(
@@ -1195,8 +1200,8 @@ mod tests {
             effective_mcp_servers, normalize_acp_agent_catalog, normalize_mcp_remote_url,
             reconcile_saved_session_builtin_mcp,
         },
-        merge_restored_session_snapshots, normalize_optional_id, normalize_required_id,
-        normalized_existing_session_id,
+        apply_app_settings_to_config, merge_restored_session_snapshots, normalize_optional_id,
+        normalize_required_id, normalized_existing_session_id,
         session_snapshot::apply_session_snapshot,
         settings::{validate_llm_provider_config, validate_rag_settings},
         LauncherWindowSize, LauncherWindowViewMode, ShortcutAction, ShortcutRuntimeState,
@@ -1208,9 +1213,12 @@ mod tests {
             AcpMcpServerConfig, AcpMcpServerHttpConfig, AcpSessionStatus, AcpSessionSummary,
             BuiltinMcpConfig, BuiltinMcpModuleKey,
         },
-        settings::{LlmProviderConfig, LlmProviderModelEntry, LlmSettings, RagSettings},
+        settings::{
+            AppSettings, LlmModelConfig, LlmModelType, LlmProviderConfig, LlmProviderModelEntry,
+            LlmProviderProtocol, LlmSettings, OcrProviderKind, RagSettings,
+        },
     };
-    use crate::infrastructure::config::SavedAcpSession;
+    use crate::infrastructure::config::{AppConfig, SavedAcpSession};
     use crate::infrastructure::openai_compatible::{extract_model_entries, extract_model_ids};
     use crate::services::builtin_mcp;
     use serde_json::json;
@@ -1468,21 +1476,24 @@ mod tests {
     }
 
     #[test]
-    fn missing_responses_model_rejects_multimodal_flag() {
+    fn embedding_provider_allows_multimodal_flag() {
         let provider = LlmProviderConfig {
             id: "embedding".to_string(),
             name: "Embedding".to_string(),
             base_url: "https://api.example.com/v1".to_string(),
             api_key: String::new(),
-            model_type: crate::domain::settings::LlmModelType::Embedding,
-            model: "text-embedding-3-small".to_string(),
-            supports_multimodal: true,
+            models: vec![crate::domain::settings::LlmModelConfig {
+                id: "embedding".to_string(),
+                model_type: crate::domain::settings::LlmModelType::Embedding,
+                model: "text-embedding-3-small".to_string(),
+                supports_multimodal: true,
+                ..crate::domain::settings::LlmModelConfig::default()
+            }],
             ..LlmProviderConfig::default()
         };
 
-        let error =
-            validate_llm_provider_config(&provider).expect_err("multimodal requires responses");
-        assert!(error.to_string().contains("responses 协议"));
+        validate_llm_provider_config(&provider)
+            .expect("embedding providers should allow multimodal flag");
     }
 
     #[test]
@@ -1492,9 +1503,13 @@ mod tests {
             name: "Embedding".to_string(),
             base_url: "https://api.example.com/v1".to_string(),
             api_key: String::new(),
-            model_type: crate::domain::settings::LlmModelType::Embedding,
-            model: "text-embedding-3-small".to_string(),
-            supports_stateful: true,
+            models: vec![crate::domain::settings::LlmModelConfig {
+                id: "embedding".to_string(),
+                model_type: crate::domain::settings::LlmModelType::Embedding,
+                model: "text-embedding-3-small".to_string(),
+                supports_stateful: true,
+                ..crate::domain::settings::LlmModelConfig::default()
+            }],
             ..LlmProviderConfig::default()
         };
 
@@ -1510,11 +1525,14 @@ mod tests {
             name: "智谱 AI".to_string(),
             base_url: "https://open.bigmodel.cn/api/paas/v4".to_string(),
             api_key: "key".to_string(),
-            model: "glm-4.9".to_string(),
             protocol: crate::domain::settings::LlmProviderProtocol::ChatCompletions,
+            models: vec![crate::domain::settings::LlmModelConfig {
+                id: "zhipu".to_string(),
+                model: "glm-4.9".to_string(),
+                ..crate::domain::settings::LlmModelConfig::default()
+            }],
             builtin_preset_id: Some("zhipu".to_string()),
             managed_base_url: true,
-            ..LlmProviderConfig::default()
         };
 
         validate_llm_provider_config(&provider)
@@ -1528,12 +1546,15 @@ mod tests {
             name: "智谱 AI".to_string(),
             base_url: "https://open.bigmodel.cn/api/paas/v4".to_string(),
             api_key: "key".to_string(),
-            model: "glm-4.9".to_string(),
             protocol: crate::domain::settings::LlmProviderProtocol::ChatCompletions,
+            models: vec![crate::domain::settings::LlmModelConfig {
+                id: "zhipu".to_string(),
+                model: "glm-4.9".to_string(),
+                builtin_preset_model_id: Some("glm-4.7-flash".to_string()),
+                ..crate::domain::settings::LlmModelConfig::default()
+            }],
             builtin_preset_id: Some("zhipu".to_string()),
-            builtin_preset_model_id: Some("glm-4.7-flash".to_string()),
             managed_base_url: true,
-            ..LlmProviderConfig::default()
         };
 
         let error = validate_llm_provider_config(&provider)
@@ -1548,12 +1569,15 @@ mod tests {
             name: "智谱 AI".to_string(),
             base_url: "https://open.bigmodel.cn/api/paas/v4".to_string(),
             api_key: "key".to_string(),
-            model: "cogview-3-flash".to_string(),
             protocol: crate::domain::settings::LlmProviderProtocol::ChatCompletions,
+            models: vec![crate::domain::settings::LlmModelConfig {
+                id: "zhipu".to_string(),
+                model: "cogview-3-flash".to_string(),
+                builtin_preset_model_id: Some("cogview-3-flash".to_string()),
+                ..crate::domain::settings::LlmModelConfig::default()
+            }],
             builtin_preset_id: Some("zhipu".to_string()),
-            builtin_preset_model_id: Some("cogview-3-flash".to_string()),
             managed_base_url: true,
-            ..LlmProviderConfig::default()
         };
 
         let error = validate_llm_provider_config(&provider)
@@ -1566,16 +1590,14 @@ mod tests {
         let rag_settings = RagSettings {
             source_directories: vec!["/tmp".to_string()],
             ignore_globs: Vec::new(),
-            embedding_provider_id: None,
+            embedding_model_id: None,
         };
         let llm_settings = LlmSettings::default();
 
         let error = validate_rag_settings(&rag_settings, &llm_settings)
             .expect_err("RAG sources must require an embedding provider");
 
-        assert!(error
-            .to_string()
-            .contains("必须选择一个 embedding provider"));
+        assert!(error.to_string().contains("必须选择一个 embedding 模型"));
     }
 
     #[test]
@@ -1583,7 +1605,7 @@ mod tests {
         let rag_settings = RagSettings {
             source_directories: Vec::new(),
             ignore_globs: Vec::new(),
-            embedding_provider_id: Some("chat".to_string()),
+            embedding_model_id: Some("chat".to_string()),
         };
         let llm_settings = LlmSettings {
             providers: vec![LlmProviderConfig {
@@ -1591,9 +1613,13 @@ mod tests {
                 name: "Chat".to_string(),
                 base_url: "https://api.example.com/v1".to_string(),
                 api_key: String::new(),
-                model_type: crate::domain::settings::LlmModelType::Llm,
-                model: "gpt-4.1-mini".to_string(),
-                supports_multimodal: false,
+                models: vec![crate::domain::settings::LlmModelConfig {
+                    id: "chat".to_string(),
+                    model_type: crate::domain::settings::LlmModelType::Llm,
+                    model: "gpt-4.1-mini".to_string(),
+                    supports_multimodal: false,
+                    ..crate::domain::settings::LlmModelConfig::default()
+                }],
                 ..LlmProviderConfig::default()
             }],
             ..LlmSettings::default()
@@ -1610,7 +1636,7 @@ mod tests {
         let rag_settings = RagSettings {
             source_directories: Vec::new(),
             ignore_globs: Vec::new(),
-            embedding_provider_id: Some("chat".to_string()),
+            embedding_model_id: Some("chat".to_string()),
         };
         let llm_settings = LlmSettings {
             providers: vec![LlmProviderConfig {
@@ -1618,9 +1644,13 @@ mod tests {
                 name: "Chat".to_string(),
                 base_url: "https://api.example.com/v1".to_string(),
                 api_key: String::new(),
-                model_type: crate::domain::settings::LlmModelType::Embedding,
-                model: "text-embedding-3-small".to_string(),
-                supports_multimodal: false,
+                models: vec![crate::domain::settings::LlmModelConfig {
+                    id: "chat".to_string(),
+                    model_type: crate::domain::settings::LlmModelType::Embedding,
+                    model: "text-embedding-3-small".to_string(),
+                    supports_multimodal: false,
+                    ..crate::domain::settings::LlmModelConfig::default()
+                }],
                 ..LlmProviderConfig::default()
             }],
             ..LlmSettings::default()
@@ -1628,6 +1658,72 @@ mod tests {
 
         validate_rag_settings(&rag_settings, &llm_settings)
             .expect("RAG should accept providers with embedding capability");
+    }
+
+    #[test]
+    fn apply_app_settings_repairs_dependent_model_references_before_validation() {
+        let mut config = AppConfig::default();
+        let settings = AppSettings {
+            general: config.general.clone(),
+            notification: config.notification.clone(),
+            appearance: config.appearance.clone(),
+            prompts: config.prompts.clone(),
+            llm: LlmSettings {
+                providers: vec![
+                    LlmProviderConfig {
+                        id: "replacement-chat".to_string(),
+                        name: "Replacement Chat".to_string(),
+                        base_url: "https://api.example.com/v1".to_string(),
+                        api_key: String::new(),
+                        protocol: LlmProviderProtocol::Responses,
+                        models: vec![LlmModelConfig {
+                            id: "replacement-chat".to_string(),
+                            model_type: LlmModelType::Llm,
+                            model: "gpt-4.1-mini".to_string(),
+                            supports_multimodal: true,
+                            ..LlmModelConfig::default()
+                        }],
+                        ..LlmProviderConfig::default()
+                    },
+                    LlmProviderConfig {
+                        id: "replacement-embedding".to_string(),
+                        name: "Replacement Embedding".to_string(),
+                        base_url: "https://api.example.com/v1".to_string(),
+                        api_key: String::new(),
+                        protocol: LlmProviderProtocol::Responses,
+                        models: vec![LlmModelConfig {
+                            id: "replacement-embedding".to_string(),
+                            model_type: LlmModelType::Embedding,
+                            model: "text-embedding-3-small".to_string(),
+                            ..LlmModelConfig::default()
+                        }],
+                        ..LlmProviderConfig::default()
+                    },
+                ],
+                translation_model_id: Some("deleted-chat".to_string()),
+                question_answer_model_id: Some("deleted-chat".to_string()),
+            },
+            ocr: crate::domain::settings::OcrSettings {
+                provider: OcrProviderKind::LlmOcr,
+                llm_model_id: Some("deleted-ocr".to_string()),
+            },
+            rag: RagSettings {
+                source_directories: Vec::new(),
+                ignore_globs: Vec::new(),
+                embedding_model_id: Some("deleted-embedding".to_string()),
+            },
+        };
+
+        apply_app_settings_to_config(&mut config, settings)
+            .expect("dependent model references should be repaired before validation");
+
+        assert_eq!(config.llm.translation_model_id, None);
+        assert_eq!(config.llm.question_answer_model_id, None);
+        assert_eq!(config.ocr.llm_model_id.as_deref(), Some("replacement-chat"));
+        assert_eq!(
+            config.rag.embedding_model_id.as_deref(),
+            Some("replacement-embedding")
+        );
     }
 
     #[test]

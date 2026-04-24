@@ -6,6 +6,7 @@ import {
 	browserBuiltinMcpServerStatus,
 	defaultRagIgnoreGlobs,
 } from "./defaults";
+import { hydrateAppSettings } from "./settingsNormalization";
 import {
 	beginTransientWindowInteraction,
 	endTransientWindowInteraction,
@@ -75,11 +76,11 @@ export async function onShortcutRuntimeStatusChanged(
 }
 
 export async function getAppSettings(): Promise<AppSettings> {
-	return invokeOrDefault("get_app_settings", browserAppSettings);
+	return hydrateAppSettings(await invokeOrDefault("get_app_settings", browserAppSettings));
 }
 
 export async function setAppSettings(settings: AppSettings): Promise<AppSettings> {
-	return invokeOrDefault("set_app_settings", settings, { settings });
+	return hydrateAppSettings(await invokeOrDefault("set_app_settings", settings, { settings }));
 }
 
 export async function getBuiltinMcpServerStatus(): Promise<BuiltinMcpServerStatus> {

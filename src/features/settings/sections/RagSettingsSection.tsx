@@ -107,7 +107,7 @@ export function RagSettingsSection({
 							</strong>
 							<span className="settings-agent-meta">
 								{selectedRagEmbeddingProvider
-									? `${selectedRagEmbeddingProvider.model} · ${selectedRagEmbeddingProvider.baseUrl}`
+									? `${selectedRagEmbeddingProvider.models[0]?.model ?? ""} · ${selectedRagEmbeddingProvider.baseUrl}`
 									: eligibleRagEmbeddingProviders.length > 0
 										? "先在右侧选一个 Embedding 条目。"
 										: "当前没有可用的 Embedding 条目，先去模型接入页新增一个。"}
@@ -271,34 +271,37 @@ export function RagSettingsSection({
 									<select
 										aria-describedby={joinDescribedByIds(
 											"rag-embedding-provider-description",
-											ragValidation.fieldIssues.embeddingProviderId
+											ragValidation.fieldIssues.embeddingModelId
 												? buildFieldIssueId("rag", "embedding-provider")
 												: undefined,
 										)}
-										aria-invalid={ragValidation.fieldIssues.embeddingProviderId ? true : undefined}
+										aria-invalid={ragValidation.fieldIssues.embeddingModelId ? true : undefined}
 										className="settings-select"
 										disabled={savingRag || scanningRag}
 										id="rag-embedding-provider"
 										onChange={(event) =>
 											setRagSettings((current) => ({
 												...current,
-												embeddingProviderId: event.target.value || null,
+												embeddingModelId: event.target.value || null,
 											}))
 										}
-										ref={bindRagFieldRef("embeddingProviderId")}
-										value={ragSettings.embeddingProviderId ?? ""}
+										ref={bindRagFieldRef("embeddingModelId")}
+										value={ragSettings.embeddingModelId ?? ""}
 									>
 										<option value="">选择一个配置了 embedding 模型的条目</option>
 										{eligibleRagEmbeddingProviders.map((provider) => (
-											<option key={provider.id} value={provider.id}>
-												{provider.name || provider.model || provider.baseUrl}
-												{` · ${provider.model}`}
+											<option
+												key={provider.models[0]?.id ?? provider.id}
+												value={provider.models[0]?.id ?? ""}
+											>
+												{provider.name || provider.models[0]?.model || provider.baseUrl}
+												{` · ${provider.models[0]?.model ?? ""}`}
 											</option>
 										))}
 									</select>
 									{renderFieldError(
 										buildFieldIssueId("rag", "embedding-provider"),
-										ragValidation.fieldIssues.embeddingProviderId,
+										ragValidation.fieldIssues.embeddingModelId,
 									)}
 								</div>
 							</div>

@@ -8,7 +8,7 @@ import {
 import type { BindSectionBlockRef } from "../sectionViewShared";
 import type { SettingsSectionId } from "../settingsTypes";
 
-type LlmProviderDisplaySource = Pick<LlmProviderConfig, "baseUrl" | "model" | "name">;
+type LlmProviderDisplaySource = Pick<LlmProviderConfig, "baseUrl" | "models" | "name">;
 
 interface AiTaskPromptCardProps {
 	bindSectionBlockRef: BindSectionBlockRef;
@@ -18,7 +18,7 @@ interface AiTaskPromptCardProps {
 	hasUnsavedChanges: boolean;
 	onDiscardDraft: () => void;
 	onPromptChange: (value: string) => void;
-	onProviderChange: (providerId: string | null) => void;
+	onProviderChange: (modelId: string | null) => void;
 	onRestoreDefault: () => void;
 	onSave: () => void;
 	onSelectSection: (sectionId: SettingsSectionId) => void;
@@ -60,8 +60,8 @@ export interface PromptsSettingsSectionProps {
 	setQuestionAnswerPromptExpanded: Dispatch<SetStateAction<boolean>>;
 	setPromptsSettings: Dispatch<SetStateAction<PromptsSettings>>;
 	onLlmRouteProviderChange: (
-		key: "translationProviderId" | "questionAnswerProviderId",
-		providerId: string | null,
+		key: "translationModelId" | "questionAnswerModelId",
+		modelId: string | null,
 	) => void;
 	onSelectSection: (sectionId: SettingsSectionId) => void;
 	onDiscardTranslationDraft: () => void;
@@ -74,7 +74,7 @@ export interface PromptsSettingsSectionProps {
 }
 
 function getLlmProviderDisplayName(provider: LlmProviderDisplaySource): string {
-	return provider.name || provider.model || provider.baseUrl;
+	return provider.name || provider.models[0]?.model || provider.baseUrl;
 }
 
 function AiTaskPromptCard({
@@ -140,7 +140,10 @@ function AiTaskPromptCard({
 				>
 					<option value="">请选择一个普通 LLM 条目</option>
 					{eligibleAiTaskProviders.map((provider) => (
-						<option key={provider.id} value={provider.id}>
+						<option
+							key={provider.models[0]?.id ?? provider.id}
+							value={provider.models[0]?.id ?? ""}
+						>
 							{getLlmProviderDisplayName(provider)}
 							{` · ${summarizeLlmProviderProfile(provider)}`}
 						</option>
@@ -279,9 +282,7 @@ export function PromptsSettingsSection({
 							translationPrompt: value,
 						}))
 					}
-					onProviderChange={(providerId) =>
-						onLlmRouteProviderChange("translationProviderId", providerId)
-					}
+					onProviderChange={(modelId) => onLlmRouteProviderChange("translationModelId", modelId)}
 					onRestoreDefault={() =>
 						setPromptsSettings((current) => ({
 							...current,
@@ -305,7 +306,7 @@ export function PromptsSettingsSection({
 					summarizeLlmProviderProfile={summarizeLlmProviderProfile}
 					title="翻译配置"
 					togglePromptExpanded={() => setTranslationPromptExpanded((current) => !current)}
-					value={llmSettings.translationProviderId ?? ""}
+					value={llmSettings.translationModelId ?? ""}
 				/>
 
 				<AiTaskPromptCard
@@ -321,9 +322,7 @@ export function PromptsSettingsSection({
 							ragAnswerSystemPrompt: value,
 						}))
 					}
-					onProviderChange={(providerId) =>
-						onLlmRouteProviderChange("questionAnswerProviderId", providerId)
-					}
+					onProviderChange={(modelId) => onLlmRouteProviderChange("questionAnswerModelId", modelId)}
 					onRestoreDefault={() =>
 						setPromptsSettings((current) => ({
 							...current,
@@ -347,7 +346,7 @@ export function PromptsSettingsSection({
 					summarizeLlmProviderProfile={summarizeLlmProviderProfile}
 					title="文档问答"
 					togglePromptExpanded={() => setQuestionAnswerPromptExpanded((current) => !current)}
-					value={llmSettings.questionAnswerProviderId ?? ""}
+					value={llmSettings.questionAnswerModelId ?? ""}
 				/>
 			</div>
 		</section>

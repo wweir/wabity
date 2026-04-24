@@ -22,6 +22,7 @@ import {
 import type {
 	FieldIssueMap,
 	LlmDraftValidation,
+	LlmEditableFieldKey,
 	LlmFieldKey,
 	LlmModelFieldKey,
 	LlmProviderKind,
@@ -47,7 +48,10 @@ export interface LlmSettingsSectionProps {
 	llmModelMenuRef: RefObject<HTMLDivElement | null>;
 	builtinLlmTemplates: BuiltinLlmProviderTemplate[];
 	onAddLlmProvider: () => void;
+	onAddLlmProviderModel: (providerId: string) => void;
 	onSelectLlmProvider: (providerId: string) => void;
+	onSelectLlmProviderModel: (providerId: string, modelId: string) => void;
+	onRemoveLlmProviderModel: (providerId: string, modelId: string) => void;
 	onRemoveLlmProvider: (providerId: string) => void;
 	onLocateFirstLlmIssue: () => void;
 	onDiscardLlmDraft: () => void;
@@ -55,10 +59,10 @@ export interface LlmSettingsSectionProps {
 	onLlmProviderTemplateChange: (providerId: string, templateId: string) => void;
 	onBuiltinProviderManagedBaseUrlChange: (providerId: string, managed: boolean) => void;
 	onLlmProviderKindChange: (providerId: string, kind: LlmProviderKind) => void;
-	onLlmProviderFieldChange: <K extends keyof LlmProviderConfig>(
+	onLlmProviderFieldChange: (
 		providerId: string,
-		key: K,
-		value: LlmProviderConfig[K],
+		key: LlmEditableFieldKey,
+		value: string | boolean,
 	) => void;
 	onToggleLlmModelMenu: (
 		provider: LlmProviderConfig,
@@ -86,18 +90,27 @@ export interface LlmSettingsSectionProps {
 	bindLlmFieldRef: BindLlmFieldRef;
 	buildLlmModelPickerId: (providerId: string, fieldKey: LlmModelFieldKey) => string;
 	getLlmProviderKind: (
-		provider: Pick<LlmProviderConfig, "modelType" | "protocol" | "supportsStateful">,
+		provider: Pick<LlmProviderConfig, "modelConfig" | "models" | "protocol">,
+		modelId?: string | null,
 	) => LlmProviderKind;
 	getLlmProviderKindLabel: (kind: LlmProviderKind) => string;
 	summarizeLlmProviderProfile: (provider: LlmProviderConfig) => string;
 	providerCanHandleOcr: (
-		provider: Pick<LlmProviderConfig, "modelType" | "model" | "protocol" | "supportsMultimodal">,
+		provider: Pick<LlmProviderConfig, "modelConfig" | "models" | "protocol">,
+		modelId?: string | null,
 	) => boolean;
-	providerIsLlmModel: (provider: Pick<LlmProviderConfig, "modelType">) => boolean;
+	providerIsLlmModel: (
+		provider: Pick<LlmProviderConfig, "modelConfig" | "models">,
+		modelId?: string | null,
+	) => boolean;
 	providerHasResponsesModel: (
-		provider: Pick<LlmProviderConfig, "modelType" | "model" | "protocol">,
+		provider: Pick<LlmProviderConfig, "modelConfig" | "models" | "protocol">,
+		modelId?: string | null,
 	) => boolean;
-	getLlmProviderModelPlaceholder: (provider: Pick<LlmProviderConfig, "modelType">) => string;
+	getLlmProviderModelPlaceholder: (
+		provider: Pick<LlmProviderConfig, "modelConfig" | "models">,
+		modelId?: string | null,
+	) => string;
 }
 
 export function LlmSettingsSection({
@@ -120,7 +133,10 @@ export function LlmSettingsSection({
 	llmModelMenuRef,
 	builtinLlmTemplates,
 	onAddLlmProvider,
+	onAddLlmProviderModel,
 	onSelectLlmProvider,
+	onSelectLlmProviderModel,
+	onRemoveLlmProviderModel,
 	onRemoveLlmProvider,
 	onLocateFirstLlmIssue,
 	onDiscardLlmDraft,
@@ -201,12 +217,14 @@ export function LlmSettingsSection({
 			return;
 		}
 
-		const listbox = event.currentTarget.closest('[role="listbox"]');
-		if (!(listbox instanceof HTMLElement)) {
+		const panel = event.currentTarget.closest("[data-llm-model-panel]");
+		if (!(panel instanceof HTMLElement)) {
 			return;
 		}
 
-		const options = Array.from(listbox.querySelectorAll<HTMLButtonElement>('[role="option"]'));
+		const options = Array.from(
+			panel.querySelectorAll<HTMLButtonElement>("[data-llm-model-option]"),
+		);
 		const currentIndex = options.indexOf(event.currentTarget);
 		if (currentIndex < 0) {
 			return;
@@ -254,13 +272,15 @@ export function LlmSettingsSection({
 			return;
 		}
 
-		const listbox = document.getElementById(`llm-provider-model-menu-${pending.providerId}`);
-		if (!(listbox instanceof HTMLElement)) {
+		const panel = document.getElementById(`llm-provider-model-menu-${pending.providerId}`);
+		if (!(panel instanceof HTMLElement)) {
 			return;
 		}
 
 		function tryFocus() {
-			const options = Array.from(listbox!.querySelectorAll<HTMLButtonElement>('[role="option"]'));
+			const options = Array.from(
+				panel!.querySelectorAll<HTMLButtonElement>("[data-llm-model-option]"),
+			);
 			if (options.length === 0) {
 				return false;
 			}
@@ -278,7 +298,7 @@ export function LlmSettingsSection({
 			}
 
 			const selectedOption =
-				options.find((option) => option.getAttribute("aria-selected") === "true") ?? options[0];
+				options.find((option) => option.getAttribute("aria-pressed") === "true") ?? options[0];
 			selectedOption?.focus();
 			return true;
 		}
@@ -292,7 +312,7 @@ export function LlmSettingsSection({
 				observer.disconnect();
 			}
 		});
-		observer.observe(listbox, { childList: true, subtree: true });
+		observer.observe(panel, { childList: true, subtree: true });
 		return () => observer.disconnect();
 	}, [openLlmModelPickerId]);
 
@@ -311,9 +331,22 @@ export function LlmSettingsSection({
 		}
 	}
 
+	function getProviderSelectedModel(provider: Pick<LlmProviderConfig, "modelConfig" | "models">) {
+		return (
+			provider.models.find((model) => model.id === provider.modelConfig?.id) ??
+			provider.models[0] ??
+			provider.modelConfig ??
+			null
+		);
+	}
+
 	const selectedProviderIssues = selectedLlmProvider
 		? (llmValidation.providerIssues[selectedLlmProvider.id] ?? [])
 		: [];
+	const selectedProviderModel = selectedLlmProvider
+		? getProviderSelectedModel(selectedLlmProvider)
+		: null;
+	const selectedProviderModelId = selectedProviderModel?.id ?? null;
 	const selectedProviderIssueCount = selectedProviderIssues.length;
 	const selectedModelPickerId = selectedLlmProvider
 		? buildLlmModelPickerId(selectedLlmProvider.id, "model")
@@ -321,23 +354,20 @@ export function LlmSettingsSection({
 	const isSelectedModelPickerOpen =
 		selectedModelPickerId !== null && openLlmModelPickerId === selectedModelPickerId;
 	const templateSupportsModelListing = selectedBuiltinLlmTemplate?.supportsModelListing ?? false;
-	const modelSourceTitle = selectedLlmProviderIsBuiltin
-		? selectedLlmProviderModels.length > 0
-			? `远端目录 · 已缓存 ${selectedLlmProviderModels.length} 个模型`
-			: templateSupportsModelListing
-				? "模板已挂载，等待拉取远端目录"
-				: "模板已挂载，当前只能手动填写"
-		: selectedLlmProviderModels.length > 0
-			? `远端目录 · 已缓存 ${selectedLlmProviderModels.length} 个模型`
-			: "手动填写或拉取远端目录";
+	const modelSourceTitle =
+		selectedLlmProviderModels.length > 0
+			? `已缓存 ${selectedLlmProviderModels.length} 个远端模型`
+			: selectedLlmProviderIsBuiltin && !templateSupportsModelListing
+				? "当前预设不提供远端目录"
+				: "可手填，也可拉取远端目录";
 	const modelSourceDescription = selectedLlmProviderIsBuiltin
 		? selectedLlmProviderModelsError
 			? selectedLlmProviderModelsError
 			: isLoadingSelectedLlmProviderModels
 				? "正在拉取 /models……"
 				: templateSupportsModelListing
-					? "模板不再提供预置模型；请以当前服务实际返回的目录为准，也可直接手填。"
-					: "当前模板不提供远端模型目录；请直接手填模型名。"
+					? "以当前服务返回的 /models 为准，也可以直接手填。"
+					: "直接手填模型名。"
 		: isLoadingSelectedLlmProviderModels
 			? "正在拉取 /models……"
 			: selectedLlmProviderModelsError
@@ -345,20 +375,20 @@ export function LlmSettingsSection({
 				: selectedLlmProviderModels.length > 0
 					? "可展开已缓存目录，也可直接手填。"
 					: selectedLlmProvider?.baseUrl.trim()
-						? "点「拉取」获取远端模型目录。"
+						? "点「拉取」读取 /models。"
 						: "先填 Base URL，再拉取或手填模型名。";
 	const templateSummary = selectedLlmProviderIsBuiltin
-		? `${selectedBuiltinLlmTemplate?.displayName ?? "模板"} 只负责提供官方入口和默认接入点；模型请以实际拉取结果或手填为准。`
-		: "模板只做供应商入口与接入点预填，不托管 API Key，也不再预置模型。";
+		? `${selectedBuiltinLlmTemplate?.displayName ?? "预设"} 提供官方入口和默认 Base URL。`
+		: "供应商预设只填入口和默认 Base URL，不保存 API Key。";
 	const providerKindSummary = selectedBuiltinLlmTemplateModel
-		? `当前模型命中 ${selectedBuiltinLlmTemplate?.displayName ?? "模板"} 目录，协议和能力按模型元数据自动回填；改模型后才可手动切换。`
-		: "影响协议、能力边界和 OCR/RAG 可用范围。已知模板模型会按模型元数据自动回填这一层。";
+		? `命中 ${selectedBuiltinLlmTemplate?.displayName ?? "预设"} 元数据，调用方式已自动回填。`
+		: "决定翻译、问答、OCR 和 RAG Embedding 是否能选用这个模型。";
 	const saveStatusLabel = llmHasUnsavedChanges ? "草稿未保存" : "已写入配置";
 	const saveStatusDetail =
 		selectedProviderIssueCount > 0 ? `${selectedProviderIssueCount} 个问题待修复` : "";
-	const selectedProviderHasModel = selectedLlmProvider?.model.trim().length ? true : false;
+	const selectedProviderHasModel = Boolean(selectedProviderModel?.model.trim().length);
 	const selectedProviderOcrReady = selectedLlmProvider
-		? providerCanHandleOcr(selectedLlmProvider)
+		? providerCanHandleOcr(selectedLlmProvider, selectedProviderModelId)
 		: false;
 	const modelToggleButtonText = isLoadingSelectedLlmProviderModels
 		? "加载"
@@ -371,9 +401,6 @@ export function LlmSettingsSection({
 			: selectedLlmProviderModels.length > 0
 				? "目录"
 				: "拉取";
-	const modePanelStatusLabel = selectedLlmProviderIsBuiltin ? "模板已挂载" : "手动";
-	const connectionPanelStatusLabel = selectedLlmProvider?.baseUrl.trim() ? "已填接入点" : "待补全";
-	const modelPanelStatusLabel = selectedLlmProvider?.model.trim() ? "已选模型" : "待选择";
 	const normalizedLlmModelFilter = llmModelFilter.trim().toLowerCase();
 	const filteredLlmProviderModels = useMemo(() => {
 		if (!normalizedLlmModelFilter) {
@@ -388,9 +415,10 @@ export function LlmSettingsSection({
 		filteredLlmProviderModels.length === selectedLlmProviderModels.length
 			? `远端目录 · 已拉取 ${selectedLlmProviderModels.length} 个模型`
 			: `远端目录 · 显示 ${filteredLlmProviderModels.length} / ${selectedLlmProviderModels.length} 个模型`;
-	const isLlmModel = selectedLlmProvider ? providerIsLlmModel(selectedLlmProvider) : false;
-	const ocrAvailable =
-		isLlmModel && selectedLlmProviderKind !== "llm_chat_completions";
+	const isLlmModel = selectedLlmProvider
+		? providerIsLlmModel(selectedLlmProvider, selectedProviderModelId)
+		: false;
+	const ocrAvailable = isLlmModel && selectedLlmProviderKind !== "llm_chat_completions";
 
 	function getAvailabilityTone(available: boolean): "success" | "info" | "warn" {
 		if (!available) {
@@ -444,14 +472,13 @@ export function LlmSettingsSection({
 					<div className="settings-acp-sidebar-header">
 						<div className="settings-acp-sidebar-copy">
 							<span className="settings-section-kicker">开始配置</span>
-							<h3 className="settings-subsection-title">还没有模型条目</h3>
+							<h3 className="settings-subsection-title">还没有 Provider 组</h3>
 							<span className="settings-help-text settings-help-text-tight">
-								先新增一个普通 LLM 条目。翻译、文档问答和 OCR 都会引用这里的条目；RAG 索引则使用
-								Embedding 条目。
+								先新增一个 Provider 组。翻译、文档问答、OCR 和 RAG 都会引用这里的具体模型。
 							</span>
 						</div>
 						<button className="settings-button" onClick={onAddLlmProvider} type="button">
-							新增条目
+							新增 Provider
 						</button>
 					</div>
 					<div className="settings-llm-empty-steps">
@@ -479,7 +506,9 @@ export function LlmSettingsSection({
 					>
 						<div className="settings-acp-sidebar-header">
 							<div className="settings-acp-sidebar-copy">
-								<h3 className="settings-subsection-title" id="llm-catalog-title">模型条目</h3>
+								<h3 className="settings-subsection-title" id="llm-catalog-title">
+									Provider 组
+								</h3>
 							</div>
 							<button
 								className="settings-button settings-button-compact"
@@ -490,12 +519,20 @@ export function LlmSettingsSection({
 							</button>
 						</div>
 
-						<div aria-label="模型条目目录" className="settings-llm-provider-grid" role="radiogroup">
+						<div
+							aria-label="Provider 组目录"
+							className="settings-llm-provider-grid"
+							role="radiogroup"
+						>
 							{llmSettings.providers.map((provider) => {
 								const issueCount = llmValidation.providerIssues[provider.id]?.length ?? 0;
 								const isSelected = provider.id === selectedLlmProviderId;
-								const providerKindLabel = getLlmProviderKindLabel(getLlmProviderKind(provider));
-								const providerModelLabel = provider.model.trim() || "未配置模型";
+								const providerSelectedModel = getProviderSelectedModel(provider);
+								const providerSelectedModelId = providerSelectedModel?.id ?? null;
+								const providerKindLabel = getLlmProviderKindLabel(
+									getLlmProviderKind(provider, providerSelectedModelId),
+								);
+								const providerModelLabel = providerSelectedModel?.model.trim() || "未配置模型";
 								const providerEndpointLabel = formatLlmProviderCatalogEndpoint(provider.baseUrl);
 								return (
 									<div
@@ -514,20 +551,26 @@ export function LlmSettingsSection({
 										>
 											<div className="settings-llm-provider-card-header">
 												<strong className="settings-agent-name">
-													{provider.name.trim() || "未命名模型条目"}
+													{provider.name.trim() || "未命名 Provider 组"}
 												</strong>
 												<div className="settings-llm-provider-card-badges">
-													{llmSettings.translationProviderId === provider.id ? (
+													{provider.models.some(
+														(model) => llmSettings.translationModelId === model.id,
+													) ? (
 														<span className="settings-status-chip settings-status-chip-strong">
 															翻译
 														</span>
 													) : null}
-													{llmSettings.questionAnswerProviderId === provider.id ? (
+													{provider.models.some(
+														(model) => llmSettings.questionAnswerModelId === model.id,
+													) ? (
 														<span className="settings-status-chip settings-status-chip-strong">
 															问答
 														</span>
 													) : null}
-													{providerCanHandleOcr(provider) ? (
+													{provider.models.some((model) =>
+														providerCanHandleOcr(provider, model.id),
+													) ? (
 														<span className="settings-status-chip">多模态</span>
 													) : null}
 													{issueCount > 0 ? (
@@ -649,14 +692,22 @@ export function LlmSettingsSection({
 									<div className="settings-llm-editor-main">
 										<div className="settings-rag-editor-panel settings-llm-editor-panel">
 											<div className="settings-editor-card-header settings-task-card-header">
-												<div className="settings-task-card-title-row">
-													<strong className="settings-agent-name">模板</strong>
-													<span className="settings-status-chip">{modePanelStatusLabel}</span>
+												<div className="settings-acp-detail-copy">
+													<span className="settings-section-kicker">接入模式</span>
+													<div className="settings-task-card-title-row">
+														<strong className="settings-agent-name">供应商预设与连接</strong>
+														<span className="settings-status-chip">
+															{selectedLlmProviderIsBuiltin ? "使用预设" : "手动接入"}
+														</span>
+													</div>
+													<span className="settings-help-text settings-help-text-tight">
+														先确认服务入口和密钥；模型在下一段维护。
+													</span>
 												</div>
 											</div>
 											<div className="settings-agent-fields settings-llm-panel-fields">
-												<label className="settings-label settings-label-stacked settings-llm-form-row">
-													<span>使用模板</span>
+												<label className="settings-label settings-label-stacked settings-llm-form-row settings-llm-field-wide">
+													<span>供应商预设</span>
 													<select
 														className="settings-select"
 														disabled={savingLlm}
@@ -669,7 +720,7 @@ export function LlmSettingsSection({
 														}
 														value={selectedLlmProvider.builtinPresetId ?? ""}
 													>
-														<option value="">不使用模板</option>
+														<option value="">不使用预设</option>
 														{builtinLlmTemplates.map((template) => (
 															<option key={template.id} value={template.id}>
 																{template.displayName}
@@ -707,17 +758,7 @@ export function LlmSettingsSection({
 														</div>
 													) : null}
 												</label>
-											</div>
-										</div>
 
-										<div className="settings-rag-editor-panel settings-llm-editor-panel">
-											<div className="settings-editor-card-header settings-task-card-header">
-												<div className="settings-task-card-title-row">
-													<strong className="settings-agent-name">名称、接入点与密钥</strong>
-													<span className="settings-status-chip">{connectionPanelStatusLabel}</span>
-												</div>
-											</div>
-											<div className="settings-agent-fields settings-llm-panel-fields">
 												<label className="settings-label settings-label-stacked settings-llm-form-row">
 													<span>名称</span>
 													<input
@@ -778,7 +819,7 @@ export function LlmSettingsSection({
 														<span className="settings-help-text settings-help-text-tight">
 															{selectedLlmProvider.managedBaseUrl ? (
 																<>
-																	当前跟随模板默认接入点。
+																	当前跟随预设默认接入点。
 																	<button
 																		className="settings-text-link"
 																		onClick={() =>
@@ -789,12 +830,12 @@ export function LlmSettingsSection({
 																		}
 																		type="button"
 																	>
-																		改为自定义接入点
+																		改为自定义
 																	</button>
 																</>
 															) : (
 																<>
-																	当前已改为自定义接入点。
+																	当前使用自定义接入点。
 																	<button
 																		className="settings-text-link"
 																		onClick={() =>
@@ -805,7 +846,7 @@ export function LlmSettingsSection({
 																		}
 																		type="button"
 																	>
-																		恢复模板默认接入点
+																		恢复预设
 																	</button>
 																</>
 															)}
@@ -840,7 +881,7 @@ export function LlmSettingsSection({
 														className="settings-help-text settings-help-text-tight"
 														id="llm-provider-api-key-help"
 													>
-														来自供应商控制台的密钥，仅存储在本地配置文件中。
+														只保存在本地配置；本地网关可以留空。
 													</span>
 												</label>
 											</div>
@@ -848,12 +889,66 @@ export function LlmSettingsSection({
 
 										<div className="settings-rag-editor-panel settings-llm-editor-panel">
 											<div className="settings-editor-card-header settings-task-card-header">
-												<div className="settings-task-card-title-row">
-													<strong className="settings-agent-name">来源与模型名</strong>
-													<span className="settings-status-chip">{modelPanelStatusLabel}</span>
+												<div className="settings-acp-detail-copy">
+													<span className="settings-section-kicker">当前模型</span>
+													<div className="settings-task-card-title-row">
+														<strong className="settings-agent-name">模型、调用方式与用途</strong>
+														<span className="settings-status-chip">
+															{selectedLlmProvider.models.length} 个模型
+														</span>
+													</div>
 												</div>
 											</div>
 											<div className="settings-agent-fields settings-llm-panel-fields">
+												<div className="settings-llm-model-switcher">
+													<div className="settings-llm-model-switcher-copy">
+														<strong className="settings-agent-name">组内模型</strong>
+														<span className="settings-agent-meta">
+															翻译、问答、OCR 和 RAG 都引用具体模型 ID。
+														</span>
+													</div>
+													<div className="settings-inline-actions settings-llm-model-actions">
+														{selectedLlmProvider.models.map((model) => (
+															<button
+																className={`settings-button settings-llm-model-tab ${
+																	model.id === selectedProviderModelId
+																		? "settings-llm-model-tab-selected"
+																		: "settings-agent-secondary"
+																}`}
+																key={model.id}
+																onClick={() =>
+																	onSelectLlmProviderModel(selectedLlmProvider.id, model.id)
+																}
+																type="button"
+															>
+																{model.model.trim() || "未命名模型"}
+															</button>
+														))}
+														<button
+															className="settings-button settings-agent-secondary settings-llm-model-tab"
+															disabled={savingLlm}
+															onClick={() => onAddLlmProviderModel(selectedLlmProvider.id)}
+															type="button"
+														>
+															新增模型
+														</button>
+														{selectedLlmProvider.models.length > 1 && selectedProviderModelId ? (
+															<button
+																className="settings-text-link settings-text-link-action settings-text-link-action-quiet settings-text-link-danger"
+																disabled={savingLlm}
+																onClick={() =>
+																	onRemoveLlmProviderModel(
+																		selectedLlmProvider.id,
+																		selectedProviderModelId,
+																	)
+																}
+																type="button"
+															>
+																删除当前模型
+															</button>
+														) : null}
+													</div>
+												</div>
 												<div className="settings-llm-model-source">
 													<strong className="settings-agent-name">{modelSourceTitle}</strong>
 													<span className="settings-agent-meta">{modelSourceDescription}</span>
@@ -867,7 +962,6 @@ export function LlmSettingsSection({
 													<div className="settings-llm-model-picker" ref={llmModelMenuRef}>
 														<div className="settings-llm-model-input-row">
 															<input
-																aria-autocomplete="list"
 																aria-controls={
 																	isSelectedModelPickerOpen
 																		? `llm-provider-model-menu-${selectedLlmProvider.id}`
@@ -879,8 +973,6 @@ export function LlmSettingsSection({
 																		: undefined,
 																	"llm-provider-model-help",
 																)}
-																aria-expanded={isSelectedModelPickerOpen}
-																aria-haspopup="listbox"
 																aria-invalid={selectedLlmFieldIssues.model ? true : undefined}
 																aria-labelledby={`llm-provider-model-label-${selectedLlmProvider.id}`}
 																className="settings-input settings-input-wide settings-input-mono"
@@ -896,16 +988,17 @@ export function LlmSettingsSection({
 																onKeyDown={(event) =>
 																	onLlmModelInputKeyDown(event, selectedLlmProvider, "model")
 																}
-																placeholder={getLlmProviderModelPlaceholder(selectedLlmProvider)}
+																placeholder={getLlmProviderModelPlaceholder(
+																	selectedLlmProvider,
+																	selectedProviderModelId,
+																)}
 																ref={bindLlmFieldRef(selectedLlmProvider.id, "model")}
-																role="combobox"
 																type="text"
-																value={selectedLlmProvider.model}
+																value={selectedProviderModel?.model ?? ""}
 															/>
 															<button
 																aria-controls={`llm-provider-model-menu-${selectedLlmProvider.id}`}
 																aria-expanded={isSelectedModelPickerOpen}
-																aria-haspopup="listbox"
 																aria-label={
 																	selectedLlmProviderIsBuiltin
 																		? selectedLlmProviderModels.length > 0
@@ -958,9 +1051,10 @@ export function LlmSettingsSection({
 															<div
 																aria-labelledby={`llm-provider-model-label-${selectedLlmProvider.id}`}
 																className="settings-combobox-panel settings-llm-model-panel"
+																data-llm-model-panel
 																id={`llm-provider-model-menu-${selectedLlmProvider.id}`}
 																ref={modelPanelRef}
-																role="listbox"
+																role="region"
 															>
 																<div className="settings-llm-model-panel-header">
 																	<div className="settings-llm-model-panel-header-copy">
@@ -998,12 +1092,13 @@ export function LlmSettingsSection({
 																	filteredLlmProviderModels.length > 0 ? (
 																		filteredLlmProviderModels.map((model) => (
 																			<button
-																				aria-selected={selectedLlmProvider.model === model.id}
+																				aria-pressed={selectedProviderModel?.model === model.id}
 																				className={`settings-combobox-option settings-llm-model-option ${
-																					selectedLlmProvider.model === model.id
+																					selectedProviderModel?.model === model.id
 																						? "settings-combobox-option-active"
 																						: ""
 																				}`}
+																				data-llm-model-option
 																				id={`llm-provider-model-option-remote-${selectedLlmProvider.id}-${model.id}`}
 																				key={`remote-${model.id}`}
 																				onClick={() =>
@@ -1015,7 +1110,6 @@ export function LlmSettingsSection({
 																				}
 																				onKeyDown={handleLlmModelOptionKeyDown}
 																				onMouseDown={(event) => event.preventDefault()}
-																				role="option"
 																				tabIndex={-1}
 																				type="button"
 																			>
@@ -1023,7 +1117,7 @@ export function LlmSettingsSection({
 																					{model.id}
 																				</span>
 																				<span className="settings-combobox-option-meta">
-																					{selectedLlmProvider.model === model.id
+																					{selectedProviderModel?.model === model.id
 																						? "当前已填入输入框"
 																						: "来自当前服务目录"}
 																				</span>
@@ -1045,12 +1139,13 @@ export function LlmSettingsSection({
 																) : filteredLlmProviderModels.length > 0 ? (
 																	filteredLlmProviderModels.map((model) => (
 																		<button
-																			aria-selected={selectedLlmProvider.model === model.id}
+																			aria-pressed={selectedProviderModel?.model === model.id}
 																			className={`settings-combobox-option settings-llm-model-option ${
-																				selectedLlmProvider.model === model.id
+																				selectedProviderModel?.model === model.id
 																					? "settings-combobox-option-active"
 																					: ""
 																			}`}
+																			data-llm-model-option
 																			id={`llm-provider-model-option-${selectedLlmProvider.id}-${model.id}`}
 																			key={model.id}
 																			onClick={() =>
@@ -1062,7 +1157,6 @@ export function LlmSettingsSection({
 																			}
 																			onKeyDown={handleLlmModelOptionKeyDown}
 																			onMouseDown={(event) => event.preventDefault()}
-																			role="option"
 																			tabIndex={-1}
 																			type="button"
 																		>
@@ -1070,7 +1164,7 @@ export function LlmSettingsSection({
 																				{model.id}
 																			</span>
 																			<span className="settings-combobox-option-meta">
-																				{selectedLlmProvider.model === model.id
+																				{selectedProviderModel?.model === model.id
 																					? "当前已填入输入框"
 																					: "点击填入输入框"}
 																			</span>
@@ -1114,7 +1208,7 @@ export function LlmSettingsSection({
 														{providerKindSummary}
 													</span>
 												</label>
-												{providerIsLlmModel(selectedLlmProvider) &&
+												{providerIsLlmModel(selectedLlmProvider, selectedProviderModelId) &&
 												selectedLlmProviderKind !== "llm_chat_completions" ? (
 													<label className="settings-llm-capability-toggle">
 														<div className="settings-llm-capability-copy">
@@ -1126,10 +1220,14 @@ export function LlmSettingsSection({
 															</span>
 														</div>
 														<input
-															checked={selectedLlmProvider.supportsMultimodal}
+															checked={selectedProviderModel?.supportsMultimodal ?? false}
 															className="settings-toggle"
 															disabled={
-																savingLlm || !providerHasResponsesModel(selectedLlmProvider)
+																savingLlm ||
+																!providerHasResponsesModel(
+																	selectedLlmProvider,
+																	selectedProviderModelId,
+																)
 															}
 															onChange={(event) =>
 																onLlmProviderFieldChange(
@@ -1160,7 +1258,7 @@ export function LlmSettingsSection({
 							</>
 						) : (
 							<div className="settings-empty-panel">
-								<strong className="settings-empty-title">没有可编辑的模型条目</strong>
+								<strong className="settings-empty-title">没有可编辑的 Provider 组</strong>
 								<span className="settings-help-text settings-help-text-tight">
 									左侧新增一个条目后，先选模板或调用方式，再补全名称、Base URL 和模型名。
 								</span>

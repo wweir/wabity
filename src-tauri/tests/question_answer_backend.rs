@@ -60,18 +60,21 @@ fn build_llm_settings(
         "name": "QA Provider",
         "baseUrl": base_url,
         "apiKey": "test-key",
-        "modelType": "llm",
         "protocol": protocol_name,
-        "model": "mock-model",
-        "supportsStateful": supports_stateful
+        "models": [{
+            "id": "qa-provider",
+            "modelType": "llm",
+            "model": "mock-model",
+            "supportsStateful": supports_stateful
+        }]
     }))
     .expect("failed to deserialize test provider");
-    assert_eq!(provider.model_type, LlmModelType::Llm);
+    assert_eq!(provider.models[0].model_type, LlmModelType::Llm);
     assert_eq!(provider.protocol, protocol);
 
     serde_json::from_value(json!({
         "providers": [provider],
-        "questionAnswerProviderId": "qa-provider"
+        "questionAnswerModelId": "qa-provider"
     }))
     .expect("failed to deserialize llm settings")
 }

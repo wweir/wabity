@@ -717,18 +717,16 @@ async fn perform_shortcut_ocr(
     match settings.ocr.provider {
         crate::domain::settings::OcrProviderKind::LlmOcr => {
             let result = async {
-                let provider_id = settings
+                let model_id = settings
                     .ocr
-                    .llm_provider_id
+                    .llm_model_id
                     .as_deref()
                     .context("没有配置 OCR LLM，请先在 AI 功能页选择一个条目")?;
-                let provider = settings
+                let binding = settings
                     .llm
-                    .providers
-                    .iter()
-                    .find(|provider| provider.id == provider_id)
-                    .with_context(|| format!("OCR LLM provider 不存在: {provider_id}"))?;
-                ocr::recognize_with_openai_compatible_config(provider, &request).await
+                    .find_model_binding(model_id)
+                    .with_context(|| format!("OCR LLM 模型不存在: {model_id}"))?;
+                ocr::recognize_with_openai_compatible_config(binding, &request).await
             }
             .await;
             ocr::remove_screenshot_file(&screenshot_path);

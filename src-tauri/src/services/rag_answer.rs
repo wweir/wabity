@@ -59,7 +59,7 @@ use crate::{
             ExecutionConversationTurn, ExecutionProgressEvent, ExecutionResult, ExecutionToolCall,
         },
         settings::{
-            LlmProviderConfig, LlmProviderProtocol, LlmSettings, PromptsSettings, RagSettings,
+            LlmProviderProtocol, LlmSettings, PromptsSettings, RagSettings, ResolvedLlmModelBinding,
         },
     },
     infrastructure::openai_compatible::{
@@ -178,22 +178,22 @@ pub async fn answer_question(request: QuestionAnswerRequest<'_>) -> Result<Execu
         "文档问答 · 正在检查模型与工具配置",
     );
 
-    let provider = resolve_answer_provider(request.llm_settings)?;
+    let binding = resolve_answer_model_binding(request.llm_settings)?;
     let client = HttpClient::builder()
         .timeout(Duration::from_secs(90))
         .build()
         .context("failed to build HTTP client for question answering")?;
-    let base_url = normalize_base_url(&provider.base_url, "LLM provider base URL")?;
-    let api_key = provider.api_key.trim();
-    let model = provider
-        .llm_model_name()
+    let base_url = normalize_base_url(&binding.provider().base_url, "LLM provider base URL")?;
+    let api_key = binding.provider().api_key.trim();
+    let model = binding
+        .model_name()
         .context("问答使用的 LLM 模型不能为空")?;
     let system_prompt =
         build_runtime_system_prompt(&request.prompts_settings.rag_answer_system_prompt);
     let prepared_conversation_state = prepare_conversation_state(
         request.conversation,
         request.conversation_state,
-        provider,
+        binding,
         request.workspace_root,
     );
     let runtime = QuestionToolRuntime {
@@ -205,7 +205,7 @@ pub async fn answer_question(request: QuestionAnswerRequest<'_>) -> Result<Execu
         progress_event_tx: request.progress_event_tx.clone(),
     };
     let execution = QuestionAnswerExecutionContext {
-        provider,
+        binding,
         client: &client,
         base_url: &base_url,
         api_key,
@@ -217,13 +217,13 @@ pub async fn answer_question(request: QuestionAnswerRequest<'_>) -> Result<Execu
         conversation_state: &prepared_conversation_state.state,
         mcp_servers: request.mcp_servers,
     };
-    let initial_protocol = answer_protocol(provider);
+    let initial_protocol = answer_protocol(binding);
     let (answer, protocol, tool_catalog) = request_answer(initial_protocol, &execution).await?;
     let response_id = answer.response_id.clone();
     let citations = deduplicate_and_number_citations(answer.citations.clone());
     let conversation_state = build_answer_conversation_state(
         response_id,
-        provider,
+        binding,
         request.workspace_root,
         &citations,
         &answer.actions,
@@ -232,7 +232,7 @@ pub async fn answer_question(request: QuestionAnswerRequest<'_>) -> Result<Execu
 
     build_execution_result(
         question,
-        protocol_label(protocol, provider),
+        protocol_label(protocol, binding),
         answer,
         conversation_state,
         tool_catalog.available_names,
@@ -241,7 +241,7 @@ pub async fn answer_question(request: QuestionAnswerRequest<'_>) -> Result<Execu
 }
 
 struct QuestionAnswerExecutionContext<'a> {
-    provider: &'a LlmProviderConfig,
+    binding: ResolvedLlmModelBinding<'a>,
     client: &'a HttpClient,
     base_url: &'a str,
     api_key: &'a str,
@@ -277,7 +277,7 @@ async fn request_answer(
                 base_url: context.base_url,
                 api_key: context.api_key,
                 model: context.model,
-                supports_stateful: context.provider.resolved_profile().supports_stateful(),
+                supports_stateful: context.binding.supports_stateful(),
                 system_prompt: context.system_prompt,
                 tool_catalog: &tool_catalog,
                 conversation: context.conversation,
@@ -855,17 +855,20 @@ async fn answer_with_chat_completions(
     })
 }
 
-fn answer_protocol(provider: &LlmProviderConfig) -> QuestionAnswerProtocol {
-    match provider.protocol {
+fn answer_protocol(binding: ResolvedLlmModelBinding<'_>) -> QuestionAnswerProtocol {
+    match binding.provider().protocol {
         LlmProviderProtocol::Responses => QuestionAnswerProtocol::Responses,
         LlmProviderProtocol::ChatCompletions => QuestionAnswerProtocol::ChatCompletions,
     }
 }
 
-fn protocol_label(protocol: QuestionAnswerProtocol, provider: &LlmProviderConfig) -> String {
+fn protocol_label(
+    protocol: QuestionAnswerProtocol,
+    binding: ResolvedLlmModelBinding<'_>,
+) -> String {
     match protocol {
         QuestionAnswerProtocol::Responses => {
-            if provider.resolved_profile().supports_stateful() {
+            if binding.supports_stateful() {
                 "responses(stateful)".to_string()
             } else {
                 "responses(stateless)".to_string()
@@ -957,25 +960,23 @@ struct ChatCompletionsTurnRequest<'a> {
     messages: &'a [Value],
 }
 
-fn resolve_answer_provider(llm_settings: &LlmSettings) -> Result<&LlmProviderConfig> {
-    let provider_id = llm_settings
-        .question_answer_provider_id
+fn resolve_answer_model_binding(llm_settings: &LlmSettings) -> Result<ResolvedLlmModelBinding<'_>> {
+    let model_id = llm_settings
+        .question_answer_model_id
         .as_deref()
         .context("没有配置问答 LLM，请先在 AI 功能页选择一个条目")?;
-    let provider = llm_settings
-        .providers
-        .iter()
-        .find(|provider| provider.id == provider_id)
-        .with_context(|| format!("问答 LLM provider 不存在: {provider_id}"))?;
-    validate_answer_provider(provider)?;
-    Ok(provider)
+    let binding = llm_settings
+        .find_model_binding(model_id)
+        .with_context(|| format!("问答 LLM 模型不存在: {model_id}"))?;
+    validate_answer_provider(binding)?;
+    Ok(binding)
 }
 
-fn validate_answer_provider(provider: &LlmProviderConfig) -> Result<()> {
-    if provider.base_url.trim().is_empty() {
+fn validate_answer_provider(binding: ResolvedLlmModelBinding<'_>) -> Result<()> {
+    if binding.provider().base_url.trim().is_empty() {
         bail!("问答使用的 LLM provider base URL 不能为空");
     }
-    if provider.llm_model_name().is_none() {
+    if !binding.can_handle_ai_task() {
         bail!("问答使用的 LLM 模型不能为空");
     }
 
@@ -1048,9 +1049,13 @@ mod tests {
             id: "test".to_string(),
             name: "Test".to_string(),
             base_url: "https://api.example.com/v1".to_string(),
-            model_type: LlmModelType::Llm,
             protocol: LlmProviderProtocol::Responses,
-            model: "gpt-test".to_string(),
+            models: vec![crate::domain::settings::LlmModelConfig {
+                id: "test".to_string(),
+                model_type: LlmModelType::Llm,
+                model: "gpt-test".to_string(),
+                ..crate::domain::settings::LlmModelConfig::default()
+            }],
             ..LlmProviderConfig::default()
         }
     }
@@ -1278,10 +1283,11 @@ mod tests {
     #[test]
     fn prepare_conversation_state_keeps_matching_scope_and_carried_evidence() {
         let provider = test_provider();
+        let binding = provider.find_model_binding("test").unwrap();
         let workspace_root = Path::new("/workspace");
         let carried_state = ExecutionConversationState {
             previous_response_id: Some("resp_123".to_string()),
-            continuation_scope: Some(provider_continuation_scope(&provider, workspace_root)),
+            continuation_scope: Some(provider_continuation_scope(binding, workspace_root)),
             citations: vec![test_citation("~/a.md")],
             actions: vec![AcpActionEvent {
                 kind: "info".to_string(),
@@ -1304,7 +1310,7 @@ mod tests {
         let prepared = prepare_conversation_state(
             &conversation,
             Some(&carried_state),
-            &provider,
+            binding,
             workspace_root,
         );
 
@@ -1321,6 +1327,7 @@ mod tests {
     #[test]
     fn prepare_conversation_state_resets_mismatched_scope() {
         let provider = test_provider();
+        let binding = provider.find_model_binding("test").unwrap();
         let workspace_root = Path::new("/workspace");
         let carried_state = ExecutionConversationState {
             previous_response_id: Some("resp_123".to_string()),
@@ -1337,10 +1344,10 @@ mod tests {
         let prepared = prepare_conversation_state(
             &conversation,
             Some(&carried_state),
-            &provider,
+            binding,
             workspace_root,
         );
-        let expected_scope = provider_continuation_scope(&provider, workspace_root);
+        let expected_scope = provider_continuation_scope(binding, workspace_root);
 
         assert!(prepared.conversation.is_empty());
         assert_eq!(prepared.state.previous_response_id, None);
@@ -1354,10 +1361,11 @@ mod tests {
     #[test]
     fn answer_conversation_state_captures_scope_and_evidence() {
         let provider = test_provider();
+        let binding = provider.find_model_binding("test").unwrap();
         let workspace_root = Path::new("/workspace");
         let state = build_answer_conversation_state(
             Some("resp_456".to_string()),
-            &provider,
+            binding,
             workspace_root,
             &[test_citation("~/a.md")],
             &[AcpActionEvent {
@@ -1373,7 +1381,7 @@ mod tests {
                 summary: "hits=1".to_string(),
             }],
         );
-        let expected_scope = provider_continuation_scope(&provider, workspace_root);
+        let expected_scope = provider_continuation_scope(binding, workspace_root);
 
         assert_eq!(state.previous_response_id.as_deref(), Some("resp_456"));
         assert_eq!(state.citations.len(), 1);

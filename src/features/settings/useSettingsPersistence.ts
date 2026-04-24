@@ -129,7 +129,7 @@ export function useSettingsPersistence(args: UseSettingsPersistenceArgs) {
 		options: {
 			adoptPromptKeys: Array<keyof PromptsSettings>;
 			adoptLlmProviders: boolean;
-			adoptLlmRouteKeys: Array<"translationProviderId" | "questionAnswerProviderId">;
+			adoptLlmRouteKeys: Array<"translationModelId" | "questionAnswerModelId">;
 			adoptProviderDependencies: boolean;
 			adoptOcr: boolean;
 			adoptRag: boolean;
@@ -160,16 +160,16 @@ export function useSettingsPersistence(args: UseSettingsPersistenceArgs) {
 						providers: options.adoptLlmProviders
 							? nextSavedLlmSettings.providers
 							: current.providers,
-						translationProviderId:
+						translationModelId:
 							options.adoptProviderDependencies ||
-							options.adoptLlmRouteKeys.includes("translationProviderId")
-								? nextSavedLlmSettings.translationProviderId
-								: current.translationProviderId,
-						questionAnswerProviderId:
+							options.adoptLlmRouteKeys.includes("translationModelId")
+								? nextSavedLlmSettings.translationModelId
+								: current.translationModelId,
+						questionAnswerModelId:
 							options.adoptProviderDependencies ||
-							options.adoptLlmRouteKeys.includes("questionAnswerProviderId")
-								? nextSavedLlmSettings.questionAnswerProviderId
-								: current.questionAnswerProviderId,
+							options.adoptLlmRouteKeys.includes("questionAnswerModelId")
+								? nextSavedLlmSettings.questionAnswerModelId
+								: current.questionAnswerModelId,
 					}),
 				);
 			}
@@ -178,7 +178,7 @@ export function useSettingsPersistence(args: UseSettingsPersistenceArgs) {
 					reconcileOcrSettings(
 						{
 							...current,
-							llmProviderId: saved.ocr.llmProviderId,
+							llmModelId: saved.ocr.llmModelId,
 						},
 						saved.llm.providers,
 					),
@@ -187,7 +187,7 @@ export function useSettingsPersistence(args: UseSettingsPersistenceArgs) {
 					reconcileRagSettings(
 						{
 							...current,
-							embeddingProviderId: saved.rag.embeddingProviderId,
+							embeddingModelId: saved.rag.embeddingModelId,
 						},
 						saved.llm.providers,
 					),
@@ -268,7 +268,7 @@ export function useSettingsPersistence(args: UseSettingsPersistenceArgs) {
 				},
 				llm: {
 					...args.persistedAppSettings.llm,
-					translationProviderId: args.llmSettings.translationProviderId,
+					translationModelId: args.llmSettings.translationModelId,
 				},
 				ocr: args.persistedAppSettings.ocr,
 				rag: args.persistedAppSettings.rag,
@@ -278,7 +278,7 @@ export function useSettingsPersistence(args: UseSettingsPersistenceArgs) {
 			{
 				adoptPromptKeys: ["translationPrompt"],
 				adoptLlmProviders: false,
-				adoptLlmRouteKeys: ["translationProviderId"],
+				adoptLlmRouteKeys: ["translationModelId"],
 				adoptProviderDependencies: false,
 				adoptOcr: false,
 				adoptRag: false,
@@ -298,7 +298,7 @@ export function useSettingsPersistence(args: UseSettingsPersistenceArgs) {
 				},
 				llm: {
 					...args.persistedAppSettings.llm,
-					questionAnswerProviderId: args.llmSettings.questionAnswerProviderId,
+					questionAnswerModelId: args.llmSettings.questionAnswerModelId,
 				},
 				ocr: args.persistedAppSettings.ocr,
 				rag: args.persistedAppSettings.rag,
@@ -308,7 +308,7 @@ export function useSettingsPersistence(args: UseSettingsPersistenceArgs) {
 			{
 				adoptPromptKeys: ["ragAnswerSystemPrompt"],
 				adoptLlmProviders: false,
-				adoptLlmRouteKeys: ["questionAnswerProviderId"],
+				adoptLlmRouteKeys: ["questionAnswerModelId"],
 				adoptProviderDependencies: false,
 				adoptOcr: false,
 				adoptRag: false,
@@ -330,8 +330,8 @@ export function useSettingsPersistence(args: UseSettingsPersistenceArgs) {
 				prompts: args.persistedAppSettings.prompts,
 				llm: {
 					providers: args.llmSettings.providers,
-					translationProviderId: args.persistedAppSettings.llm.translationProviderId,
-					questionAnswerProviderId: args.persistedAppSettings.llm.questionAnswerProviderId,
+					translationModelId: args.persistedAppSettings.llm.translationModelId,
+					questionAnswerModelId: args.persistedAppSettings.llm.questionAnswerModelId,
 				},
 				ocr: args.persistedAppSettings.ocr,
 				rag: args.persistedAppSettings.rag,
@@ -410,7 +410,7 @@ export function useSettingsPersistence(args: UseSettingsPersistenceArgs) {
 		args.setLlmSettings((current) =>
 			reconcileLlmSettings({
 				...current,
-				translationProviderId: args.persistedAppSettings.llm.translationProviderId,
+				translationModelId: args.persistedAppSettings.llm.translationModelId,
 			}),
 		);
 		args.setSettingsError(null);
@@ -424,7 +424,7 @@ export function useSettingsPersistence(args: UseSettingsPersistenceArgs) {
 		args.setLlmSettings((current) =>
 			reconcileLlmSettings({
 				...current,
-				questionAnswerProviderId: args.persistedAppSettings.llm.questionAnswerProviderId,
+				questionAnswerModelId: args.persistedAppSettings.llm.questionAnswerModelId,
 			}),
 		);
 		args.setSettingsError(null);
@@ -457,7 +457,7 @@ export function useSettingsPersistence(args: UseSettingsPersistenceArgs) {
 				{
 					sourceDirectories: [...args.persistedAppSettings.rag.sourceDirectories],
 					ignoreGlobs: [...args.persistedAppSettings.rag.ignoreGlobs],
-					embeddingProviderId: args.persistedAppSettings.rag.embeddingProviderId,
+					embeddingModelId: args.persistedAppSettings.rag.embeddingModelId,
 				},
 				args.llmSettings.providers,
 			),

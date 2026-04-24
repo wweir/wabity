@@ -29,8 +29,9 @@ export type BuiltinMcpFieldKey = BuiltinMcpModuleKey | "enabled";
 export type AcpFieldKey = "name" | "command" | "launchMode";
 export type McpFieldKey = "name" | "command" | "url" | "envText" | "headersText";
 export type LlmFieldKey = "name" | "baseUrl" | "model";
+export type LlmEditableFieldKey = LlmFieldKey | "apiKey" | "supportsMultimodal";
 export type LlmModelFieldKey = "model";
-export type RagFieldKey = "embeddingProviderId" | "sourceDirectories" | "ignoreGlobs";
+export type RagFieldKey = "embeddingModelId" | "sourceDirectories" | "ignoreGlobs";
 export type LlmProviderKind =
 	| "llm_responses_stateless"
 	| "llm_responses_stateful"
@@ -85,7 +86,7 @@ export interface RagDraftValidation {
 export interface SavedRagDraftState {
 	sourceDirectories: string[];
 	ignoreGlobs: string[];
-	embeddingProviderId: string | null;
+	embeddingModelId: string | null;
 }
 
 export interface McpDraftValidation {

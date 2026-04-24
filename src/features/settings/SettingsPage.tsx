@@ -25,6 +25,7 @@ import type {
 	BuiltinMcpServerStatus,
 	BuiltinLlmProviderTemplate,
 	GeneralSettings,
+	LlmModelConfig,
 	LlmProviderConfig,
 	LlmProviderModelEntry,
 	LlmSettings,
@@ -60,6 +61,7 @@ import {
 	AcpFieldKey,
 	AcpInlineNotice,
 	AcpMcpServerDraft,
+	LlmEditableFieldKey,
 	LlmFieldKey,
 	LlmModelFieldKey,
 	LlmProviderKind,
@@ -90,6 +92,7 @@ import {
 	buildSavedLlmDraftState,
 	buildSavedMcpDraftState,
 	buildSavedRagDraftState,
+	clearProviderModelIdentityHints,
 	buildTranslationTaskDraftSnapshot,
 	createAgentDraft,
 	createDefaultAppSettings,
@@ -100,6 +103,7 @@ import {
 	createDefaultRagSettings,
 	createDefaultShortcutSettings,
 	createDefaultWorkspaceState,
+	createLlmModelDraft,
 	createLlmProviderDraft,
 	createMcpServerDraft,
 	createMcpServerDraftFromConfig,
@@ -235,7 +239,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 	const pendingMcpFocusRef = useRef<PendingMcpFocusTarget | null>(null);
 	const llmFieldRefs = useRef<Record<string, HTMLInputElement | null>>({});
 	const ragFieldRefs = useRef<Record<RagFieldKey, HTMLSelectElement | HTMLTextAreaElement | null>>({
-		embeddingProviderId: null,
+		embeddingModelId: null,
 		sourceDirectories: null,
 		ignoreGlobs: null,
 	});
@@ -379,12 +383,14 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		target: "selected" | "first" | "last" = "selected",
 	) {
 		requestAnimationFrame(() => {
-			const listbox = document.getElementById(`llm-provider-model-menu-${providerId}`);
-			if (!(listbox instanceof HTMLElement)) {
+			const panel = document.getElementById(`llm-provider-model-menu-${providerId}`);
+			if (!(panel instanceof HTMLElement)) {
 				return;
 			}
 
-			const options = Array.from(listbox.querySelectorAll<HTMLButtonElement>('[role="option"]'));
+			const options = Array.from(
+				panel.querySelectorAll<HTMLButtonElement>("[data-llm-model-option]"),
+			);
 			if (options.length === 0) {
 				return;
 			}
@@ -400,7 +406,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 			}
 
 			const selectedOption =
-				options.find((option) => option.getAttribute("aria-selected") === "true") ?? options[0];
+				options.find((option) => option.getAttribute("aria-pressed") === "true") ?? options[0];
 			selectedOption?.focus();
 		});
 	}
@@ -409,8 +415,42 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		pendingLlmModelOptionFocusRef.current = { providerId, target };
 	}
 
-	function findLlmModelOption(providerId: string, model: string) {
-		return (llmModelOptions[providerId] ?? []).find((option) => option.id === model) ?? null;
+	function getSelectedProviderModel(
+		provider: Pick<LlmProviderConfig, "modelConfig" | "models">,
+	): LlmModelConfig {
+		return (
+			provider.models.find((model) => model.id === provider.modelConfig?.id) ??
+			provider.models[0] ??
+			provider.modelConfig
+		);
+	}
+
+	function bindProviderToModel(
+		provider: LlmProviderConfig,
+		model: LlmModelConfig,
+	): LlmProviderConfig {
+		return {
+			...provider,
+			models: [model],
+			modelConfig: model,
+		};
+	}
+
+	function patchSelectedProviderModel(
+		provider: LlmProviderConfig,
+		update: (model: LlmModelConfig) => LlmModelConfig,
+	): LlmProviderConfig {
+		const currentModel = getSelectedProviderModel(provider);
+		const nextModel = update(currentModel);
+		return {
+			...provider,
+			models: provider.models.map((model) => (model.id === currentModel.id ? nextModel : model)),
+			modelConfig: nextModel,
+		};
+	}
+
+	function findLlmModelOption(providerId: string, modelName: string) {
+		return (llmModelOptions[providerId] ?? []).find((option) => option.id === modelName) ?? null;
 	}
 
 	async function handleFetchLlmProviderModels(
@@ -447,17 +487,18 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 				...current,
 				[provider.id]: models,
 			}));
-			const matchedOption = models.find((option) => option.id === provider.model) ?? null;
+			const matchedOption =
+				models.find((option) => option.id === getSelectedProviderModel(provider).model) ?? null;
 			if (matchedOption) {
 				setLlmSettings((current) =>
 					reconcileLlmSettings({
 						...current,
 						providers: current.providers.map((candidate) =>
 							candidate.id === provider.id
-								? {
-										...candidate,
+								? patchSelectedProviderModel(candidate, (model) => ({
+										...model,
 										modelIdentityHint: matchedOption.identityHint,
-									}
+									}))
 								: candidate,
 						),
 					}),
@@ -552,17 +593,18 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 						return provider;
 					}
 
-					const nextProvider = {
-						...provider,
+					const nextProvider = patchSelectedProviderModel(provider, (model) => ({
+						...model,
 						[fieldKey]: option.id,
 						modelIdentityHint: option.identityHint,
-					};
+					}));
 					const template = providerUsesBuiltinTemplate(nextProvider)
 						? findBuiltinTemplate(builtinLlmTemplates, nextProvider.builtinPresetId)
 						: null;
 					return applyBuiltinTemplateModelMetadata(
 						nextProvider,
 						findBuiltinTemplateModelByModelName(template, option.id),
+						getSelectedProviderModel(nextProvider).id,
 					);
 				}),
 			}),
@@ -618,25 +660,30 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 				setBuiltinLlmTemplates([]);
 			});
 		void getAppSettings().then((settings) => {
+			const nextLlmSettings = reconcileLlmSettings(settings.llm);
 			setGeneralSettings(settings.general);
 			setNotificationSettings(settings.notification);
 			syncAppearanceState(settings.appearance);
 			setPromptsSettings(settings.prompts);
-			setLlmSettings(settings.llm);
-			setSelectedLlmProviderId(settings.llm.providers[0]?.id ?? null);
-			setSavedLlmSnapshot(buildLlmDraftSnapshot(settings.llm));
-			setSavedLlmState(buildSavedLlmDraftState(settings.llm.providers));
+			setLlmSettings(nextLlmSettings);
+			setSelectedLlmProviderId(nextLlmSettings.providers[0]?.id ?? null);
+			setSavedLlmSnapshot(buildLlmDraftSnapshot(nextLlmSettings));
+			setSavedLlmState(buildSavedLlmDraftState(nextLlmSettings.providers));
 			setLlmModelOptions({});
 			setLlmModelErrors({});
 			setLoadingLlmModelProviderId(null);
 			setOpenLlmModelPickerId(null);
 			setOcrSettings(settings.ocr);
-			const nextRagSettings = reconcileRagSettings(settings.rag, settings.llm.providers);
+			const nextRagSettings = reconcileRagSettings(settings.rag, nextLlmSettings.providers);
 			setRagSettings(nextRagSettings);
 			setSavedRagSnapshot(buildRagDraftSnapshot(nextRagSettings));
 			setSavedRagState(buildSavedRagDraftState(nextRagSettings));
 			setRagScanResult(null);
-			setPersistedAppSettings(settings);
+			setPersistedAppSettings({
+				...settings,
+				llm: nextLlmSettings,
+				rag: nextRagSettings,
+			});
 		});
 		void getShortcut().then((config) => {
 			setShortcutSettings(config);
@@ -821,11 +868,11 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 
 	useEffect(() => {
 		setOcrSettings((current) => reconcileOcrSettings(current, llmSettings.providers));
-	}, [llmSettings.providers, ocrSettings.llmProviderId, ocrSettings.provider]);
+	}, [llmSettings.providers, ocrSettings.llmModelId, ocrSettings.provider]);
 
 	useEffect(() => {
 		setRagSettings((current) => reconcileRagSettings(current, llmSettings.providers));
-	}, [llmSettings.providers, ragSettings.embeddingProviderId]);
+	}, [llmSettings.providers, ragSettings.embeddingModelId]);
 
 	useEffect(() => {
 		const nextSelectedAgentId = selectExistingIdOrFirst(acpAgents, selectedAgentId);
@@ -994,6 +1041,9 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 	const mcpHasUnsavedChanges = mcpDraftSnapshot !== savedMcpSnapshot;
 	const selectedLlmProvider =
 		llmSettings.providers.find((provider) => provider.id === selectedLlmProviderId) ?? null;
+	const selectedLlmModel = selectedLlmProvider
+		? getSelectedProviderModel(selectedLlmProvider)
+		: null;
 	const selectedLlmProviderIsBuiltin =
 		selectedLlmProvider !== null && providerUsesBuiltinTemplate(selectedLlmProvider);
 	const selectedBuiltinLlmTemplate = findBuiltinTemplate(
@@ -1002,10 +1052,10 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 	);
 	const selectedBuiltinLlmTemplateModel = findBuiltinTemplateModelByModelName(
 		selectedBuiltinLlmTemplate,
-		selectedLlmProvider?.model,
+		selectedLlmModel?.model,
 	);
 	const selectedLlmProviderKind = selectedLlmProvider
-		? getLlmProviderKind(selectedLlmProvider)
+		? getLlmProviderKind(selectedLlmProvider, selectedLlmModel?.id)
 		: null;
 	const selectedLlmProviderModels = selectedLlmProvider
 		? (llmModelOptions[selectedLlmProvider.id] ?? [])
@@ -1015,18 +1065,23 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		: null;
 	const isLoadingSelectedLlmProviderModels =
 		selectedLlmProvider !== null && loadingLlmModelProviderId === selectedLlmProvider.id;
-	const eligibleOcrProviders = llmSettings.providers.filter((provider) =>
-		providerCanHandleOcr(provider),
+	const eligibleOcrProviders = llmSettings.providers.flatMap((provider) =>
+		provider.models
+			.filter((model) => providerCanHandleOcr(provider, model.id))
+			.map((model) => bindProviderToModel(provider, model)),
 	);
-	const eligibleAiTaskProviders = llmSettings.providers.filter((provider) =>
-		providerCanHandleAiTask(provider),
+	const eligibleAiTaskProviders = llmSettings.providers.flatMap((provider) =>
+		provider.models
+			.filter((model) => providerCanHandleAiTask(provider, model.id))
+			.map((model) => bindProviderToModel(provider, model)),
 	);
 	const selectedTranslationProvider =
-		eligibleAiTaskProviders.find((provider) => provider.id === llmSettings.translationProviderId) ??
-		null;
+		eligibleAiTaskProviders.find(
+			(provider) => provider.models[0]?.id === llmSettings.translationModelId,
+		) ?? null;
 	const selectedQuestionAnswerProvider =
 		eligibleAiTaskProviders.find(
-			(provider) => provider.id === llmSettings.questionAnswerProviderId,
+			(provider) => provider.models[0]?.id === llmSettings.questionAnswerModelId,
 		) ?? null;
 	const translationPromptIsDefault =
 		promptsSettings.translationPrompt.trim() === defaultPromptsSettings.translationPrompt.trim();
@@ -1045,16 +1100,18 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 			: questionAnswerPromptIsDefault
 				? "当前使用内置默认提示词。"
 				: "当前使用自定义提示词。";
-	const eligibleRagEmbeddingProviders = llmSettings.providers.filter((provider) =>
-		providerCanHandleRagEmbedding(provider),
+	const eligibleRagEmbeddingProviders = llmSettings.providers.flatMap((provider) =>
+		provider.models
+			.filter((model) => providerCanHandleRagEmbedding(provider, model.id))
+			.map((model) => bindProviderToModel(provider, model)),
 	);
 	const selectedRagEmbeddingProvider =
 		eligibleRagEmbeddingProviders.find(
-			(provider) => provider.id === ragSettings.embeddingProviderId,
+			(provider) => provider.models[0]?.id === ragSettings.embeddingModelId,
 		) ?? null;
 	const selectedRagEmbeddingProviderLabel =
 		selectedRagEmbeddingProvider?.name ||
-		selectedRagEmbeddingProvider?.model ||
+		selectedRagEmbeddingProvider?.models[0]?.model ||
 		selectedRagEmbeddingProvider?.baseUrl ||
 		"未选择 Embedding";
 	const ragSourceDirectoryCount = ragSettings.sourceDirectories.length;
@@ -1226,11 +1283,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 	}
 
 	function locateFirstRagIssue() {
-		const ragFieldOrder: RagFieldKey[] = [
-			"embeddingProviderId",
-			"sourceDirectories",
-			"ignoreGlobs",
-		];
+		const ragFieldOrder: RagFieldKey[] = ["embeddingModelId", "sourceDirectories", "ignoreGlobs"];
 		const nextField = ragFieldOrder.find((fieldKey) => ragValidation.fieldIssues[fieldKey]);
 		if (!nextField) {
 			return;
@@ -1297,10 +1350,78 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		setSettingsError(null);
 	}
 
-	function handleLlmProviderFieldChange<K extends keyof LlmProviderConfig>(
+	function handleSelectLlmProviderModel(providerId: string, modelId: string) {
+		setLlmSettings((current) =>
+			reconcileLlmSettings({
+				...current,
+				providers: current.providers.map((provider) => {
+					if (provider.id !== providerId) {
+						return provider;
+					}
+
+					const nextModel =
+						provider.models.find((model) => model.id === modelId) ?? provider.models[0];
+					return nextModel
+						? {
+								...provider,
+								modelConfig: nextModel,
+							}
+						: provider;
+				}),
+			}),
+		);
+		setSettingsError(null);
+	}
+
+	function handleAddLlmProviderModel(providerId: string) {
+		setLlmSettings((current) =>
+			reconcileLlmSettings({
+				...current,
+				providers: current.providers.map((provider) => {
+					if (provider.id !== providerId) {
+						return provider;
+					}
+
+					const seedModel = getSelectedProviderModel(provider);
+					const nextModel = createLlmModelDraft(seedModel.modelType);
+					return {
+						...provider,
+						models: [...provider.models, nextModel],
+						modelConfig: nextModel,
+					};
+				}),
+			}),
+		);
+		setSettingsError(null);
+	}
+
+	function handleRemoveLlmProviderModel(providerId: string, modelId: string) {
+		setLlmSettings((current) =>
+			reconcileLlmSettings({
+				...current,
+				providers: current.providers.map((provider) => {
+					if (provider.id !== providerId || provider.models.length <= 1) {
+						return provider;
+					}
+
+					const nextModels = provider.models.filter((model) => model.id !== modelId);
+					const nextSelectedModel =
+						nextModels.find((model) => model.id === provider.modelConfig?.id) ?? nextModels[0];
+					return {
+						...provider,
+						models: nextModels,
+						modelConfig: nextSelectedModel,
+					};
+				}),
+			}),
+		);
+		setSettingsError(null);
+	}
+
+	function handleLlmProviderFieldChange(
 		providerId: string,
-		key: K,
-		value: LlmProviderConfig[K],
+		key: LlmEditableFieldKey,
+		value: string | boolean,
 	) {
 		if (key === "baseUrl" || key === "apiKey") {
 			clearLlmModelCatalog(providerId);
@@ -1314,19 +1435,37 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 						return provider;
 					}
 
-					let nextProvider = { ...provider, [key]: value };
+					let nextProvider = { ...provider };
 					if (key === "baseUrl" || key === "apiKey") {
-						nextProvider.modelIdentityHint = null;
+						nextProvider = clearProviderModelIdentityHints({
+							...nextProvider,
+							[key]: value,
+						});
 					} else if (key === "model") {
-						nextProvider.modelIdentityHint =
-							findLlmModelOption(providerId, String(value))?.identityHint ?? null;
+						nextProvider = patchSelectedProviderModel(nextProvider, (model) => ({
+							...model,
+							model: String(value),
+							modelIdentityHint:
+								findLlmModelOption(providerId, String(value))?.identityHint ?? null,
+						}));
 						const template = providerUsesBuiltinTemplate(nextProvider)
 							? findBuiltinTemplate(builtinLlmTemplates, nextProvider.builtinPresetId)
 							: null;
 						nextProvider = applyBuiltinTemplateModelMetadata(
 							nextProvider,
 							findBuiltinTemplateModelByModelName(template, String(value)),
+							getSelectedProviderModel(nextProvider).id,
 						);
+					} else if (key === "name") {
+						nextProvider = {
+							...nextProvider,
+							name: String(value),
+						};
+					} else {
+						nextProvider = patchSelectedProviderModel(nextProvider, (model) => ({
+							...model,
+							supportsMultimodal: Boolean(value),
+						}));
 					}
 
 					return nextProvider;
@@ -1338,6 +1477,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 	}
 
 	function handleLlmProviderTemplateChange(providerId: string, templateId: string) {
+		clearLlmModelCatalog(providerId);
 		setLlmSettings((current) =>
 			reconcileLlmSettings({
 				...current,
@@ -1347,7 +1487,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 					}
 
 					if (!templateId) {
-						return detachBuiltinTemplateFromProvider(provider);
+						return clearProviderModelIdentityHints(detachBuiltinTemplateFromProvider(provider));
 					}
 
 					const template = findBuiltinTemplate(builtinLlmTemplates, templateId);
@@ -1355,9 +1495,15 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 						return provider;
 					}
 
-					return applyBuiltinTemplateModelMetadata(
-						applyBuiltinTemplateToProvider(provider, template),
-						findBuiltinTemplateModelByModelName(template, provider.model),
+					return clearProviderModelIdentityHints(
+						applyBuiltinTemplateModelMetadata(
+							applyBuiltinTemplateToProvider(provider, template),
+							findBuiltinTemplateModelByModelName(
+								template,
+								getSelectedProviderModel(provider).model,
+							),
+							getSelectedProviderModel(provider).id,
+						),
 					);
 				}),
 			}),
@@ -1366,6 +1512,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 	}
 
 	function handleBuiltinProviderManagedBaseUrlChange(providerId: string, managed: boolean) {
+		clearLlmModelCatalog(providerId);
 		setLlmSettings((current) =>
 			reconcileLlmSettings({
 				...current,
@@ -1382,11 +1529,12 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 						};
 					}
 
-					return {
+					const nextProvider = {
 						...provider,
 						managedBaseUrl: managed,
 						baseUrl: managed ? template.defaultBaseUrl : provider.baseUrl,
 					};
+					return clearProviderModelIdentityHints(nextProvider);
 				}),
 			}),
 		);
@@ -1397,21 +1545,28 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 		setLlmSettings((current) =>
 			reconcileLlmSettings({
 				...current,
-				providers: current.providers.map((provider) =>
-					provider.id === providerId
-						? {
-								...applyLlmProviderKind(provider, kind),
-								builtinPresetModelId: null,
-							}
-						: provider,
-				),
+				providers: current.providers.map((provider) => {
+					if (provider.id !== providerId) {
+						return provider;
+					}
+
+					const nextProvider = applyLlmProviderKind(
+						provider,
+						kind,
+						getSelectedProviderModel(provider).id,
+					);
+					return patchSelectedProviderModel(nextProvider, (model) => ({
+						...model,
+						builtinPresetModelId: null,
+					}));
+				}),
 			}),
 		);
 		setSettingsError(null);
 	}
 
 	function handleLlmRouteProviderChange(
-		key: "translationProviderId" | "questionAnswerProviderId",
+		key: "translationModelId" | "questionAnswerModelId",
 		providerId: string | null,
 	) {
 		setLlmSettings((current) =>
@@ -1736,15 +1891,20 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 									bindSectionBlockRef={bindSectionBlockRef}
 									buildLlmModelPickerId={buildLlmModelPickerId}
 									builtinLlmTemplates={builtinLlmTemplates}
-									getLlmProviderKind={getLlmProviderKind}
+									getLlmProviderKind={(provider) =>
+										getLlmProviderKind(provider, getSelectedProviderModel(provider).id)
+									}
 									getLlmProviderKindLabel={getLlmProviderKindLabel}
-									getLlmProviderModelPlaceholder={getLlmProviderModelPlaceholder}
+									getLlmProviderModelPlaceholder={(provider) =>
+										getLlmProviderModelPlaceholder(provider, getSelectedProviderModel(provider).id)
+									}
 									isLoadingSelectedLlmProviderModels={isLoadingSelectedLlmProviderModels}
 									llmHasUnsavedChanges={llmHasUnsavedChanges}
 									llmModelMenuRef={llmModelMenuRef}
 									llmSettings={llmSettings}
 									llmValidation={llmValidation}
 									onAddLlmProvider={handleAddLlmProvider}
+									onAddLlmProviderModel={handleAddLlmProviderModel}
 									onBuiltinProviderManagedBaseUrlChange={handleBuiltinProviderManagedBaseUrlChange}
 									onDiscardLlmDraft={handleDiscardLlmDraft}
 									onFetchLlmProviderModels={handleFetchLlmProviderModels}
@@ -1755,14 +1915,22 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 									onLlmProviderTemplateChange={handleLlmProviderTemplateChange}
 									onLocateFirstLlmIssue={locateFirstLlmIssue}
 									onOpenUrl={(url) => void openUrl(url)}
+									onRemoveLlmProviderModel={handleRemoveLlmProviderModel}
 									onRemoveLlmProvider={handleRemoveLlmProvider}
 									onSaveLlm={handleSaveLlm}
+									onSelectLlmProviderModel={handleSelectLlmProviderModel}
 									onSelectLlmProvider={handleSelectLlmProvider}
 									onToggleLlmModelMenu={handleToggleLlmModelMenu}
 									openLlmModelPickerId={openLlmModelPickerId}
-									providerCanHandleOcr={providerCanHandleOcr}
-									providerHasResponsesModel={providerHasResponsesModel}
-									providerIsLlmModel={providerIsLlmModel}
+									providerCanHandleOcr={(provider) =>
+										providerCanHandleOcr(provider, getSelectedProviderModel(provider).id)
+									}
+									providerHasResponsesModel={(provider) =>
+										providerHasResponsesModel(provider, getSelectedProviderModel(provider).id)
+									}
+									providerIsLlmModel={(provider) =>
+										providerIsLlmModel(provider, getSelectedProviderModel(provider).id)
+									}
 									savingLlm={savingLlm}
 									selectedBuiltinLlmTemplate={selectedBuiltinLlmTemplate}
 									selectedBuiltinLlmTemplateModel={selectedBuiltinLlmTemplateModel}

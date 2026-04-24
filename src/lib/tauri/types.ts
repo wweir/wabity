@@ -72,20 +72,26 @@ export type BuiltinLlmTemplateModelType =
 export type BuiltinLlmTemplateModelProtocol = "responses" | "chat_completions" | "unsupported";
 export type BuiltinLlmTemplateUseCase = "translation" | "rag_answer" | "ocr" | "embedding";
 
+export interface LlmModelConfig {
+	id: string;
+	modelType: "llm" | "embedding";
+	model: string;
+	modelIdentityHint: string | null;
+	builtinPresetModelId: string | null;
+	supportsMultimodal: boolean;
+	supportsStateful: boolean;
+}
+
 export interface LlmProviderConfig {
 	id: string;
 	name: string;
 	baseUrl: string;
 	apiKey: string;
-	modelType: "llm" | "embedding";
 	protocol: LlmProviderProtocol;
-	model: string;
-	modelIdentityHint: string | null;
+	models: LlmModelConfig[];
+	modelConfig: LlmModelConfig;
 	builtinPresetId: string | null;
-	builtinPresetModelId: string | null;
 	managedBaseUrl: boolean;
-	supportsMultimodal: boolean;
-	supportsStateful: boolean;
 }
 
 export interface LlmProviderModelEntry {
@@ -124,21 +130,21 @@ export interface BuiltinLlmProviderTemplate {
 
 export interface LlmSettings {
 	providers: LlmProviderConfig[];
-	translationProviderId: string | null;
-	questionAnswerProviderId: string | null;
+	translationModelId: string | null;
+	questionAnswerModelId: string | null;
 }
 
 export type OcrProviderKind = "disabled" | "system" | "llm_ocr";
 
 export interface OcrSettings {
 	provider: OcrProviderKind;
-	llmProviderId: string | null;
+	llmModelId: string | null;
 }
 
 export interface RagSettings {
 	sourceDirectories: string[];
 	ignoreGlobs: string[];
-	embeddingProviderId: string | null;
+	embeddingModelId: string | null;
 }
 
 export interface RagScanResult {

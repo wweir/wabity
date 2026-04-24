@@ -10,7 +10,7 @@ use std::{
     time::Instant,
 };
 
-use crate::domain::settings::LlmProviderConfig;
+use crate::domain::settings::ResolvedLlmModelBinding;
 use crate::infrastructure::openai_compatible::{
     extract_responses_text, normalize_base_url, OpenAiCompatibleClient,
     OpenAiCompatibleResponseFormat,
@@ -143,11 +143,11 @@ impl OpenAiCompatibleOcrProvider {
         })
     }
 
-    pub fn from_config(config: &LlmProviderConfig) -> Result<Self> {
+    pub fn from_binding(binding: ResolvedLlmModelBinding<'_>) -> Result<Self> {
         Self::new(
-            config.base_url.clone(),
-            config.api_key.clone(),
-            config.model.clone(),
+            binding.provider().base_url.clone(),
+            binding.provider().api_key.clone(),
+            binding.model().model.trim().to_string(),
         )
     }
 }
@@ -165,28 +165,28 @@ impl OcrProvider for OpenAiCompatibleOcrProvider {
 }
 
 pub async fn recognize_with_openai_compatible_config(
-    config: &LlmProviderConfig,
+    binding: ResolvedLlmModelBinding<'_>,
     request: &OcrRequest,
 ) -> Result<OcrResult> {
-    validate_openai_compatible_ocr_config(config)?;
-    let model = config.model.trim();
+    validate_openai_compatible_ocr_config(binding)?;
+    let model = binding.model().model.trim();
     let client = shared_async_ocr_http_client()?;
     recognize_with_openai_compatible_async(
         &client,
-        &config.base_url,
-        &config.api_key,
+        &binding.provider().base_url,
+        &binding.provider().api_key,
         model,
         request,
     )
     .await
 }
 
-fn validate_openai_compatible_ocr_config(config: &LlmProviderConfig) -> Result<()> {
-    if !config.resolved_profile().can_handle_ocr() {
+fn validate_openai_compatible_ocr_config(binding: ResolvedLlmModelBinding<'_>) -> Result<()> {
+    if !binding.can_handle_ocr() {
         bail!("OCR 选择的 LLM 配置未启用多模态能力");
     }
 
-    let model = config.model.trim();
+    let model = binding.model().model.trim();
     if model.is_empty() {
         bail!("OpenAI-compatible OCR model must not be empty");
     }
@@ -640,14 +640,20 @@ mod tests {
             name: "Chat".to_string(),
             base_url: "https://api.example.com/v1".to_string(),
             api_key: String::new(),
-            model_type: LlmModelType::Llm,
             protocol: LlmProviderProtocol::ChatCompletions,
-            model: "qwen3-vl:8b".to_string(),
-            supports_multimodal: true,
+            models: vec![crate::domain::settings::LlmModelConfig {
+                id: "chat".to_string(),
+                model_type: LlmModelType::Llm,
+                model: "qwen3-vl:8b".to_string(),
+                supports_multimodal: true,
+                ..crate::domain::settings::LlmModelConfig::default()
+            }],
             ..LlmProviderConfig::default()
         };
 
-        let error = validate_openai_compatible_ocr_config(&config).unwrap_err();
+        let error =
+            validate_openai_compatible_ocr_config(config.find_model_binding("chat").unwrap())
+                .unwrap_err();
 
         assert_eq!(error.to_string(), "OCR 选择的 LLM 配置未启用多模态能力");
     }

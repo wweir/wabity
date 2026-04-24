@@ -89,17 +89,17 @@ export const browserAppSettings: AppSettings = {
 	},
 	llm: {
 		providers: [],
-		translationProviderId: null,
-		questionAnswerProviderId: null,
+		translationModelId: null,
+		questionAnswerModelId: null,
 	},
 	ocr: {
 		provider: "system",
-		llmProviderId: null,
+		llmModelId: null,
 	},
 	rag: {
 		sourceDirectories: [],
 		ignoreGlobs: [...defaultRagIgnoreGlobs],
-		embeddingProviderId: null,
+		embeddingModelId: null,
 	},
 };
 

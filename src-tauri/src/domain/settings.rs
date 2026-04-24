@@ -1,4 +1,4 @@
-use serde::{de::Error as DeError, Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
 use crate::domain::notification::NotificationSettings;
 
@@ -118,17 +118,6 @@ impl Default for OcrProviderKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LegacyLlmProviderProtocolKind {
-    #[serde(rename = "openai_chat", alias = "openai_compatible")]
-    Chat,
-    #[serde(rename = "openai_responses")]
-    Responses,
-    #[serde(rename = "openai_embedding")]
-    Embedding,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LlmProviderProtocol {
@@ -205,7 +194,40 @@ pub struct BuiltinLlmProviderTemplate {
     pub models: Vec<BuiltinLlmProviderTemplateModel>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmModelConfig {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub model_type: LlmModelType,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_identity_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin_preset_model_id: Option<String>,
+    #[serde(default)]
+    pub supports_multimodal: bool,
+    #[serde(default)]
+    pub supports_stateful: bool,
+}
+
+impl Default for LlmModelConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            model_type: LlmModelType::Llm,
+            model: String::new(),
+            model_identity_hint: None,
+            builtin_preset_model_id: None,
+            supports_multimodal: false,
+            supports_stateful: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmProviderConfig {
     pub id: String,
@@ -215,167 +237,56 @@ pub struct LlmProviderConfig {
     #[serde(default)]
     pub api_key: String,
     #[serde(default)]
-    pub model_type: LlmModelType,
-    #[serde(default)]
     pub protocol: LlmProviderProtocol,
     #[serde(default)]
-    pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model_identity_hint: Option<String>,
+    pub models: Vec<LlmModelConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub builtin_preset_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub builtin_preset_model_id: Option<String>,
     #[serde(default)]
     pub managed_base_url: bool,
-    #[serde(default)]
-    pub supports_multimodal: bool,
-    #[serde(default)]
-    pub supports_stateful: bool,
-    #[serde(default, skip_serializing, rename = "protocol")]
-    pub(crate) legacy_protocol: Option<LegacyLlmProviderProtocolKind>,
-    #[serde(default, skip_serializing, rename = "supportsEmbedding")]
-    pub(crate) legacy_supports_embedding: bool,
-    #[serde(default, skip_serializing, rename = "responsesModel")]
-    pub(crate) legacy_responses_model: String,
-    #[serde(default, skip_serializing, rename = "embeddingModel")]
-    pub(crate) legacy_embedding_model: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct RawLlmProviderConfig {
-    #[serde(default)]
-    id: String,
-    #[serde(default)]
-    name: String,
-    #[serde(default = "default_openai_compatible_base_url")]
-    base_url: String,
-    #[serde(default)]
-    api_key: String,
-    #[serde(default)]
-    model_type: LlmModelType,
-    #[serde(default)]
-    protocol: Option<String>,
-    #[serde(default)]
-    model: String,
-    #[serde(default)]
-    model_identity_hint: Option<String>,
-    #[serde(default)]
-    builtin_preset_id: Option<String>,
-    #[serde(default)]
-    builtin_preset_model_id: Option<String>,
-    #[serde(default)]
-    managed_base_url: bool,
-    #[serde(default)]
-    supports_multimodal: bool,
-    #[serde(default)]
-    supports_stateful: bool,
-    #[serde(default, rename = "supportsEmbedding")]
-    legacy_supports_embedding: bool,
-    #[serde(default, rename = "responsesModel")]
-    legacy_responses_model: String,
-    #[serde(default, rename = "embeddingModel")]
-    legacy_embedding_model: String,
 }
 
 impl LlmProviderConfig {
-    pub fn is_llm_model(&self) -> bool {
-        self.model_type == LlmModelType::Llm
+    pub fn find_model(&self, model_id: &str) -> Option<&LlmModelConfig> {
+        self.models.iter().find(|model| model.id == model_id)
     }
 
-    pub fn is_embedding_model(&self) -> bool {
-        self.model_type == LlmModelType::Embedding
+    pub fn iter_model_bindings(&self) -> impl Iterator<Item = ResolvedLlmModelBinding<'_>> {
+        self.models
+            .iter()
+            .map(|model| ResolvedLlmModelBinding::new(self, model))
     }
 
-    pub fn is_llm_responses_protocol(&self) -> bool {
-        self.is_llm_model() && self.protocol == LlmProviderProtocol::Responses
+    pub fn find_model_binding(&self, model_id: &str) -> Option<ResolvedLlmModelBinding<'_>> {
+        self.find_model(model_id)
+            .map(|model| ResolvedLlmModelBinding::new(self, model))
     }
 
-    pub fn model_name(&self) -> &str {
-        self.model.trim()
+    pub fn clone_with_model(&self, model: &LlmModelConfig) -> Self {
+        let mut cloned = self.clone();
+        cloned.models = vec![model.clone()];
+        cloned
     }
 
-    pub fn has_llm_model(&self) -> bool {
-        self.is_llm_model() && !self.model_name().is_empty()
+    pub fn first_configured_model_name(&self) -> Option<&str> {
+        self.models
+            .iter()
+            .map(|model| model.model.trim())
+            .find(|model| !model.is_empty())
     }
 
-    pub fn llm_model_name(&self) -> Option<&str> {
-        self.has_llm_model().then_some(self.model_name())
+    pub fn configured_ai_model_bindings(
+        &self,
+    ) -> impl Iterator<Item = ResolvedLlmModelBinding<'_>> {
+        self.iter_model_bindings()
+            .filter(|binding| binding.can_handle_ai_task())
     }
 
-    pub fn has_responses_model(&self) -> bool {
-        self.is_llm_responses_protocol() && !self.model_name().is_empty()
-    }
-
-    pub fn supports_multimodal(&self) -> bool {
-        self.has_responses_model() && self.supports_multimodal
-    }
-
-    pub fn supports_stateful(&self) -> bool {
-        self.has_responses_model() && self.supports_stateful
-    }
-
-    pub fn has_embedding_model(&self) -> bool {
-        self.is_embedding_model() && !self.model_name().is_empty()
-    }
-
-    pub fn embedding_model_name(&self) -> Option<&str> {
-        self.has_embedding_model().then_some(self.model_name())
-    }
-
-    pub fn legacy_responses_model_name(&self) -> &str {
-        self.legacy_responses_model.trim()
-    }
-
-    pub fn legacy_embedding_model_name(&self) -> &str {
-        self.legacy_embedding_model.trim()
-    }
-
-    pub fn legacy_model_type(&self) -> Option<LlmModelType> {
-        self.legacy_protocol
-            .as_ref()
-            .map(|protocol| match protocol {
-                LegacyLlmProviderProtocolKind::Embedding => LlmModelType::Embedding,
-                LegacyLlmProviderProtocolKind::Chat | LegacyLlmProviderProtocolKind::Responses => {
-                    LlmModelType::Llm
-                }
-            })
-    }
-
-    pub fn legacy_llm_protocol(&self) -> Option<LlmProviderProtocol> {
-        self.legacy_protocol
-            .as_ref()
-            .and_then(|protocol| match protocol {
-                LegacyLlmProviderProtocolKind::Chat => Some(LlmProviderProtocol::ChatCompletions),
-                LegacyLlmProviderProtocolKind::Responses => Some(LlmProviderProtocol::Responses),
-                LegacyLlmProviderProtocolKind::Embedding => None,
-            })
-    }
-
-    pub fn resolved_profile(&self) -> ResolvedLlmProviderProfile<'_> {
-        let model_name = self.model_name();
-        let has_model = !model_name.is_empty();
-        let kind = match self.model_type {
-            LlmModelType::Embedding => ResolvedLlmProviderKind::Embedding {
-                configured: has_model,
-            },
-            LlmModelType::Llm => match self.protocol {
-                LlmProviderProtocol::Responses => ResolvedLlmProviderKind::Responses {
-                    configured: has_model,
-                    supports_multimodal: has_model && self.supports_multimodal,
-                    supports_stateful: has_model && self.supports_stateful,
-                },
-                LlmProviderProtocol::ChatCompletions => ResolvedLlmProviderKind::ChatCompletions {
-                    configured: has_model,
-                },
-            },
-        };
-
-        ResolvedLlmProviderProfile {
-            provider: self,
-            kind,
-        }
+    pub fn configured_embedding_model_bindings(
+        &self,
+    ) -> impl Iterator<Item = ResolvedLlmModelBinding<'_>> {
+        self.iter_model_bindings()
+            .filter(|binding| binding.can_handle_embedding())
     }
 }
 
@@ -391,18 +302,55 @@ pub enum ResolvedLlmProviderKind {
     },
     Embedding {
         configured: bool,
+        accepts_multimodal_input: bool,
     },
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct ResolvedLlmProviderProfile<'a> {
+pub struct ResolvedLlmModelBinding<'a> {
     provider: &'a LlmProviderConfig,
+    model: &'a LlmModelConfig,
     kind: ResolvedLlmProviderKind,
 }
 
-impl<'a> ResolvedLlmProviderProfile<'a> {
+impl<'a> ResolvedLlmModelBinding<'a> {
+    pub fn new(provider: &'a LlmProviderConfig, model: &'a LlmModelConfig) -> Self {
+        let model_name = model.model.trim();
+        let has_model = !model_name.is_empty();
+        let kind = match model.model_type {
+            LlmModelType::Embedding => ResolvedLlmProviderKind::Embedding {
+                configured: has_model,
+                accepts_multimodal_input: has_model && model.supports_multimodal,
+            },
+            LlmModelType::Llm => match provider.protocol {
+                LlmProviderProtocol::Responses => ResolvedLlmProviderKind::Responses {
+                    configured: has_model,
+                    supports_multimodal: has_model && model.supports_multimodal,
+                    supports_stateful: has_model && model.supports_stateful,
+                },
+                LlmProviderProtocol::ChatCompletions => ResolvedLlmProviderKind::ChatCompletions {
+                    configured: has_model,
+                },
+            },
+        };
+
+        Self {
+            provider,
+            model,
+            kind,
+        }
+    }
+
     pub fn provider(self) -> &'a LlmProviderConfig {
         self.provider
+    }
+
+    pub fn model(self) -> &'a LlmModelConfig {
+        self.model
+    }
+
+    pub fn into_provider_config(self) -> LlmProviderConfig {
+        self.provider.clone_with_model(self.model)
     }
 
     pub fn kind(self) -> ResolvedLlmProviderKind {
@@ -410,7 +358,7 @@ impl<'a> ResolvedLlmProviderProfile<'a> {
     }
 
     pub fn model_name(self) -> Option<&'a str> {
-        let model_name = self.provider.model_name();
+        let model_name = self.model.model.trim();
         (!model_name.is_empty()).then_some(model_name)
     }
 
@@ -438,7 +386,10 @@ impl<'a> ResolvedLlmProviderProfile<'a> {
     pub fn can_handle_embedding(self) -> bool {
         matches!(
             self.kind,
-            ResolvedLlmProviderKind::Embedding { configured: true }
+            ResolvedLlmProviderKind::Embedding {
+                configured: true,
+                ..
+            }
         )
     }
 
@@ -448,6 +399,16 @@ impl<'a> ResolvedLlmProviderProfile<'a> {
             ResolvedLlmProviderKind::Responses {
                 supports_multimodal: true,
                 ..
+            }
+        )
+    }
+
+    pub fn can_handle_multimodal_embedding(self) -> bool {
+        matches!(
+            self.kind,
+            ResolvedLlmProviderKind::Embedding {
+                configured: true,
+                accepts_multimodal_input: true,
             }
         )
     }
@@ -480,56 +441,6 @@ impl<'a> ResolvedLlmProviderProfile<'a> {
     }
 }
 
-impl<'de> Deserialize<'de> for LlmProviderConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let raw = RawLlmProviderConfig::deserialize(deserializer)?;
-        let protocol = match raw.protocol.as_deref().map(str::trim) {
-            None | Some("") | Some("responses") | Some("openai_responses") => {
-                LlmProviderProtocol::Responses
-            }
-            Some("chat_completions") => LlmProviderProtocol::ChatCompletions,
-            Some("openai_chat") | Some("openai_compatible") => LlmProviderProtocol::ChatCompletions,
-            Some("openai_embedding") => LlmProviderProtocol::Responses,
-            Some(other) => {
-                return Err(D::Error::custom(format!(
-                    "unknown LLM provider protocol: {other}"
-                )))
-            }
-        };
-        let legacy_protocol = match raw.protocol.as_deref().map(str::trim) {
-            Some("openai_chat") | Some("openai_compatible") => {
-                Some(LegacyLlmProviderProtocolKind::Chat)
-            }
-            Some("openai_responses") => Some(LegacyLlmProviderProtocolKind::Responses),
-            Some("openai_embedding") => Some(LegacyLlmProviderProtocolKind::Embedding),
-            _ => None,
-        };
-
-        Ok(Self {
-            id: raw.id,
-            name: raw.name,
-            base_url: raw.base_url,
-            api_key: raw.api_key,
-            model_type: raw.model_type,
-            protocol,
-            model: raw.model,
-            model_identity_hint: raw.model_identity_hint,
-            builtin_preset_id: raw.builtin_preset_id,
-            builtin_preset_model_id: raw.builtin_preset_model_id,
-            managed_base_url: raw.managed_base_url,
-            supports_multimodal: raw.supports_multimodal,
-            supports_stateful: raw.supports_stateful,
-            legacy_protocol,
-            legacy_supports_embedding: raw.legacy_supports_embedding,
-            legacy_responses_model: raw.legacy_responses_model,
-            legacy_embedding_model: raw.legacy_embedding_model,
-        })
-    }
-}
-
 impl Default for LlmProviderConfig {
     fn default() -> Self {
         Self {
@@ -537,19 +448,10 @@ impl Default for LlmProviderConfig {
             name: String::new(),
             base_url: default_openai_compatible_base_url(),
             api_key: String::new(),
-            model_type: LlmModelType::Llm,
             protocol: LlmProviderProtocol::Responses,
-            model: String::new(),
-            model_identity_hint: None,
+            models: Vec::new(),
             builtin_preset_id: None,
-            builtin_preset_model_id: None,
             managed_base_url: false,
-            supports_multimodal: false,
-            supports_stateful: false,
-            legacy_protocol: None,
-            legacy_supports_embedding: false,
-            legacy_responses_model: String::new(),
-            legacy_embedding_model: String::new(),
         }
     }
 }
@@ -560,11 +462,29 @@ pub struct LlmSettings {
     #[serde(default)]
     pub providers: Vec<LlmProviderConfig>,
     #[serde(default)]
-    pub translation_provider_id: Option<String>,
+    pub translation_model_id: Option<String>,
     #[serde(default)]
-    pub question_answer_provider_id: Option<String>,
-    #[serde(default, skip_serializing, alias = "defaultProviderId")]
-    pub(crate) legacy_default_provider_id: Option<String>,
+    pub question_answer_model_id: Option<String>,
+}
+
+impl LlmSettings {
+    pub fn find_provider(&self, provider_id: &str) -> Option<&LlmProviderConfig> {
+        self.providers
+            .iter()
+            .find(|provider| provider.id == provider_id)
+    }
+
+    pub fn find_model_binding(&self, model_id: &str) -> Option<ResolvedLlmModelBinding<'_>> {
+        self.providers
+            .iter()
+            .find_map(|provider| provider.find_model_binding(model_id))
+    }
+
+    pub fn iter_model_bindings(&self) -> impl Iterator<Item = ResolvedLlmModelBinding<'_>> {
+        self.providers
+            .iter()
+            .flat_map(|provider| provider.iter_model_bindings())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -1154,6 +1074,189 @@ pub fn builtin_llm_provider_templates() -> Vec<BuiltinLlmProviderTemplate> {
                 },
             ],
         },
+        BuiltinLlmProviderTemplate {
+            id: "bailian".to_string(),
+            display_name: "阿里云百炼".to_string(),
+            description:
+                "官方 OpenAI 兼容模板。先开通百炼、创建 API Key，再从常用通义模型或 Embedding 模型里选择。"
+                    .to_string(),
+            registration_label: "开通 / 控制台".to_string(),
+            registration_url: "https://bailian.console.aliyun.com/".to_string(),
+            api_key_label: "API Key 说明".to_string(),
+            api_key_url: "https://help.aliyun.com/zh/model-studio/get-api-key".to_string(),
+            docs_label: "OpenAI 兼容文档".to_string(),
+            docs_url:
+                "https://help.aliyun.com/zh/model-studio/compatibility-of-openai-with-dashscope"
+                    .to_string(),
+            default_base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+            supports_model_listing: false,
+            models: vec![
+                BuiltinLlmProviderTemplateModel {
+                    id: "qwen-plus-latest".to_string(),
+                    display_name: "Qwen-Plus-Latest".to_string(),
+                    model: "qwen-plus-latest".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: vec![
+                        BuiltinLlmTemplateUseCase::Translation,
+                        BuiltinLlmTemplateUseCase::RagAnswer,
+                    ],
+                    summary: "通用文本模型，适合翻译、问答和日常生成任务。".to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "qwen-max-latest".to_string(),
+                    display_name: "Qwen-Max-Latest".to_string(),
+                    model: "qwen-max-latest".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: vec![
+                        BuiltinLlmTemplateUseCase::Translation,
+                        BuiltinLlmTemplateUseCase::RagAnswer,
+                    ],
+                    summary: "更高质量的通用文本模型，适合复杂问答和长文本生成。"
+                        .to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "qwen-vl-max-latest".to_string(),
+                    display_name: "Qwen-VL-Max-Latest".to_string(),
+                    model: "qwen-vl-max-latest".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: true,
+                    supports_stateful: false,
+                    recommended_for: vec![
+                        BuiltinLlmTemplateUseCase::Translation,
+                        BuiltinLlmTemplateUseCase::RagAnswer,
+                    ],
+                    summary: "视觉理解模型，适合截图、文档和图像问答场景。".to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "text-embedding-v4".to_string(),
+                    display_name: "text-embedding-v4".to_string(),
+                    model: "text-embedding-v4".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Embedding,
+                    protocol: BuiltinLlmTemplateModelProtocol::Responses,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: vec![BuiltinLlmTemplateUseCase::Embedding],
+                    summary: "官方 Embedding 模型，适合给 RAG 建立通用向量索引。"
+                        .to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+            ],
+        },
+        BuiltinLlmProviderTemplate {
+            id: "volcengine-ark".to_string(),
+            display_name: "火山方舟".to_string(),
+            description:
+                "官方 OpenAI 兼容模板。先创建 API Key 和推理接入点；模型字段通常填写 Endpoint ID，当前不内置固定模型白名单。"
+                    .to_string(),
+            registration_label: "开通 / 控制台".to_string(),
+            registration_url: "https://www.volcengine.com/docs/82379/1330626".to_string(),
+            api_key_label: "API Key 说明".to_string(),
+            api_key_url: "https://www.volcengine.com/docs/82379/1399008".to_string(),
+            docs_label: "OpenAI SDK 文档".to_string(),
+            docs_url: "https://www.volcengine.com/docs/82379/1330626".to_string(),
+            default_base_url: "https://ark.cn-beijing.volces.com/api/v3".to_string(),
+            supports_model_listing: false,
+            models: vec![],
+        },
+        BuiltinLlmProviderTemplate {
+            id: "tencent-hunyuan".to_string(),
+            display_name: "腾讯混元".to_string(),
+            description:
+                "官方 OpenAI 兼容模板。先开通混元、创建 API Key，再从常用文本、视觉、翻译或 Embedding 模型里选择。"
+                    .to_string(),
+            registration_label: "开通 / 控制台".to_string(),
+            registration_url: "https://hunyuan.tencent.com/".to_string(),
+            api_key_label: "API Key 说明".to_string(),
+            api_key_url: "https://cloud.tencent.com/document/product/1729/111008".to_string(),
+            docs_label: "OpenAI SDK 文档".to_string(),
+            docs_url: "https://cloud.tencent.com/document/product/1729/111007".to_string(),
+            default_base_url: "https://api.hunyuan.cloud.tencent.com/v1".to_string(),
+            supports_model_listing: false,
+            models: vec![
+                BuiltinLlmProviderTemplateModel {
+                    id: "hunyuan-turbos-latest".to_string(),
+                    display_name: "Hunyuan-Turbos-Latest".to_string(),
+                    model: "hunyuan-turbos-latest".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: vec![
+                        BuiltinLlmTemplateUseCase::Translation,
+                        BuiltinLlmTemplateUseCase::RagAnswer,
+                    ],
+                    summary: "通用文本模型，适合日常问答、改写和低延迟生成。".to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "hunyuan-t1-latest".to_string(),
+                    display_name: "Hunyuan-T1-Latest".to_string(),
+                    model: "hunyuan-t1-latest".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: vec![BuiltinLlmTemplateUseCase::RagAnswer],
+                    summary: "推理模型，适合复杂问答、分析和多步思考任务。".to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "hunyuan-vision-1.5-instruct".to_string(),
+                    display_name: "Hunyuan-Vision-1.5-Instruct".to_string(),
+                    model: "hunyuan-vision-1.5-instruct".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: true,
+                    supports_stateful: false,
+                    recommended_for: vec![BuiltinLlmTemplateUseCase::RagAnswer],
+                    summary: "视觉理解模型，适合截图、图表和文档理解。".to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "hunyuan-translation-lite".to_string(),
+                    display_name: "Hunyuan-Translation-Lite".to_string(),
+                    model: "hunyuan-translation-lite".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Llm,
+                    protocol: BuiltinLlmTemplateModelProtocol::ChatCompletions,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: vec![BuiltinLlmTemplateUseCase::Translation],
+                    summary: "翻译模型，适合中英和多语种翻译场景。".to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+                BuiltinLlmProviderTemplateModel {
+                    id: "hunyuan-embedding".to_string(),
+                    display_name: "Hunyuan-Embedding".to_string(),
+                    model: "hunyuan-embedding".to_string(),
+                    model_type: BuiltinLlmTemplateModelType::Embedding,
+                    protocol: BuiltinLlmTemplateModelProtocol::Responses,
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    recommended_for: vec![BuiltinLlmTemplateUseCase::Embedding],
+                    summary: "官方 Embedding 模型，适合给 RAG 建立文本向量索引。".to_string(),
+                    selectable_in_current_app: true,
+                    disabled_reason: None,
+                },
+            ],
+        },
     ]
 }
 
@@ -1169,7 +1272,7 @@ pub struct OcrSettings {
     #[serde(default)]
     pub provider: OcrProviderKind,
     #[serde(default)]
-    pub llm_provider_id: Option<String>,
+    pub llm_model_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1180,7 +1283,7 @@ pub struct RagSettings {
     #[serde(default = "default_rag_ignore_globs")]
     pub ignore_globs: Vec<String>,
     #[serde(default)]
-    pub embedding_provider_id: Option<String>,
+    pub embedding_model_id: Option<String>,
 }
 
 impl Default for RagSettings {
@@ -1188,7 +1291,7 @@ impl Default for RagSettings {
         Self {
             source_directories: Vec::new(),
             ignore_globs: default_rag_ignore_globs(),
-            embedding_provider_id: None,
+            embedding_model_id: None,
         }
     }
 }
@@ -1298,19 +1401,18 @@ mod tests {
             name: "Provider".to_string(),
             base_url: "https://api.example.com/v1".to_string(),
             api_key: String::new(),
-            model_type,
             protocol,
-            model: model.to_string(),
-            model_identity_hint: None,
+            models: vec![LlmModelConfig {
+                id: "provider".to_string(),
+                model_type,
+                model: model.to_string(),
+                model_identity_hint: None,
+                builtin_preset_model_id: None,
+                supports_multimodal,
+                supports_stateful,
+            }],
             builtin_preset_id: None,
-            builtin_preset_model_id: None,
             managed_base_url: false,
-            supports_multimodal,
-            supports_stateful,
-            legacy_protocol: None,
-            legacy_supports_embedding: false,
-            legacy_responses_model: String::new(),
-            legacy_embedding_model: String::new(),
         }
     }
 
@@ -1324,7 +1426,7 @@ mod tests {
             true,
         );
 
-        let profile = provider.resolved_profile();
+        let profile = provider.find_model_binding("provider").unwrap();
 
         assert!(profile.can_handle_ai_task());
         assert!(profile.can_handle_ocr());
@@ -1346,7 +1448,7 @@ mod tests {
             false,
         );
 
-        let profile = provider.resolved_profile();
+        let profile = provider.find_model_binding("provider").unwrap();
 
         assert!(profile.can_handle_ai_task());
         assert!(!profile.can_handle_ocr());
@@ -1362,18 +1464,64 @@ mod tests {
             LlmModelType::Embedding,
             LlmProviderProtocol::Responses,
             "text-embedding-3-small",
-            false,
+            true,
             false,
         );
 
-        let profile = provider.resolved_profile();
+        let profile = provider.find_model_binding("provider").unwrap();
 
         assert!(!profile.can_handle_ai_task());
         assert!(!profile.can_handle_ocr());
         assert!(profile.can_handle_embedding());
+        assert!(!profile.supports_multimodal());
+        assert!(profile.can_handle_multimodal_embedding());
         assert_eq!(
             profile.kind(),
-            ResolvedLlmProviderKind::Embedding { configured: true }
+            ResolvedLlmProviderKind::Embedding {
+                configured: true,
+                accepts_multimodal_input: true,
+            }
         );
+    }
+
+    #[test]
+    fn builtin_template_catalog_includes_recent_cn_providers() {
+        let templates = builtin_llm_provider_templates();
+
+        let bailian = templates
+            .iter()
+            .find(|template| template.id == "bailian")
+            .expect("bailian template should exist");
+        assert_eq!(
+            bailian.default_base_url,
+            "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        );
+        assert!(bailian
+            .models
+            .iter()
+            .any(|model| model.model == "text-embedding-v4"));
+
+        let volcengine = templates
+            .iter()
+            .find(|template| template.id == "volcengine-ark")
+            .expect("volcengine ark template should exist");
+        assert_eq!(
+            volcengine.default_base_url,
+            "https://ark.cn-beijing.volces.com/api/v3"
+        );
+        assert!(volcengine.models.is_empty());
+
+        let tencent = templates
+            .iter()
+            .find(|template| template.id == "tencent-hunyuan")
+            .expect("tencent hunyuan template should exist");
+        assert_eq!(
+            tencent.default_base_url,
+            "https://api.hunyuan.cloud.tencent.com/v1"
+        );
+        assert!(tencent
+            .models
+            .iter()
+            .any(|model| model.model == "hunyuan-embedding"));
     }
 }
