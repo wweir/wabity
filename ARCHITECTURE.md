@@ -74,6 +74,10 @@
 - 键盘交互
 - 结构化结果展示
 
+结果展示进一步约束为：
+
+- 翻译和问答都只能消费后端明确拆好的主内容与次级 thought；当前后端若返回 `ExecutionResult.structured_payload.kind = translation_result` 且附带 `reasoning`，前端只能把它渲染成折叠 disclosure，不能兜底替代 `primaryText`
+
 前端不负责：
 
 - 直接读写配置文件
@@ -212,8 +216,12 @@ ACP 链路是独立运行时：
 
 1. 前端提交某个分组的结构化草稿
 2. `commands/settings` 做边界转换
-3. `AppState` / settings 相关 service 做校验、归一化和落盘
+3. `AppState` / settings 相关 service 先做跨分组引用归一化，再做校验和落盘
 4. 落盘成功后把变更投影到运行时能力
+
+补充约束：
+
+- 模型接入分组保存时，允许沿用当前已落盘的翻译 / 问答 / OCR / RAG 模型引用；但 Rust 侧必须先按最新 `providers/models` 目录修复或清空这些引用，再执行跨分组校验，不能先拿旧引用直接判错
 
 典型投影包括：
 
@@ -221,6 +229,19 @@ ACP 链路是独立运行时：
 - macOS Dock 展示策略更新
 - 自启动状态与系统登录项对账
 - OCR / LLM / RAG / ACP / MCP 运行时配置更新
+
+其中 LLM 配置明确拆成两层：
+
+- provider 层：`base_url`、`api_key`、`protocol`
+- model 层：`id`、`model_type`、`model`、`model_identity_hint`、`builtin_preset_model_id`、`supports_multimodal`、`supports_stateful`
+
+约束：
+
+- provider 层只表达“连到哪里、用什么协议”，不再混入具体模型能力
+- provider 是分组容器，一个 provider 下可以维护多个 `models[]`
+- model 层才是最小可引用单元；翻译、OCR、RAG 问答和 RAG embedding 都只保存 `modelId`
+- 设置页编辑顺序固定为“先选 provider 组，再在同一条主流程中编辑 provider 层连接信息和当前 model 层能力”；界面可以合并展示，但不能把两层数据边界混写
+- 配置读取只接受当前两层结构和 `*ModelId` 引用；旧版平铺模型字段、`*ProviderId` 路由字段和 `responsesModel + embeddingModel` 拆分逻辑已移除
 
 ### 6.5 RAG 文档摄取与状态反馈
 
@@ -255,7 +276,7 @@ RAG 建索引固定分两层：
 - launcher 是短时交互窗口，不是长期主工作台
 - 历史剪贴板使用独立原生窗口，而不是 launcher 内部视图切换
 - 构建产物必须注入版本和日期信息
-- `npm run tauri dev` 必须经由仓库脚本包装；开发态默认写入 `src-tauri/target`，并通过仓库脚本按需清理 `debug/deps`、`debug/incremental` 等旧缓存，避免清理口径分散
+- `bun run tauri dev` 必须经由仓库脚本包装；开发态默认写入 `src-tauri/target`，并通过仓库脚本按需清理 `debug/deps`、`debug/incremental` 等旧缓存，避免清理口径分散
 - macOS 发布包分两条链路：本地构建走 `src-tauri/tauri.macos.conf.json` + `scripts/patch-bundle-dmg.mjs` 的 Finder 美化 DMG 链路；CI 构建退化为 `.app` + `hdiutil create` 的简化 DMG，避免无 GUI runner 上的 Finder 自动化随机失败
 - `application` 和 `process` 缓存不在启动时预热，也没有固定轮询刷新；首次命中时同步建快照，后续只在过旧时异步补刷新，避免把常驻扫描成本摊到空闲态
 

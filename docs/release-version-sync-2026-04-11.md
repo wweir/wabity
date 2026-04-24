@@ -16,15 +16,14 @@
 当前发版至少涉及这些版本源：
 
 1. `package.json`
-2. `package-lock.json`
-3. `src-tauri/tauri.conf.json`
-4. `src-tauri/Cargo.toml`
-5. `src-tauri/Cargo.lock`
+2. `src-tauri/tauri.conf.json`
+3. `src-tauri/Cargo.toml`
+4. `src-tauri/Cargo.lock`
 
 补充说明：
 
 - ACP 初始化时对外暴露的 client version 不再写死，而是复用构建期注入的 `WABITY_APP_VERSION`，避免再出现代码硬编码版本漂移。
-- GitHub release workflow 当前显式校验 `package.json`、`package-lock.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`；`src-tauri/Cargo.lock` 虽然不在 action 里校验，但仍必须同步，否则仓库内版本事实会继续分裂。
+- GitHub release workflow 当前显式校验 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml`；`src-tauri/Cargo.lock` 虽然不在 action 里校验，但仍必须同步，否则仓库内版本事实会继续分裂。
 
 ## 发布约束
 
@@ -56,14 +55,15 @@ GitHub Actions 上的 macOS runner 不保证存在稳定的前台 Finder 自动�
 ## 最小操作流程
 
 ```bash
-npm version <version> --no-git-tag-version
+bun pm pkg set version=<version>
+bun install --lockfile-only
 
 # 同步 Rust/Tauri 版本文件
 # - src-tauri/tauri.conf.json
 # - src-tauri/Cargo.toml
 # - src-tauri/Cargo.lock
 
-git add package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
+git add package.json bun.lock src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
 git commit -m "build: release <version>"
 git tag "v<version>"
 git push origin main --follow-tags
