@@ -1,7 +1,8 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
+    io::Read,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, UNIX_EPOCH},
 };
 
 use anyhow::{bail, Context, Result};
@@ -27,12 +28,50 @@ use crate::services::document_extract::extractor_fingerprint_for_path;
 pub(super) const RAG_CHUNK_DB_FILE_NAME: &str = RAG_SQLITE_DB_FILE_NAME;
 pub(super) const RAG_VECTOR_INDEX_FILE_NAME: &str = "rag-chunks.usearch";
 const RAG_VECTOR_INDEX_DIRTY_FILE_NAME: &str = "rag-chunks.dirty";
+const RAG_VECTOR_INDEX_MANIFEST_FILE_NAME: &str = "rag-chunks.manifest.json";
+const RAG_VECTOR_INDEX_META_TABLE_NAME: &str = "rag_vector_index_meta";
+const RAG_VECTOR_INDEX_MANIFEST_VERSION: u32 = 3;
+const RAG_VECTOR_INDEX_PROBE_COUNT: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ActiveVectorBlobCoverage {
     None,
     Partial,
     All,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct VectorIndexMeta {
+    active_vector_count: u64,
+    vector_dimensions: usize,
+    key_xor: u64,
+    key_sum: u64,
+    key_hash_xor: u64,
+    key_hash_sum: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct VectorIndexProbe {
+    pub(crate) vector_key: u64,
+    pub(crate) vector_hash: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct VectorIndexManifest {
+    pub(crate) version: u32,
+    pub(crate) active_vector_count: u64,
+    pub(crate) vector_dimensions: usize,
+    pub(crate) key_xor: u64,
+    pub(crate) key_sum: u64,
+    pub(crate) key_hash_xor: u64,
+    pub(crate) key_hash_sum: u64,
+    pub(crate) index_size_bytes: u64,
+    pub(crate) index_modified_at_ms: u64,
+    #[serde(default)]
+    pub(crate) probes: Vec<VectorIndexProbe>,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) index_md5_hex: Option<String>,
 }
 
 pub(crate) fn build_usearch_index_options(dimensions: usize) -> IndexOptions {
@@ -56,6 +95,13 @@ struct StoredChunkVectorRef {
     vector_key: u64,
     vector_blob: Option<Vec<u8>>,
     vector_dimensions: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ActiveVectorRef {
+    vector_key: u64,
+    vector_dimensions: usize,
+    vector_hash: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -161,10 +207,12 @@ impl RagVectorStore {
                             text_fingerprint,
                             text,
                             vector_blob,
-                            vector_dimensions
+                            vector_dimensions,
+                            vector_hash
                         ) VALUES (
                             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-                            ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20
+                            ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20,
+                            ?21
                         ) RETURNING vector_key
                         ",
                     )
@@ -196,6 +244,7 @@ impl RagVectorStore {
                                 &chunk.text,
                                 serialize_vector(vector),
                                 i64::try_from(vector.len()).unwrap_or(i64::MAX),
+                                sqlite_u64(stable_vector_value_hash(vector)),
                             ],
                             |row| row.get::<_, i64>(0),
                         )
@@ -210,6 +259,17 @@ impl RagVectorStore {
                     }
                 }
             }
+            apply_vector_index_meta_delta_in_transaction(
+                &transaction,
+                &inserted_active_vectors
+                    .iter()
+                    .map(|(vector_key, _)| *vector_key)
+                    .collect::<Vec<_>>(),
+                inserted_active_vectors
+                    .first()
+                    .map(|(_, vector)| vector.len()),
+                &[],
+            )?;
             transaction
                 .commit()
                 .context("failed to commit rag chunk insert transaction")?;
@@ -271,6 +331,12 @@ impl RagVectorStore {
                 .with_context(|| {
                     format!("failed to delete rag chunk rows with filter: {filter}")
                 })?;
+            apply_vector_index_meta_delta_in_transaction(
+                &transaction,
+                &[],
+                None,
+                active_keys.as_slice(),
+            )?;
             transaction
                 .commit()
                 .context("failed to commit rag chunk delete transaction")?;
@@ -324,6 +390,15 @@ impl RagVectorStore {
                             chunk_state.as_str()
                         )
                     })?;
+                apply_vector_index_meta_delta_in_transaction(
+                    &transaction,
+                    &staged_vectors
+                        .iter()
+                        .map(|row| row.vector_key)
+                        .collect::<Vec<_>>(),
+                    staged_vectors.first().map(|row| row.vector_dimensions),
+                    &[],
+                )?;
                 transaction
                     .commit()
                     .context("failed to commit rag chunk update transaction")?;
@@ -603,6 +678,7 @@ async fn clear_vector_index_artifacts(database_path: &Path) -> Result<()> {
     for path in [
         vector_index_file_path(database_path),
         vector_index_dirty_marker_path(database_path),
+        vector_index_manifest_path(database_path),
     ] {
         match tokio::fs::remove_file(&path).await {
             Ok(()) => {}
@@ -746,7 +822,7 @@ pub(super) fn rag_file_records_require_rebuild(
 pub(super) async fn prepare_index_storage(
     database_path: &Path,
     sqlite_path: &Path,
-    _resolved: &ResolvedRagConfig,
+    resolved: &ResolvedRagConfig,
     reset_on_embedding_target_mismatch: bool,
 ) -> Result<()> {
     tokio::fs::create_dir_all(database_path)
@@ -767,12 +843,14 @@ pub(super) async fn prepare_index_storage(
     let chunk_store_exists = chunk_store_database_file(database_path).exists();
     let vector_index_exists = vector_index_file_path(database_path).exists();
     let vector_index_dirty_marker_exists = vector_index_dirty_marker_path(database_path).exists();
+    let vector_index_manifest_exists = vector_index_manifest_path(database_path).exists();
     let vector_schema_is_compatible = chunk_store_has_compatible_schema(database_path)?;
     let vector_table_exists = chunk_store_has_table(database_path)?;
     let vector_artifacts_exist = vector_table_exists
         || chunk_store_exists
         || vector_index_exists
-        || vector_index_dirty_marker_exists;
+        || vector_index_dirty_marker_exists
+        || vector_index_manifest_exists;
 
     if vector_artifacts_exist && !vector_schema_is_compatible {
         tracing::warn!(
@@ -802,6 +880,24 @@ pub(super) async fn prepare_index_storage(
     })
     .await
     .context("failed to join RAG sqlite state task")??;
+    if reset_on_embedding_target_mismatch
+        && stored_records
+            .values()
+            .any(|record| record.embedding_fingerprint != resolved.embedding_fingerprint)
+    {
+        tracing::warn!(
+            current_embedding_fingerprint = %resolved.embedding_fingerprint,
+            "resetting RAG storage because indexed rows target a different embedding fingerprint"
+        );
+        if vector_artifacts_exist {
+            clear_index(database_path).await?;
+        }
+        if !stored_records.is_empty() {
+            clear_sqlite_store(sqlite_path).await?;
+        }
+        initialize_empty_storage(database_path, sqlite_path)?;
+        return Ok(());
+    }
     let sqlite_has_rows = !stored_records.is_empty();
     let sqlite_has_active_rows = stored_records
         .values()
@@ -813,9 +909,9 @@ pub(super) async fn prepare_index_storage(
     } else {
         false
     };
-    let _ = reset_on_embedding_target_mismatch;
-
-    if !chunk_store_artifacts_exist && (vector_index_exists || vector_index_dirty_marker_exists) {
+    if !chunk_store_artifacts_exist
+        && (vector_index_exists || vector_index_dirty_marker_exists || vector_index_manifest_exists)
+    {
         tracing::warn!(
             "resetting RAG storage because vector index artifacts exist without a chunk store"
         );
@@ -857,7 +953,9 @@ pub(super) async fn prepare_index_storage(
         _ => {}
     }
 
-    if !vector_has_active_chunks && (vector_index_exists || vector_index_dirty_marker_exists) {
+    if !vector_has_active_chunks
+        && (vector_index_exists || vector_index_dirty_marker_exists || vector_index_manifest_exists)
+    {
         clear_vector_index_artifacts(database_path).await?;
     }
 
@@ -905,6 +1003,61 @@ fn vector_index_dirty_marker_path(database_path: &Path) -> PathBuf {
     database_path.join(RAG_VECTOR_INDEX_DIRTY_FILE_NAME)
 }
 
+pub(crate) fn vector_index_manifest_path(database_path: &Path) -> PathBuf {
+    database_path.join(RAG_VECTOR_INDEX_MANIFEST_FILE_NAME)
+}
+
+fn sqlite_u64(value: u64) -> i64 {
+    value as i64
+}
+
+fn decode_sqlite_u64(value: i64) -> u64 {
+    value as u64
+}
+
+fn stable_vector_key_hash(vector_key: u64) -> u64 {
+    let mixed = vector_key.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    let mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    let mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    mixed ^ (mixed >> 31)
+}
+
+fn stable_vector_value_hash(vector: &[f32]) -> u64 {
+    let mut hash = 0xCBF2_9CE4_8422_2325_u64;
+    for value in vector {
+        for byte in value.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x1000_0000_01B3);
+        }
+    }
+    hash
+}
+
+fn apply_vector_key_add(meta: &mut VectorIndexMeta, vector_key: u64) {
+    let key_hash = stable_vector_key_hash(vector_key);
+    meta.active_vector_count = meta.active_vector_count.saturating_add(1);
+    meta.key_xor ^= vector_key;
+    meta.key_sum = meta.key_sum.wrapping_add(vector_key);
+    meta.key_hash_xor ^= key_hash;
+    meta.key_hash_sum = meta.key_hash_sum.wrapping_add(key_hash);
+}
+
+fn apply_vector_key_remove(meta: &mut VectorIndexMeta, vector_key: u64) -> Result<()> {
+    if meta.active_vector_count == 0 {
+        bail!(
+            "cannot remove RAG vector {} from empty index metadata",
+            vector_key
+        );
+    }
+    let key_hash = stable_vector_key_hash(vector_key);
+    meta.active_vector_count -= 1;
+    meta.key_xor ^= vector_key;
+    meta.key_sum = meta.key_sum.wrapping_sub(vector_key);
+    meta.key_hash_xor ^= key_hash;
+    meta.key_hash_sum = meta.key_hash_sum.wrapping_sub(key_hash);
+    Ok(())
+}
+
 pub(crate) fn open_vector_chunk_connection(database_path: &Path) -> Result<Connection> {
     open_chunk_store_connection(database_path)
 }
@@ -941,6 +1094,264 @@ fn clear_vector_index_dirty_marker(database_path: &Path) -> Result<()> {
             )
         }),
     }
+}
+
+fn vector_index_manifest_matches_meta(
+    manifest: &VectorIndexManifest,
+    meta: VectorIndexMeta,
+) -> bool {
+    manifest.version == RAG_VECTOR_INDEX_MANIFEST_VERSION
+        && manifest.probes.len() == vector_index_probe_offsets(meta.active_vector_count).len()
+        && manifest.active_vector_count == meta.active_vector_count
+        && manifest.vector_dimensions == meta.vector_dimensions
+        && manifest.key_xor == meta.key_xor
+        && manifest.key_sum == meta.key_sum
+        && manifest.key_hash_xor == meta.key_hash_xor
+        && manifest.key_hash_sum == meta.key_hash_sum
+}
+
+pub(crate) fn load_vector_index_manifest(
+    database_path: &Path,
+) -> Result<Option<VectorIndexManifest>> {
+    let manifest_path = vector_index_manifest_path(database_path);
+    if !manifest_path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(&manifest_path).with_context(|| {
+        format!(
+            "failed to read RAG vector index manifest: {}",
+            manifest_path.display()
+        )
+    })?;
+    let manifest = serde_json::from_slice::<VectorIndexManifest>(&bytes).with_context(|| {
+        format!(
+            "failed to parse RAG vector index manifest: {}",
+            manifest_path.display()
+        )
+    })?;
+    Ok(Some(manifest))
+}
+
+fn file_modified_at_ms(path: &Path) -> Result<u64> {
+    let modified = std::fs::metadata(path)
+        .with_context(|| format!("failed to stat file: {}", path.display()))?
+        .modified()
+        .with_context(|| format!("failed to read modified time: {}", path.display()))?;
+    let modified = modified
+        .duration_since(UNIX_EPOCH)
+        .with_context(|| format!("modified time is before unix epoch: {}", path.display()))?;
+    Ok(u64::try_from(modified.as_millis()).unwrap_or(u64::MAX))
+}
+
+fn compute_file_md5_hex(path: &Path) -> Result<String> {
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("failed to open file for md5 digest: {}", path.display()))?;
+    let mut context = md5::Context::new();
+    let mut buffer = [0_u8; 16 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("failed to read file for md5 digest: {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        context.consume(&buffer[..read]);
+    }
+    Ok(format!("{:x}", context.compute()))
+}
+
+fn vector_index_probe_offsets(active_vector_count: u64) -> Vec<u64> {
+    if active_vector_count == 0 {
+        return Vec::new();
+    }
+    let last = active_vector_count - 1;
+    let mut offsets = vec![0, last / 3, (last * 2) / 3, last];
+    offsets.sort_unstable();
+    offsets.dedup();
+    if offsets.len() > RAG_VECTOR_INDEX_PROBE_COUNT {
+        offsets.truncate(RAG_VECTOR_INDEX_PROBE_COUNT);
+    }
+    offsets
+}
+
+fn load_probe_key_at_offset(connection: &Connection, offset: u64) -> Result<u64> {
+    connection
+        .query_row(
+            "
+            SELECT vector_key
+            FROM rag_chunks
+            WHERE chunk_state = 'active'
+            ORDER BY vector_key
+            LIMIT 1 OFFSET ?1
+            ",
+            [
+                i64::try_from(offset)
+                    .context("probe key offset does not fit into SQLite INTEGER")?,
+            ],
+            |row| row.get::<_, i64>(0),
+        )
+        .with_context(|| format!("failed to load active vector probe key at offset {offset}"))
+        .and_then(|value| u64::try_from(value).context("probe vector_key is negative"))
+}
+
+fn load_vector_index_probe_keys(
+    connection: &Connection,
+    active_vector_count: u64,
+) -> Result<Vec<u64>> {
+    vector_index_probe_offsets(active_vector_count)
+        .into_iter()
+        .map(|offset| load_probe_key_at_offset(connection, offset))
+        .collect()
+}
+
+fn export_index_vector(
+    index: &Index,
+    vector_key: u64,
+    expected_dimensions: usize,
+) -> Result<Vec<f32>> {
+    let mut vector = Vec::with_capacity(expected_dimensions);
+    index
+        .export::<f32>(vector_key, &mut vector)
+        .with_context(|| format!("failed to export vector key {} from USearch", vector_key))?;
+    if vector.is_empty() {
+        bail!("missing RAG vector {} in USearch index", vector_key);
+    }
+    if vector.len() != expected_dimensions {
+        bail!(
+            "USearch vector dimension mismatch for key {}: expected {}, got {}",
+            vector_key,
+            expected_dimensions,
+            vector.len()
+        );
+    }
+    Ok(vector)
+}
+
+fn build_vector_index_probes(
+    connection: &Connection,
+    index: &Index,
+    meta: VectorIndexMeta,
+) -> Result<Vec<VectorIndexProbe>> {
+    let probe_keys = load_vector_index_probe_keys(connection, meta.active_vector_count)?;
+    probe_keys
+        .into_iter()
+        .map(|vector_key| {
+            let vector = export_index_vector(index, vector_key, meta.vector_dimensions)?;
+            Ok(VectorIndexProbe {
+                vector_key,
+                vector_hash: stable_vector_value_hash(vector.as_slice()),
+            })
+        })
+        .collect()
+}
+
+fn validate_vector_index_probes(
+    index: &Index,
+    manifest: &VectorIndexManifest,
+    expected_dimensions: usize,
+) -> Result<()> {
+    for probe in &manifest.probes {
+        let vector = export_index_vector(index, probe.vector_key, expected_dimensions)?;
+        let actual_hash = stable_vector_value_hash(vector.as_slice());
+        if actual_hash != probe.vector_hash {
+            bail!(
+                "USearch probe mismatch for key {}: expected hash {}, got {}",
+                probe.vector_key,
+                probe.vector_hash,
+                actual_hash
+            );
+        }
+    }
+    Ok(())
+}
+
+fn write_vector_index_manifest(
+    connection: &Connection,
+    database_path: &Path,
+    index: &Index,
+    meta: VectorIndexMeta,
+    index_md5_hex: Option<&str>,
+) -> Result<()> {
+    let manifest_path = vector_index_manifest_path(database_path);
+    if meta.active_vector_count == 0 {
+        match std::fs::remove_file(&manifest_path) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to remove empty RAG vector index manifest: {}",
+                        manifest_path.display()
+                    )
+                })
+            }
+        }
+    }
+
+    let index_path = vector_index_file_path(database_path);
+    let metadata = std::fs::metadata(&index_path).with_context(|| {
+        format!(
+            "failed to stat RAG vector index for manifest write: {}",
+            index_path.display()
+        )
+    })?;
+    let manifest = VectorIndexManifest {
+        version: RAG_VECTOR_INDEX_MANIFEST_VERSION,
+        active_vector_count: meta.active_vector_count,
+        vector_dimensions: meta.vector_dimensions,
+        key_xor: meta.key_xor,
+        key_sum: meta.key_sum,
+        key_hash_xor: meta.key_hash_xor,
+        key_hash_sum: meta.key_hash_sum,
+        index_size_bytes: metadata.len(),
+        index_modified_at_ms: file_modified_at_ms(&index_path)?,
+        probes: build_vector_index_probes(connection, index, meta)?,
+        index_md5_hex: index_md5_hex.map(ToOwned::to_owned),
+    };
+    let bytes =
+        serde_json::to_vec_pretty(&manifest).context("failed to serialize RAG index manifest")?;
+    let temp_path = manifest_path.with_extension("json.tmp");
+    std::fs::write(&temp_path, bytes).with_context(|| {
+        format!(
+            "failed to write temporary RAG vector index manifest: {}",
+            temp_path.display()
+        )
+    })?;
+    std::fs::rename(&temp_path, &manifest_path).with_context(|| {
+        format!(
+            "failed to replace RAG vector index manifest {} -> {}",
+            temp_path.display(),
+            manifest_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn sync_vector_index_manifest_with_meta(database_path: &Path, index: Option<&Index>) -> Result<()> {
+    let connection = open_chunk_store_connection(database_path)?;
+    let meta = load_vector_index_meta(&connection)?;
+    if meta.active_vector_count == 0 {
+        let manifest_path = vector_index_manifest_path(database_path);
+        return match std::fs::remove_file(&manifest_path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error).with_context(|| {
+                format!(
+                    "failed to remove empty RAG vector index manifest: {}",
+                    manifest_path.display()
+                )
+            }),
+        };
+    }
+    let index = index.context("missing loaded USearch index while syncing non-empty manifest")?;
+    let index_md5_hex = compute_file_md5_hex(&vector_index_file_path(database_path))?;
+    write_vector_index_manifest(
+        &connection,
+        database_path,
+        index,
+        meta,
+        Some(index_md5_hex.as_str()),
+    )
 }
 
 fn clear_vector_blobs_for_keys(database_path: &Path, vector_keys: &[u64]) -> Result<()> {
@@ -1087,6 +1498,7 @@ fn save_updated_vector_index_with_dimensions(
                 });
             }
         }
+        sync_vector_index_manifest_with_meta(database_path, None)?;
         return Ok(());
     }
 
@@ -1107,6 +1519,7 @@ fn save_updated_vector_index_with_dimensions(
             index_path.display()
         )
     })?;
+    sync_vector_index_manifest_with_meta(database_path, Some(&index))?;
     Ok(())
 }
 
@@ -1151,6 +1564,75 @@ fn deserialize_vector_from_ref(row: &StoredChunkVectorRef) -> Result<Vec<f32>> {
         .as_deref()
         .context("missing staged vector blob for vector index update")?;
     deserialize_vector(blob, row.vector_dimensions)
+}
+
+fn backfill_vector_hashes(
+    connection: &Connection,
+    vector_hashes: &[(u64, u64)],
+    only_when_missing: bool,
+) -> Result<()> {
+    if vector_hashes.is_empty() {
+        return Ok(());
+    }
+    let sql = if only_when_missing {
+        "UPDATE rag_chunks SET vector_hash = ?1 WHERE vector_key = ?2 AND vector_hash IS NULL"
+    } else {
+        "UPDATE rag_chunks SET vector_hash = ?1 WHERE vector_key = ?2"
+    };
+    let mut statement = connection
+        .prepare(sql)
+        .context("failed to prepare RAG vector hash backfill statement")?;
+    for (vector_key, vector_hash) in vector_hashes {
+        statement
+            .execute(params![sqlite_u64(*vector_hash), sqlite_u64(*vector_key)])
+            .with_context(|| format!("failed to persist RAG vector hash for key {}", vector_key))?;
+    }
+    Ok(())
+}
+
+fn backfill_vector_hashes_from_blob_rows(connection: &Connection) -> Result<()> {
+    let mut statement = connection
+        .prepare(
+            "
+            SELECT vector_key, vector_blob, vector_dimensions
+            FROM rag_chunks
+            WHERE vector_hash IS NULL AND vector_blob IS NOT NULL
+            ",
+        )
+        .context("failed to prepare RAG vector hash blob backfill query")?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(StoredChunkVectorRef {
+                vector_key: u64::try_from(row.get::<_, i64>(0)?).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Integer,
+                        Box::new(error),
+                    )
+                })?,
+                vector_blob: row.get(1)?,
+                vector_dimensions: usize::try_from(row.get::<_, i64>(2)?).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Integer,
+                        Box::new(error),
+                    )
+                })?,
+            })
+        })
+        .context("failed to query blob-backed RAG vectors for hash backfill")?;
+    let updates = rows
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to collect blob-backed RAG vectors for hash backfill")?
+        .into_iter()
+        .map(|row| {
+            Ok((
+                row.vector_key,
+                stable_vector_value_hash(deserialize_vector_from_ref(&row)?.as_slice()),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    backfill_vector_hashes(connection, updates.as_slice(), true)
 }
 
 fn load_vectors_from_index(
@@ -1317,6 +1799,298 @@ fn open_chunk_store_connection(database_path: &Path) -> Result<Connection> {
     Ok(connection)
 }
 
+fn rag_chunk_table_exists(connection: &Connection) -> Result<bool> {
+    Ok(connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'rag_chunks' LIMIT 1",
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .context("failed to inspect rag chunk table existence")?
+        .is_some())
+}
+
+fn load_chunk_table_schema_columns(connection: &Connection) -> Result<Vec<(String, String, bool)>> {
+    let mut statement = connection
+        .prepare("PRAGMA table_info(rag_chunks)")
+        .context("failed to inspect rag chunk schema")?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)? != 0,
+            ))
+        })
+        .context("failed to query rag chunk schema")?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to collect rag chunk schema rows")
+}
+
+fn migrate_chunk_table_schema(connection: &Connection) -> Result<()> {
+    if !rag_chunk_table_exists(connection)? {
+        return Ok(());
+    }
+    let columns = load_chunk_table_schema_columns(connection)?;
+    if columns.iter().any(|(name, _, _)| name == "vector_hash") {
+        backfill_vector_hashes_from_blob_rows(connection)?;
+        return Ok(());
+    }
+    connection
+        .execute("ALTER TABLE rag_chunks ADD COLUMN vector_hash INTEGER", [])
+        .context("failed to add vector_hash column to rag_chunks")?;
+    backfill_vector_hashes_from_blob_rows(connection)
+}
+
+fn load_vector_index_meta(connection: &Connection) -> Result<VectorIndexMeta> {
+    connection
+        .query_row(
+            &format!(
+                "
+                SELECT
+                    active_vector_count,
+                    vector_dimensions,
+                    key_xor,
+                    key_sum,
+                    key_hash_xor,
+                    key_hash_sum
+                FROM {RAG_VECTOR_INDEX_META_TABLE_NAME}
+                WHERE singleton_key = 1
+                "
+            ),
+            [],
+            |row| {
+                Ok(VectorIndexMeta {
+                    active_vector_count: decode_sqlite_u64(row.get::<_, i64>(0)?),
+                    vector_dimensions: usize::try_from(row.get::<_, i64>(1)?).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            rusqlite::types::Type::Integer,
+                            Box::new(error),
+                        )
+                    })?,
+                    key_xor: decode_sqlite_u64(row.get::<_, i64>(2)?),
+                    key_sum: decode_sqlite_u64(row.get::<_, i64>(3)?),
+                    key_hash_xor: decode_sqlite_u64(row.get::<_, i64>(4)?),
+                    key_hash_sum: decode_sqlite_u64(row.get::<_, i64>(5)?),
+                })
+            },
+        )
+        .optional()
+        .context("failed to load RAG vector index metadata")?
+        .map(Ok)
+        .unwrap_or_else(|| Ok(VectorIndexMeta::default()))
+}
+
+fn load_vector_index_meta_in_transaction(transaction: &Transaction<'_>) -> Result<VectorIndexMeta> {
+    transaction
+        .query_row(
+            &format!(
+                "
+                SELECT
+                    active_vector_count,
+                    vector_dimensions,
+                    key_xor,
+                    key_sum,
+                    key_hash_xor,
+                    key_hash_sum
+                FROM {RAG_VECTOR_INDEX_META_TABLE_NAME}
+                WHERE singleton_key = 1
+                "
+            ),
+            [],
+            |row| {
+                Ok(VectorIndexMeta {
+                    active_vector_count: decode_sqlite_u64(row.get::<_, i64>(0)?),
+                    vector_dimensions: usize::try_from(row.get::<_, i64>(1)?).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            rusqlite::types::Type::Integer,
+                            Box::new(error),
+                        )
+                    })?,
+                    key_xor: decode_sqlite_u64(row.get::<_, i64>(2)?),
+                    key_sum: decode_sqlite_u64(row.get::<_, i64>(3)?),
+                    key_hash_xor: decode_sqlite_u64(row.get::<_, i64>(4)?),
+                    key_hash_sum: decode_sqlite_u64(row.get::<_, i64>(5)?),
+                })
+            },
+        )
+        .optional()
+        .context("failed to load RAG vector index metadata in transaction")?
+        .map(Ok)
+        .unwrap_or_else(|| Ok(VectorIndexMeta::default()))
+}
+
+fn upsert_vector_index_meta(connection: &Connection, meta: &VectorIndexMeta) -> Result<()> {
+    connection
+        .execute(
+            &format!(
+                "
+                INSERT INTO {RAG_VECTOR_INDEX_META_TABLE_NAME} (
+                    singleton_key,
+                    active_vector_count,
+                    vector_dimensions,
+                    key_xor,
+                    key_sum,
+                    key_hash_xor,
+                    key_hash_sum
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                ON CONFLICT(singleton_key) DO UPDATE SET
+                    active_vector_count = excluded.active_vector_count,
+                    vector_dimensions = excluded.vector_dimensions,
+                    key_xor = excluded.key_xor,
+                    key_sum = excluded.key_sum,
+                    key_hash_xor = excluded.key_hash_xor,
+                    key_hash_sum = excluded.key_hash_sum
+                "
+            ),
+            params![
+                1_i64,
+                sqlite_u64(meta.active_vector_count),
+                i64::try_from(meta.vector_dimensions)
+                    .context("vector_dimensions does not fit into SQLite INTEGER")?,
+                sqlite_u64(meta.key_xor),
+                sqlite_u64(meta.key_sum),
+                sqlite_u64(meta.key_hash_xor),
+                sqlite_u64(meta.key_hash_sum),
+            ],
+        )
+        .context("failed to upsert RAG vector index metadata")?;
+    Ok(())
+}
+
+fn upsert_vector_index_meta_in_transaction(
+    transaction: &Transaction<'_>,
+    meta: &VectorIndexMeta,
+) -> Result<()> {
+    transaction
+        .execute(
+            &format!(
+                "
+                INSERT INTO {RAG_VECTOR_INDEX_META_TABLE_NAME} (
+                    singleton_key,
+                    active_vector_count,
+                    vector_dimensions,
+                    key_xor,
+                    key_sum,
+                    key_hash_xor,
+                    key_hash_sum
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                ON CONFLICT(singleton_key) DO UPDATE SET
+                    active_vector_count = excluded.active_vector_count,
+                    vector_dimensions = excluded.vector_dimensions,
+                    key_xor = excluded.key_xor,
+                    key_sum = excluded.key_sum,
+                    key_hash_xor = excluded.key_hash_xor,
+                    key_hash_sum = excluded.key_hash_sum
+                "
+            ),
+            params![
+                1_i64,
+                sqlite_u64(meta.active_vector_count),
+                i64::try_from(meta.vector_dimensions)
+                    .context("vector_dimensions does not fit into SQLite INTEGER")?,
+                sqlite_u64(meta.key_xor),
+                sqlite_u64(meta.key_sum),
+                sqlite_u64(meta.key_hash_xor),
+                sqlite_u64(meta.key_hash_sum),
+            ],
+        )
+        .context("failed to upsert RAG vector index metadata in transaction")?;
+    Ok(())
+}
+
+fn rebuild_vector_index_meta(connection: &Connection) -> Result<VectorIndexMeta> {
+    let mut statement = connection
+        .prepare(
+            "
+            SELECT vector_key, vector_dimensions
+            FROM rag_chunks
+            WHERE chunk_state = 'active'
+            ORDER BY vector_key
+            ",
+        )
+        .context("failed to prepare active vector metadata rebuild query")?;
+    let mut rows = statement
+        .query([])
+        .context("failed to query active vector metadata for rebuild")?;
+    let mut meta = VectorIndexMeta::default();
+    while let Some(row) = rows
+        .next()
+        .context("failed to step active vector metadata rebuild rows")?
+    {
+        let vector_key = u64::try_from(row.get::<_, i64>(0)?).context("vector_key is negative")?;
+        let vector_dimensions = read_vector_dimensions(row, 1)?;
+        if meta.active_vector_count == 0 {
+            meta.vector_dimensions = vector_dimensions;
+        } else if meta.vector_dimensions != vector_dimensions {
+            bail!(
+                "inconsistent active RAG vector dimensions while rebuilding metadata: expected {}, got {}",
+                meta.vector_dimensions,
+                vector_dimensions
+            );
+        }
+        apply_vector_key_add(&mut meta, vector_key);
+    }
+    if meta.active_vector_count == 0 {
+        meta.vector_dimensions = 0;
+    }
+    Ok(meta)
+}
+
+fn ensure_vector_index_meta(connection: &Connection) -> Result<()> {
+    let row_exists = connection
+        .query_row(
+            &format!(
+                "SELECT 1 FROM {RAG_VECTOR_INDEX_META_TABLE_NAME} WHERE singleton_key = 1 LIMIT 1"
+            ),
+            [],
+            |_| Ok(()),
+        )
+        .optional()
+        .context("failed to inspect RAG vector index metadata row")?
+        .is_some();
+    if row_exists {
+        return Ok(());
+    }
+    let meta = rebuild_vector_index_meta(connection)?;
+    upsert_vector_index_meta(connection, &meta)
+}
+
+fn apply_vector_index_meta_delta_in_transaction(
+    transaction: &Transaction<'_>,
+    added_keys: &[u64],
+    added_dimensions: Option<usize>,
+    removed_keys: &[u64],
+) -> Result<()> {
+    let mut meta = load_vector_index_meta_in_transaction(transaction)?;
+    if !added_keys.is_empty() {
+        let added_dimensions = added_dimensions
+            .context("missing vector_dimensions for active vector metadata insert")?;
+        if meta.active_vector_count == 0 {
+            meta.vector_dimensions = added_dimensions;
+        } else if meta.vector_dimensions != added_dimensions {
+            bail!(
+                "active RAG vector dimension mismatch while updating metadata: expected {}, got {}",
+                meta.vector_dimensions,
+                added_dimensions
+            );
+        }
+        for key in added_keys {
+            apply_vector_key_add(&mut meta, *key);
+        }
+    }
+    for key in removed_keys {
+        apply_vector_key_remove(&mut meta, *key)?;
+    }
+    if meta.active_vector_count == 0 {
+        meta = VectorIndexMeta::default();
+    }
+    upsert_vector_index_meta_in_transaction(transaction, &meta)
+}
+
 fn initialize_chunk_store_schema(connection: &Connection) -> Result<()> {
     connection
         .execute_batch(
@@ -1344,7 +2118,8 @@ fn initialize_chunk_store_schema(connection: &Connection) -> Result<()> {
                 text_fingerprint TEXT NOT NULL,
                 text TEXT NOT NULL,
                 vector_blob BLOB,
-                vector_dimensions INTEGER NOT NULL
+                vector_dimensions INTEGER NOT NULL,
+                vector_hash INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_rag_chunks_path_state
                 ON rag_chunks(absolute_path, chunk_state);
@@ -1354,9 +2129,20 @@ fn initialize_chunk_store_schema(connection: &Connection) -> Result<()> {
                 ON rag_chunks(absolute_path, chunk_state, chunk_reuse_key);
             CREATE INDEX IF NOT EXISTS idx_rag_chunks_embedding_text
                 ON rag_chunks(embedding_fingerprint, text_fingerprint);
+            CREATE TABLE IF NOT EXISTS rag_vector_index_meta (
+                singleton_key INTEGER PRIMARY KEY CHECK(singleton_key = 1),
+                active_vector_count INTEGER NOT NULL,
+                vector_dimensions INTEGER NOT NULL,
+                key_xor INTEGER NOT NULL,
+                key_sum INTEGER NOT NULL,
+                key_hash_xor INTEGER NOT NULL,
+                key_hash_sum INTEGER NOT NULL
+            );
             ",
         )
         .context("failed to initialize rag chunk schema")?;
+    migrate_chunk_table_schema(connection)?;
+    ensure_vector_index_meta(connection)?;
     Ok(())
 }
 
@@ -1383,7 +2169,7 @@ fn chunk_store_has_table(database_path: &Path) -> Result<bool> {
     Ok(exists)
 }
 
-fn chunk_store_has_compatible_schema(database_path: &Path) -> Result<bool> {
+pub(super) fn chunk_store_has_compatible_schema(database_path: &Path) -> Result<bool> {
     let db_path = chunk_store_database_file(database_path);
     if !db_path.exists() {
         return Ok(false);
@@ -1394,6 +2180,7 @@ fn chunk_store_has_compatible_schema(database_path: &Path) -> Result<bool> {
             db_path.display()
         )
     })?;
+    migrate_chunk_table_schema(&connection)?;
     chunk_table_schema_is_compatible(&connection)
 }
 
@@ -1441,21 +2228,9 @@ fn chunk_table_schema_is_compatible(connection: &Connection) -> Result<bool> {
         ("text", "TEXT", true),
         ("vector_blob", "BLOB", false),
         ("vector_dimensions", "INTEGER", true),
+        ("vector_hash", "INTEGER", false),
     ];
-    let mut statement = connection
-        .prepare("PRAGMA table_info(rag_chunks)")
-        .context("failed to inspect rag chunk schema")?;
-    let columns = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)? != 0,
-            ))
-        })
-        .context("failed to query rag chunk schema")?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .context("failed to collect rag chunk schema rows")?;
+    let columns = load_chunk_table_schema_columns(connection)?;
 
     if columns.len() != expected_columns.len() {
         return Ok(false);
@@ -1476,11 +2251,227 @@ fn vector_index_is_usable(database_path: &Path) -> Result<bool> {
         return Ok(false);
     }
 
-    let dimensions = load_active_vector_dimensions(database_path)?.unwrap_or(1);
+    let connection = open_chunk_store_connection(database_path)?;
+    let meta = load_vector_index_meta(&connection)?;
+    let dimensions = meta.vector_dimensions.max(1);
     let options = build_usearch_index_options(dimensions);
     let index = Index::new(&options).context("failed to create USearch index validator")?;
     match index.load(index_path.to_string_lossy().as_ref()) {
-        Ok(()) => Ok(true),
+        Ok(()) => {
+            if meta.active_vector_count > 0 && index.dimensions() != dimensions {
+                tracing::warn!(
+                    expected_dimensions = dimensions,
+                    actual_dimensions = index.dimensions(),
+                    path = %index_path.display(),
+                    "marking cached USearch index dirty because its dimensions do not match active RAG metadata"
+                );
+                return Ok(false);
+            }
+            if index.size() != usize::try_from(meta.active_vector_count).unwrap_or(usize::MAX) {
+                tracing::warn!(
+                    expected_size = meta.active_vector_count,
+                    actual_size = index.size(),
+                    path = %index_path.display(),
+                    "marking cached USearch index dirty because its size does not match active RAG metadata"
+                );
+                return Ok(false);
+            }
+            match load_vector_index_manifest(database_path)? {
+                Some(manifest) => {
+                    let needs_manifest_backfill = manifest.version
+                        != RAG_VECTOR_INDEX_MANIFEST_VERSION
+                        || (meta.active_vector_count > 0 && manifest.probes.is_empty())
+                        || manifest.index_md5_hex.is_none();
+                    if !needs_manifest_backfill
+                        && !vector_index_manifest_matches_meta(&manifest, meta)
+                    {
+                        tracing::warn!(
+                            path = %index_path.display(),
+                            "marking cached USearch index dirty because its manifest does not match active RAG metadata"
+                        );
+                        return Ok(false);
+                    }
+                    if needs_manifest_backfill {
+                        let active_vector_refs = load_active_vector_refs(&connection)?;
+                        let has_missing_hashes = active_vector_refs
+                            .iter()
+                            .any(|vector_ref| vector_ref.vector_hash.is_none());
+                        if has_missing_hashes && !manifest.probes.is_empty() {
+                            let expected_probe_keys = load_vector_index_probe_keys(
+                                &connection,
+                                meta.active_vector_count,
+                            )?;
+                            let manifest_probe_keys = manifest
+                                .probes
+                                .iter()
+                                .map(|probe| probe.vector_key)
+                                .collect::<Vec<_>>();
+                            if manifest_probe_keys != expected_probe_keys {
+                                tracing::warn!(
+                                    path = %index_path.display(),
+                                    "marking cached USearch index dirty because its legacy manifest probe set does not match the active RAG metadata layout"
+                                );
+                                return Ok(false);
+                            }
+                            if let Err(error) = validate_vector_index_probes(
+                                &index,
+                                &manifest,
+                                meta.vector_dimensions,
+                            ) {
+                                tracing::warn!(
+                                    error = format_args!("{:#}", error),
+                                    path = %index_path.display(),
+                                    "marking cached USearch index dirty because its legacy manifest probes do not match the loaded index"
+                                );
+                                return Ok(false);
+                            }
+                            backfill_missing_vector_hashes_from_index(
+                                &connection,
+                                &index,
+                                active_vector_refs.as_slice(),
+                            )?;
+                            let refreshed_vector_refs = load_active_vector_refs(&connection)?;
+                            match validate_loaded_vector_index(
+                                &index,
+                                refreshed_vector_refs.as_slice(),
+                            ) {
+                                Ok(()) => {
+                                    let current_index_md5_hex = compute_file_md5_hex(&index_path)?;
+                                    write_vector_index_manifest(
+                                        &connection,
+                                        database_path,
+                                        &index,
+                                        meta,
+                                        Some(current_index_md5_hex.as_str()),
+                                    )?;
+                                    return Ok(true);
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        error = format_args!("{:#}", error),
+                                        path = %index_path.display(),
+                                        "marking cached USearch index dirty because it failed post-backfill vector validation during manifest upgrade"
+                                    );
+                                    return Ok(false);
+                                }
+                            }
+                        }
+                        match validate_loaded_vector_index(&index, active_vector_refs.as_slice()) {
+                            Ok(()) => {
+                                let current_index_md5_hex = compute_file_md5_hex(&index_path)?;
+                                write_vector_index_manifest(
+                                    &connection,
+                                    database_path,
+                                    &index,
+                                    meta,
+                                    Some(current_index_md5_hex.as_str()),
+                                )?;
+                                return Ok(true);
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    error = format_args!("{:#}", error),
+                                    path = %index_path.display(),
+                                    "marking cached USearch index dirty because it failed one-time vector coverage validation during manifest upgrade"
+                                );
+                                return Ok(false);
+                            }
+                        }
+                    }
+                    let expected_probe_keys =
+                        load_vector_index_probe_keys(&connection, meta.active_vector_count)?;
+                    let manifest_probe_keys = manifest
+                        .probes
+                        .iter()
+                        .map(|probe| probe.vector_key)
+                        .collect::<Vec<_>>();
+                    if manifest_probe_keys != expected_probe_keys {
+                        tracing::warn!(
+                            path = %index_path.display(),
+                            "marking cached USearch index dirty because its manifest probe set does not match the active RAG metadata layout"
+                        );
+                        return Ok(false);
+                    }
+                    if let Err(error) =
+                        validate_vector_index_probes(&index, &manifest, meta.vector_dimensions)
+                    {
+                        tracing::warn!(
+                            error = format_args!("{:#}", error),
+                            path = %index_path.display(),
+                            "marking cached USearch index dirty because its manifest probes do not match the loaded index"
+                        );
+                        return Ok(false);
+                    }
+                    let metadata = std::fs::metadata(&index_path).with_context(|| {
+                        format!(
+                            "failed to stat USearch index during validation: {}",
+                            index_path.display()
+                        )
+                    })?;
+                    let modified_at_ms = file_modified_at_ms(&index_path)?;
+                    if metadata.len() != manifest.index_size_bytes
+                        || modified_at_ms != manifest.index_modified_at_ms
+                    {
+                        let active_vector_refs = load_active_vector_refs(&connection)?;
+                        match validate_loaded_vector_index(&index, active_vector_refs.as_slice()) {
+                            Ok(()) => {
+                                let current_index_md5_hex = compute_file_md5_hex(&index_path)?;
+                                write_vector_index_manifest(
+                                    &connection,
+                                    database_path,
+                                    &index,
+                                    meta,
+                                    Some(current_index_md5_hex.as_str()),
+                                )?;
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    error = format_args!("{:#}", error),
+                                    path = %index_path.display(),
+                                    "marking cached USearch index dirty because it failed full vector coverage validation after index metadata drift"
+                                );
+                                return Ok(false);
+                            }
+                        }
+                    } else {
+                        let current_index_md5_hex = compute_file_md5_hex(&index_path)?;
+                        if manifest.index_md5_hex.as_deref() != Some(current_index_md5_hex.as_str())
+                        {
+                            tracing::warn!(
+                                path = %index_path.display(),
+                                "marking cached USearch index dirty because its manifest digest does not match the loaded index"
+                            );
+                            return Ok(false);
+                        }
+                    }
+                    Ok(true)
+                }
+                None => {
+                    let active_vector_refs = load_active_vector_refs(&connection)?;
+                    match validate_loaded_vector_index(&index, active_vector_refs.as_slice()) {
+                        Ok(()) => {
+                            let current_index_md5_hex = compute_file_md5_hex(&index_path)?;
+                            write_vector_index_manifest(
+                                &connection,
+                                database_path,
+                                &index,
+                                meta,
+                                Some(current_index_md5_hex.as_str()),
+                            )?;
+                            Ok(true)
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                error = format_args!("{:#}", error),
+                                path = %index_path.display(),
+                                "marking cached USearch index dirty because it failed one-time vector coverage validation during manifest backfill"
+                            );
+                            Ok(false)
+                        }
+                    }
+                }
+            }
+        }
         Err(error) => {
             tracing::warn!(
                 error = format_args!("{:#}", error),
@@ -1490,6 +2481,117 @@ fn vector_index_is_usable(database_path: &Path) -> Result<bool> {
             Ok(false)
         }
     }
+}
+
+fn load_active_vector_refs(connection: &Connection) -> Result<Vec<ActiveVectorRef>> {
+    let mut statement = connection
+        .prepare(
+            "
+            SELECT vector_key, vector_dimensions, vector_hash
+            FROM rag_chunks
+            WHERE chunk_state = 'active'
+            ORDER BY vector_key
+            ",
+        )
+        .context("failed to prepare active vector validation query")?;
+    let rows = statement
+        .query_map([], |row| {
+            let vector_key_i64 = row.get::<_, i64>(0)?;
+            let vector_dimensions_i64 = row.get::<_, i64>(1)?;
+            let vector_hash_i64 = row.get::<_, Option<i64>>(2)?;
+            Ok(ActiveVectorRef {
+                vector_key: u64::try_from(vector_key_i64).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Integer,
+                        Box::new(error),
+                    )
+                })?,
+                vector_dimensions: usize::try_from(vector_dimensions_i64).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Integer,
+                        Box::new(error),
+                    )
+                })?,
+                vector_hash: vector_hash_i64.map(decode_sqlite_u64),
+            })
+        })
+        .context("failed to query active vector refs for validation")?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("failed to collect active vector refs for validation")
+}
+
+fn validate_loaded_vector_index(index: &Index, vector_refs: &[ActiveVectorRef]) -> Result<()> {
+    for vector_ref in vector_refs {
+        let mut vector = Vec::new();
+        index
+            .export::<f32>(vector_ref.vector_key, &mut vector)
+            .with_context(|| {
+                format!(
+                    "failed to export vector key {} from USearch during validation",
+                    vector_ref.vector_key
+                )
+            })?;
+        if vector.is_empty() {
+            bail!(
+                "missing active RAG vector {} in USearch index",
+                vector_ref.vector_key
+            );
+        }
+        if vector.len() != vector_ref.vector_dimensions {
+            bail!(
+                "USearch validation dimension mismatch for key {}: expected {}, got {}",
+                vector_ref.vector_key,
+                vector_ref.vector_dimensions,
+                vector.len()
+            );
+        }
+        let actual_hash = stable_vector_value_hash(vector.as_slice());
+        if let Some(expected_hash) = vector_ref.vector_hash {
+            if actual_hash != expected_hash {
+                bail!(
+                    "USearch validation hash mismatch for key {}: expected {}, got {}",
+                    vector_ref.vector_key,
+                    expected_hash,
+                    actual_hash
+                );
+            }
+        } else {
+            bail!(
+                "missing persisted vector hash for active RAG vector {}; \
+                 cannot trust legacy USearch contents without a blob-backed hash source",
+                vector_ref.vector_key
+            );
+        }
+    }
+    Ok(())
+}
+
+fn backfill_missing_vector_hashes_from_index(
+    connection: &Connection,
+    index: &Index,
+    vector_refs: &[ActiveVectorRef],
+) -> Result<()> {
+    let mut missing_hash_updates = Vec::new();
+    for vector_ref in vector_refs {
+        if vector_ref.vector_hash.is_some() {
+            continue;
+        }
+        let vector =
+            export_index_vector(index, vector_ref.vector_key, vector_ref.vector_dimensions)
+                .with_context(|| {
+                    format!(
+                        "failed to backfill missing RAG vector hash from USearch for key {}",
+                        vector_ref.vector_key
+                    )
+                })?;
+        missing_hash_updates.push((
+            vector_ref.vector_key,
+            stable_vector_value_hash(vector.as_slice()),
+        ));
+    }
+    backfill_vector_hashes(connection, missing_hash_updates.as_slice(), true)
 }
 
 fn rebuild_vector_index(database_path: &Path) -> Result<()> {

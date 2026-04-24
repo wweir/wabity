@@ -46,12 +46,15 @@ fn build_embedding_provider(base_url: String) -> LlmProviderConfig {
         "name": "Embedding Provider",
         "baseUrl": base_url,
         "apiKey": "test-key",
-        "modelType": "embedding",
         "protocol": "responses",
-        "model": "mock-embedding-model"
+        "models": [{
+            "id": "embedding-provider",
+            "modelType": "embedding",
+            "model": "mock-embedding-model"
+        }]
     }))
     .expect("failed to deserialize embedding provider");
-    assert_eq!(provider.model_type, LlmModelType::Embedding);
+    assert_eq!(provider.models[0].model_type, LlmModelType::Embedding);
     assert_eq!(provider.protocol, LlmProviderProtocol::Responses);
     provider
 }
@@ -67,7 +70,7 @@ fn build_rag_settings(source_root: &Path) -> RagSettings {
     RagSettings {
         source_directories: vec![source_root.to_string_lossy().into_owned()],
         ignore_globs: vec![],
-        embedding_provider_id: Some("embedding-provider".to_string()),
+        embedding_model_id: Some("embedding-provider".to_string()),
     }
 }
 

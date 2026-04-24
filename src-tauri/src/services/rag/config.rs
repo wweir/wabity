@@ -22,17 +22,11 @@ use super::{
 
 impl RagRuntimeInputs {
     pub(crate) fn from_settings(settings: &RagSettings, llm_settings: &LlmSettings) -> Self {
-        let embedding_provider =
-            settings
-                .embedding_provider_id
-                .as_deref()
-                .and_then(|provider_id| {
-                    llm_settings
-                        .providers
-                        .iter()
-                        .find(|provider| provider.id == provider_id)
-                        .cloned()
-                });
+        let embedding_provider = settings
+            .embedding_model_id
+            .as_deref()
+            .and_then(|model_id| llm_settings.find_model_binding(model_id))
+            .map(|binding| binding.into_provider_config());
 
         Self {
             settings: settings.clone(),
@@ -99,7 +93,7 @@ pub(crate) fn rag_settings_disabled(settings: &RagSettings) -> bool {
         .iter()
         .all(|directory| directory.trim().is_empty())
         && settings
-            .embedding_provider_id
+            .embedding_model_id
             .as_deref()
             .map(str::trim)
             .unwrap_or_default()
@@ -110,10 +104,15 @@ pub(crate) fn effective_embedding_target(
     inputs: &RagRuntimeInputs,
 ) -> Option<EmbeddingTargetIdentity> {
     let provider = inputs.embedding_provider.as_ref()?;
+    let model = provider
+        .models
+        .first()
+        .context("embedding provider is missing resolved model")
+        .ok()?;
     Some(infer_embedding_target_identity(
         provider.base_url.trim().trim_end_matches('/'),
-        provider.model_name(),
-        provider.model_identity_hint.as_deref(),
+        model.model.trim(),
+        model.model_identity_hint.as_deref(),
     ))
 }
 
@@ -133,16 +132,9 @@ pub(crate) fn infer_embedding_target_identity(
         };
     }
 
-    if let Some(namespace) = managed_embedding_model_namespace(normalized_base_url) {
-        return EmbeddingTargetIdentity::StableModel {
-            namespace,
-            model_identity: model_name.to_string(),
-        };
-    }
-
     EmbeddingTargetIdentity::EndpointBound {
         normalized_base_url: normalized_base_url.to_string(),
-        model_identity: model_name.to_string(),
+        model_identity: normalize_embedding_model_identity(model_name),
     }
 }
 
@@ -168,19 +160,8 @@ pub(crate) fn extract_stable_model_digest(model_name: &str) -> Option<String> {
     (digest.len() == 64).then_some(format!("{marker}{digest}"))
 }
 
-pub(crate) fn managed_embedding_model_namespace(normalized_base_url: &str) -> Option<&'static str> {
-    let parsed = reqwest::Url::parse(normalized_base_url).ok()?;
-    if parsed.query().is_some() {
-        return None;
-    }
-
-    let host = parsed.host_str()?.to_ascii_lowercase();
-    let path = parsed.path().trim_end_matches('/');
-    if host == "api.openai.com" && path == "/v1" {
-        Some("openai")
-    } else {
-        None
-    }
+pub(crate) fn normalize_embedding_model_identity(model_name: &str) -> String {
+    model_name.trim().to_ascii_lowercase()
 }
 
 pub(crate) fn normalize_runtime_source_directory(directory: &str) -> String {
@@ -216,7 +197,7 @@ pub(crate) fn resolve_rag_config(
     llm_settings: &LlmSettings,
 ) -> Result<ResolvedRagConfig> {
     let provider = resolve_embedding_provider(settings, llm_settings)?;
-    let embedding_fingerprint = embedding_fingerprint(provider)?;
+    let embedding_fingerprint = embedding_fingerprint(&provider)?;
     if settings.source_directories.is_empty() {
         bail!("RAG 至少需要一个扫描目录");
     }
@@ -239,34 +220,32 @@ pub(crate) fn resolve_rag_config(
         source_roots,
         ignore_globs: std::sync::Arc::new(build_ignore_glob_set(&settings.ignore_globs)?),
         embedding_fingerprint,
-        provider: provider.clone(),
+        provider,
     })
 }
 
-pub(crate) fn resolve_embedding_provider<'a>(
+pub(crate) fn resolve_embedding_provider(
     settings: &RagSettings,
-    llm_settings: &'a LlmSettings,
-) -> Result<&'a LlmProviderConfig> {
-    let provider_id = settings
-        .embedding_provider_id
+    llm_settings: &LlmSettings,
+) -> Result<LlmProviderConfig> {
+    let model_id = settings
+        .embedding_model_id
         .as_deref()
-        .context("RAG 扫描前必须选择一个 embedding provider")?;
-    let provider = llm_settings
-        .providers
-        .iter()
-        .find(|provider| provider.id == provider_id)
-        .with_context(|| format!("RAG 选择的 embedding provider 不存在: {provider_id}"))?;
-    if !provider.resolved_profile().can_handle_embedding() {
-        bail!("RAG 只接受启用了 embedding 能力的 provider");
+        .context("RAG 扫描前必须选择一个 embedding 模型")?;
+    let binding = llm_settings
+        .find_model_binding(model_id)
+        .with_context(|| format!("RAG 选择的 embedding 模型不存在: {model_id}"))?;
+    if !binding.can_handle_embedding() {
+        bail!("RAG 只接受启用了 embedding 能力的模型");
     }
-    if provider.base_url.trim().is_empty() {
+    if binding.provider().base_url.trim().is_empty() {
         bail!("RAG embedding provider base URL 不能为空");
     }
-    if provider.resolved_profile().model_name().is_none() {
+    if binding.model_name().is_none() {
         bail!("RAG embedding provider model 不能为空");
     }
 
-    Ok(provider)
+    Ok(binding.into_provider_config())
 }
 
 pub(crate) fn resolve_source_root_for_path<'a>(
@@ -402,5 +381,49 @@ pub(crate) trait PathStartsWithAny {
 impl PathStartsWithAny for Path {
     fn starts_with_any(&self, prefixes: &[PathBuf]) -> bool {
         prefixes.iter().any(|prefix| self.starts_with(prefix))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::infer_embedding_target_identity;
+    use crate::services::rag::model::EmbeddingTargetIdentity;
+
+    #[test]
+    fn infer_embedding_target_identity_keeps_digest_models_stable_across_endpoints() {
+        let digest_model = concat!(
+            "mxbai-embed-large@sha256:",
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        );
+
+        let identity =
+            infer_embedding_target_identity("https://proxy-a.example.com/v1", digest_model, None);
+
+        assert_eq!(
+            identity,
+            EmbeddingTargetIdentity::StableModel {
+                namespace: "digest",
+                model_identity:
+                    "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                        .to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn infer_embedding_target_identity_binds_generic_models_to_endpoint() {
+        let identity = infer_embedding_target_identity(
+            "https://proxy-a.example.com/v1",
+            " Qwen3-Embedding-0.6B ",
+            None,
+        );
+
+        assert_eq!(
+            identity,
+            EmbeddingTargetIdentity::EndpointBound {
+                normalized_base_url: "https://proxy-a.example.com/v1".to_string(),
+                model_identity: "qwen3-embedding-0.6b".to_string(),
+            }
+        );
     }
 }

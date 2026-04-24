@@ -148,6 +148,7 @@
 - active chunk 成功写入 USearch 后，会回收 SQLite 行上的 `vector_blob`；SQLite 不再长期保留 active 向量副本
 - 如果只残留 `rag-chunks.dirty` 但 USearch 仍可用，启动时只补做 blob 回收并清掉 dirty marker，不应误触发全量重建
 - 如果 active 向量 blob 只回收到一半且 USearch 又缺失/损坏，这属于不可恢复的半残状态；启动时直接重置本地索引，避免拿不完整 blob 强行重建
+- active 向量集合现在额外维护一份 SQLite 单行摘要元数据：`active_vector_count`、`vector_dimensions`、`key_xor`、`key_sum`、`key_hash_xor`、`key_hash_sum`；`rag_chunks` 行本身也会持久化每条向量的稳定 `vector_hash`。USearch 旁边同步写 sidecar manifest，记录同一份摘要加上索引文件长度、mtime、整文件 `md5`，以及少量确定性 probe 向量的 `vector_key + vector_hash`。稳定启动路径先做“SQLite 摘要 vs manifest probe vs USearch 导出探针”快速对账，再用整文件摘要兜底同大小/同 mtime 的非 probe 污染；只有 manifest 缺失、旧版 manifest 升级或缺 digest 字段时才回退一次完整向量覆盖校验，并在通过后补写 manifest。注意：legacy `rag_chunks` 行如果既缺 `vector_hash` 又已经回收了 `vector_blob`，启动阶段默认不会把当前 USearch 直接反写成新的真相；只有旧 manifest probe 仍能验证当前 USearch 时，才允许受控补齐缺失 hash
 
 ## 状态
 
@@ -157,9 +158,10 @@
 - 2026-03-17：元数据新增 `embedding_model`；切换 embedding 模型后，旧向量会被判定为失效并重新生成
 - 2026-03-17：索引语义从单版本 `pending/indexed` 升级为 `staged/active` 版本切换；新版本写成功后再切换并清理旧版本，同时接入 watcher 批处理、连接复用、chunk 指纹复用和低风险内存优化
 - 2026-03-17：全量重建改成流式并行流水线；扫描过程中一旦发现待重建文件就立即进入读取、分片、embedding 和落盘，stale 清理延后到所有新向量落盘完成后统一执行
-- 2026-03-21：文件级索引目标从 `embedding_model` 升级为 `embedding_fingerprint`，冷启动也会对账当前 embedding 目标身份；fingerprint 优先使用模型自身稳定身份（显式 digest、`/models` 返回项里的 digest/fingerprint hint、官方 OpenAI 托管 model ID），无法稳定确认时才回退到 `endpoint + model`。chunk 行新增 `embedding_fingerprint` / `text_fingerprint`，会在调用 embedding 前先按 `原文文本 + embedding_fingerprint` 查找全局已算好的向量再决定是否远程计算
+- 2026-03-21：文件级索引目标从 `embedding_model` 升级为 `embedding_fingerprint`，冷启动也会对账当前 embedding 目标身份；fingerprint 优先使用模型自身稳定身份（显式 digest、`/models` 返回项里的 digest/fingerprint hint），普通兼容模型则默认绑定 `provider endpoint + normalized model name`，避免跨 endpoint 误复用向量。chunk 行新增 `embedding_fingerprint` / `text_fingerprint`，会在调用 embedding 前先按 `原文文本 + embedding_fingerprint` 查找全局已算好的向量再决定是否远程计算
 - 2026-03-23：watcher 现在会直接忽略纯 metadata 事件，手动全量重建与后台增量维护共享存储互斥
 - 2026-04-07：向量存储切换为“SQLite 真相源 + USearch 派生索引”；USearch 不再按脏阈值延迟刷新，而是在 active chunk 变化后按批次重建，避免语义索引陈旧
 - 2026-04-10：active chunk 在 USearch 落盘成功后立即清空 SQLite `vector_blob`，减少本地磁盘占用；若启动时 USearch 缺失且 active blob 已回收，则重置本地索引并走全量重建
 - 2026-04-10：补充恢复语义细化；dirty marker 残留但 USearch 可用时只完成善后，不再误清空索引；active blob 处于部分回收状态且 USearch 不可用时，直接判为不可恢复并重置
+- 2026-04-14：为 active 向量集合引入 SQLite 增量摘要元数据、行级 `vector_hash` 和 USearch sidecar manifest；启动完整性校验从“逐条导出 active 向量”收敛成“元数据摘要 + probe 向量 + 索引文件摘要”的快速对账，缺 manifest、旧版 manifest 或缺 digest 字段的场景才回退一次完整覆盖校验并回填 manifest；若 legacy active 行缺 `vector_hash` 且 blob 已回收，只有旧 manifest probe 仍能验证当前 USearch 时才允许补齐 hash
 - 2026-03-25：Markdown 切块升级为“两阶段切块”：先按标题 / 列表项 / 代码块 / 段落做语义预切，再按目标字符预算在同一标题路径下打包；单个语义块超限时才回退到 `MarkdownSplitter`，以改善读书摘记和列表式笔记的检索粒度

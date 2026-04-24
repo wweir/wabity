@@ -217,13 +217,13 @@ pub async fn search_chunks(
 
     if rag_settings.source_directories.is_empty()
         || rag_settings
-            .embedding_provider_id
+            .embedding_model_id
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .is_none()
     {
-        bail!("RAG 尚未配置，请先在设置页配置文档目录并选择 embedding provider");
+        bail!("RAG 尚未配置，请先在设置页配置文档目录并选择 embedding 模型");
     }
 
     let embedding_provider = rag::resolve_embedding_provider(rag_settings, llm_settings)?;
@@ -239,7 +239,7 @@ pub async fn search_chunks(
         LEXICAL_SEMANTIC_CANDIDATE_FLOOR,
     );
     let (vector_hits, lexical_hits) = tokio::join!(
-        search_similar_chunks(data_dir, embedding_provider, &query_plan, vector_limit),
+        search_similar_chunks(data_dir, &embedding_provider, &query_plan, vector_limit),
         search_lexical_chunks(data_dir, &query_plan, lexical_limit),
     );
     let hits = merge_search_hits(vector_hits?, lexical_hits?);

@@ -5,7 +5,7 @@ use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    domain::settings::LlmProviderConfig,
+    domain::settings::{LlmModelConfig, LlmProviderConfig, ResolvedLlmModelBinding},
     infrastructure::openai_compatible::{normalize_base_url, OpenAiCompatibleClient},
 };
 
@@ -19,10 +19,32 @@ use super::{
     },
 };
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub(crate) enum EmbeddingInput {
+    Text(String),
+    Multi(Vec<EmbeddingContentPart>),
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub(crate) enum EmbeddingContentPart {
+    InputText { text: String },
+    InputImage { image_url: String },
+}
+
+impl EmbeddingInput {
+    pub(crate) fn text(text: impl Into<String>) -> Self {
+        Self::Text(text.into())
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct EmbeddingRequest<'a> {
     model: &'a str,
-    input: &'a [String],
+    input: &'a [EmbeddingInput],
 }
 
 #[derive(Debug, Deserialize)]
@@ -173,6 +195,16 @@ pub(crate) async fn request_embeddings(
     Ok(vectors)
 }
 
+#[cfg(test)]
+pub(crate) async fn request_embedding_inputs(
+    client: &HttpClient,
+    provider: &LlmProviderConfig,
+    inputs: &[EmbeddingInput],
+) -> Result<Vec<Vec<f32>>> {
+    let (vectors, _) = request_embedding_inputs_with_stats(client, provider, inputs).await?;
+    Ok(vectors)
+}
+
 pub(super) async fn request_embeddings_with_stats(
     client: &HttpClient,
     provider: &LlmProviderConfig,
@@ -196,7 +228,19 @@ pub(super) async fn request_embeddings_with_stats(
     };
     while let Some((start, end)) = pending_batches.pop() {
         let batch_inputs = &inputs[start..end];
-        match request_embeddings_batch(client, provider, batch_inputs).await {
+        let model_binding = resolved_embedding_binding(provider)?;
+        let embedding_inputs = batch_inputs
+            .iter()
+            .cloned()
+            .map(|text| {
+                if model_binding.can_handle_multimodal_embedding() {
+                    EmbeddingInput::Multi(vec![EmbeddingContentPart::InputText { text }])
+                } else {
+                    EmbeddingInput::text(text)
+                }
+            })
+            .collect::<Vec<_>>();
+        match request_embeddings_batch(client, provider, &embedding_inputs).await {
             Ok(vectors) => {
                 if vectors.len() != batch_inputs.len() {
                     anyhow::bail!(
@@ -237,12 +281,81 @@ pub(super) async fn request_embeddings_with_stats(
     Ok((vectors, stats))
 }
 
+#[cfg(test)]
+async fn request_embedding_inputs_with_stats(
+    client: &HttpClient,
+    provider: &LlmProviderConfig,
+    inputs: &[EmbeddingInput],
+) -> Result<(Vec<Vec<f32>>, EmbeddingRequestStats)> {
+    if inputs.is_empty() {
+        return Ok((
+            Vec::new(),
+            EmbeddingRequestStats {
+                largest_successful_batch_size: 0,
+                split_retry_count: 0,
+            },
+        ));
+    }
+
+    let mut pending_batches = vec![(0usize, inputs.len())];
+    let mut resolved_vectors = vec![None; inputs.len()];
+    let mut stats = EmbeddingRequestStats {
+        largest_successful_batch_size: 0,
+        split_retry_count: 0,
+    };
+    while let Some((start, end)) = pending_batches.pop() {
+        let batch_inputs = &inputs[start..end];
+        match request_embeddings_batch(client, provider, batch_inputs).await {
+            Ok(vectors) => {
+                if vectors.len() != batch_inputs.len() {
+                    anyhow::bail!(
+                        "embedding provider returned {} vectors for {} inputs",
+                        vectors.len(),
+                        batch_inputs.len()
+                    );
+                }
+                stats.record_success(batch_inputs.len());
+                for (offset, vector) in vectors.into_iter().enumerate() {
+                    resolved_vectors[start + offset] = Some(vector);
+                }
+            }
+            Err(error) if is_embedding_batch_overloaded(&error) && batch_inputs.len() > 1 => {
+                let midpoint = start + (batch_inputs.len() / 2);
+                stats.record_split_retry();
+                tracing::warn!(
+                    batch_size = batch_inputs.len(),
+                    retry_left = midpoint - start,
+                    retry_right = end - midpoint,
+                    "embedding batch overloaded; retrying multimodal inputs with smaller batches"
+                );
+                pending_batches.push((midpoint, end));
+                pending_batches.push((start, midpoint));
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to embed multimodal batch with {} input(s)",
+                        batch_inputs.len()
+                    )
+                });
+            }
+        }
+    }
+
+    let vectors = resolved_vectors
+        .into_iter()
+        .map(|vector| vector.context("embedding batch completed without a vector"))
+        .collect::<Result<Vec<_>>>()?;
+    Ok((vectors, stats))
+}
+
 async fn request_embeddings_batch(
     client: &HttpClient,
     provider: &LlmProviderConfig,
-    inputs: &[String],
+    inputs: &[EmbeddingInput],
 ) -> Result<Vec<Vec<f32>>> {
     let request_started_at = Instant::now();
+    let model_binding = resolved_embedding_binding(provider)?;
     let client = OpenAiCompatibleClient::new_async(
         client,
         &provider.base_url,
@@ -253,7 +366,7 @@ async fn request_embeddings_batch(
         .post_json(
             "/embeddings",
             &EmbeddingRequest {
-                model: provider.model_name(),
+                model: model_binding.model_name().unwrap_or_default(),
                 input: inputs,
             },
             "embeddings from provider",
@@ -263,6 +376,7 @@ async fn request_embeddings_batch(
     tracing::info!(
         batch_size = inputs.len(),
         provider_id = %provider.id,
+        multimodal_embedding = model_binding.can_handle_multimodal_embedding(),
         elapsed_ms = request_started_at.elapsed().as_millis(),
         "rag embedding request completed"
     );
@@ -295,11 +409,12 @@ fn is_embedding_batch_overloaded(error: &anyhow::Error) -> bool {
 }
 
 pub(crate) fn embedding_fingerprint(provider: &LlmProviderConfig) -> Result<String> {
+    let model = resolved_embedding_model(provider)?;
     let base_url = normalize_base_url(&provider.base_url, "embedding provider base URL")?;
     let target_identity = infer_embedding_target_identity(
         &base_url,
-        provider.model_name(),
-        provider.model_identity_hint.as_deref(),
+        model.model.trim(),
+        model.model_identity_hint.as_deref(),
     );
     let fingerprint_source = match target_identity {
         EmbeddingTargetIdentity::StableModel {
@@ -312,4 +427,16 @@ pub(crate) fn embedding_fingerprint(provider: &LlmProviderConfig) -> Result<Stri
         } => format!("v2\u{0}endpoint\u{0}{normalized_base_url}\u{0}{model_identity}"),
     };
     Ok(format!("{:x}", md5::compute(fingerprint_source)))
+}
+
+fn resolved_embedding_model(provider: &LlmProviderConfig) -> Result<&LlmModelConfig> {
+    provider
+        .models
+        .first()
+        .context("embedding provider is missing resolved model")
+}
+
+fn resolved_embedding_binding(provider: &LlmProviderConfig) -> Result<ResolvedLlmModelBinding<'_>> {
+    let model = resolved_embedding_model(provider)?;
+    Ok(ResolvedLlmModelBinding::new(provider, model))
 }

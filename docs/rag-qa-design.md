@@ -223,7 +223,7 @@ v1 阈值可以先做静态配置，后续再按模型/距离度量调参。
 
 答案生成使用 AI 功能页里显式选择的问答 LLM 条目，而不是 Embedding 条目。
 
-当前实现把问答模型选择放在统一的 AI 功能页里，字段名是 `llm.questionAnswerProviderId`，不再复用“默认 LLM”语义。
+当前实现把问答模型选择放在统一的 AI 功能页里，字段名是 `llm.questionAnswerModelId`，引用的是某个 provider 组下的具体模型，不再复用“默认 LLM”语义。
 
 系统提示词应明确约束：
 
