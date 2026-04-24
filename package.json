@@ -3,6 +3,7 @@
 	"private": true,
 	"version": "0.2.0",
 	"type": "module",
+	"packageManager": "bun@1.3.13",
 	"scripts": {
 		"dev": "vite --host 0.0.0.0 --port 1420",
 		"build": "tsc && vite build",
@@ -13,6 +14,7 @@
 		"lint": "eslint .",
 		"lint:fix": "eslint . --fix",
 		"preview": "vite preview",
+		"test": "node --test --experimental-strip-types scripts/*.test.mjs",
 		"tauri": "bash ./scripts/tauri-cli.sh",
 		"tauri:dev": "bash ./scripts/tauri-cli.sh dev",
 		"tauri:build": "tauri build",

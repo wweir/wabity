@@ -63,7 +63,7 @@ main() {
 	validate_port_is_free
 
 	cd "${REPO_ROOT}"
-	exec npm run dev
+	exec bun run dev
 }
 
 main "$@"

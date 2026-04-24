@@ -28,7 +28,11 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: 22
-          cache: npm
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
 
       - name: Setup Rust toolchain
         run: |
@@ -49,7 +53,6 @@ jobs:
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           PACKAGE_VERSION="$(node -p "require('./package.json').version")"
-          PACKAGE_LOCK_VERSION="$(node -p "require('./package-lock.json').version")"
           TAURI_VERSION="$(node -e "const fs = require('fs'); const config = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8')); process.stdout.write(config.version);")"
           CARGO_VERSION="$(python3 - <<'PY'
           import tomllib
@@ -66,11 +69,6 @@ jobs:
             exit 1
           fi
 
-          if [[ "$TAG_VERSION" != "$PACKAGE_LOCK_VERSION" ]]; then
-            echo "Tag version $TAG_VERSION does not match package-lock.json version $PACKAGE_LOCK_VERSION" >&2
-            exit 1
-          fi
-
           if [[ "$TAG_VERSION" != "$TAURI_VERSION" ]]; then
             echo "Tag version $TAG_VERSION does not match src-tauri/tauri.conf.json version $TAURI_VERSION" >&2
             exit 1
@@ -82,10 +80,13 @@ jobs:
           fi
 
       - name: Install frontend dependencies
-        run: npm ci
+        run: bun install --frozen-lockfile
+
+      - name: Run frontend tests
+        run: bun run test
 
       - name: Build macOS DMG bundle
-        run: npm run tauri:build:macos:dmg
+        run: bun run tauri:build:macos:dmg
 
       - name: Upload DMG to GitHub Release
         uses: softprops/action-gh-release@v2
