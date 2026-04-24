@@ -1,6 +1,16 @@
 import hljs from "highlight.js/lib/core";
 import jsonLanguage from "highlight.js/lib/languages/json";
-import { lazy, memo, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+	lazy,
+	memo,
+	Suspense,
+	useEffect,
+	useId,
+	useLayoutEffect,
+	useMemo,
+	useRef,
+	useState,
+} from "react";
 import type { ReactNode, RefObject } from "react";
 import type {
 	AcpConfigOption,
@@ -13,9 +23,11 @@ import type {
 	RagAnswerStructuredPayload,
 	RagCitation,
 	RagRetrievalSummary,
+	TranslationResultStructuredPayload,
 } from "../types";
-import { isRagAnswerStructuredPayload } from "../types";
+import { isRagAnswerStructuredPayload, isTranslationResultStructuredPayload } from "../types";
 import { RagCitationList } from "./RagCitationList";
+import { ThoughtDisclosure } from "./ThoughtDisclosure";
 
 type ResultRenderMode = "plain" | "json" | "markdown";
 
@@ -97,7 +109,7 @@ function ResultCard({ label, content, render, pending = false }: ResultCardProps
 					type="button"
 					className="control-button result-card-copy"
 					onClick={() => void handleCopy()}
-					aria-label={`Copy ${label}`}
+					aria-label={`复制${label}`}
 					disabled={pending}
 				>
 					{resolveCopyLabel(copyState)}
@@ -144,11 +156,11 @@ interface LauncherFeedbackProps {
 function resolveCopyLabel(copyState: CopyState): string {
 	switch (copyState) {
 		case "copied":
-			return "Copied";
+			return "已复制";
 		case "failed":
-			return "Retry";
+			return "重试";
 		default:
-			return "Copy";
+			return "复制";
 	}
 }
 
@@ -234,10 +246,10 @@ export function LauncherFeedback({
 			/>
 		);
 	} else if (jsonPreview) {
-		content = <MemoizedResultCard label="JSON Preview" content={jsonPreview} render="json" />;
+		content = <MemoizedResultCard label="JSON 预览" content={jsonPreview} render="json" />;
 	} else if (markdownPreview) {
 		content = (
-			<MemoizedResultCard label="Markdown Preview" content={markdownPreview} render="markdown" />
+			<MemoizedResultCard label="Markdown 预览" content={markdownPreview} render="markdown" />
 		);
 	} else if (result?.primaryText) {
 		content = (
@@ -455,6 +467,14 @@ const ResultFeedback = memo(function ResultFeedback({
 	resultRenderMode: ResultRenderMode | null;
 }) {
 	const resultLabel = resolveResultLabel(ragPayload, resultRenderMode);
+	const translationPayload = resolveTranslationPayload(result);
+	const translationReasoning = translationPayload?.reasoning?.trim() ?? "";
+	const [thoughtCollapsed, setThoughtCollapsed] = useState(true);
+	const thoughtId = useId();
+
+	useEffect(() => {
+		setThoughtCollapsed(true);
+	}, [translationReasoning]);
 
 	return (
 		<>
@@ -464,6 +484,14 @@ const ResultFeedback = memo(function ResultFeedback({
 				render={resultRenderMode ?? "plain"}
 				pending={resultPending}
 			/>
+			{translationReasoning ? (
+				<ThoughtDisclosure
+					content={translationReasoning}
+					contentId={`translation-thought-${thoughtId}`}
+					collapsed={thoughtCollapsed}
+					onToggle={() => setThoughtCollapsed((current) => !current)}
+				/>
+			) : null}
 			{ragPayload ? (
 				<RagCitationList
 					citations={ragPayload.citations}
@@ -513,21 +541,29 @@ function resolveResultLabel(
 	resultRenderMode: ResultRenderMode | null,
 ): string {
 	if (ragPayload) {
-		return "Document Answer";
+		return "文档回答";
 	}
 
 	switch (resultRenderMode) {
 		case "markdown":
-			return "Markdown Output";
+			return "Markdown 输出";
 		case "json":
-			return "JSON Output";
+			return "JSON 输出";
 		default:
-			return "Text Output";
+			return "文本结果";
 	}
 }
 
 function resolveRagPayload(result: ExecutionResult | null): RagAnswerStructuredPayload | null {
 	return result && isRagAnswerStructuredPayload(result.structuredPayload)
+		? result.structuredPayload
+		: null;
+}
+
+function resolveTranslationPayload(
+	result: ExecutionResult | null,
+): TranslationResultStructuredPayload | null {
+	return result && isTranslationResultStructuredPayload(result.structuredPayload)
 		? result.structuredPayload
 		: null;
 }

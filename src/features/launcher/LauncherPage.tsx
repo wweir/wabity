@@ -97,6 +97,7 @@ import {
 	type SuggestionMode,
 	replaceTextRange,
 } from "./query";
+import { deriveShortcutTranslationInputState } from "./shortcutTranslation";
 import { usesInlineInputControl, usesTextareaInputControl } from "./inputMode";
 import {
 	clamp,
@@ -1165,16 +1166,17 @@ export function LauncherPage({
 		[resetQaConversation],
 	);
 
-	const applyInjectedSourceText = useCallback(
-		(nextInputMode: Extract<InputMode, "ocr" | "selection">, sourceText: string) => {
+	const prepareShortcutTranslationView = useCallback(
+		(sourceText: string, sourceMode: "ocr" | "selection") => {
+			const nextInputState = deriveShortcutTranslationInputState(sourceText, sourceMode);
 			setQaAutoResizeFrozen(false);
-			pendingSelectionRef.current = 0;
-			setInputMode(nextInputMode);
-			updateRawText(sourceText, 0, {
+			pendingSelectionRef.current = nextInputState.caretIndex;
+			setInputMode(nextInputState.inputMode);
+			updateRawText(nextInputState.rawText, nextInputState.caretIndex, {
 				preserveQaPresentation: false,
 				resumeReactiveLauncherInputFocus: false,
 			});
-			setLatestSubmittedText(sourceText.trim() || "快捷输入");
+			setLatestSubmittedText(sourceText.trim() || "快捷翻译");
 			setResult(null);
 			setError(null);
 			setActiveSlashAction(null);
@@ -1190,7 +1192,7 @@ export function LauncherPage({
 	const resetQaConversationRef = useRef(resetQaConversation);
 	const scheduleLauncherInputFocusRef = useRef(scheduleLauncherInputFocus);
 	const updateRawTextRef = useRef(updateRawText);
-	const applyInjectedSourceTextRef = useRef(applyInjectedSourceText);
+	const prepareShortcutTranslationViewRef = useRef(prepareShortcutTranslationView);
 
 	useLayoutEffect(() => {
 		rawTextRef.current = rawText;
@@ -1217,8 +1219,8 @@ export function LauncherPage({
 	}, [updateRawText]);
 
 	useLayoutEffect(() => {
-		applyInjectedSourceTextRef.current = applyInjectedSourceText;
-	}, [applyInjectedSourceText]);
+		prepareShortcutTranslationViewRef.current = prepareShortcutTranslationView;
+	}, [prepareShortcutTranslationView]);
 
 	const syncScrollableLayoutCaps = useCallback(() => {
 		const shellElement = shellRef.current;
@@ -1601,7 +1603,7 @@ export function LauncherPage({
 				setShortcutTranslationPending(true);
 				setOperationStatusText("模型请求中 · 正在翻译文本");
 				setResult(null);
-				applyInjectedSourceTextRef.current(payload.sourceMode, payload.sourceText);
+				prepareShortcutTranslationViewRef.current(payload.sourceText, payload.sourceMode);
 				setLatestSubmittedText(payload.sourceText.trim() || "快捷翻译");
 			}),
 		);

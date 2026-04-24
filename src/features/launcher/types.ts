@@ -138,6 +138,11 @@ export interface RagAnswerStructuredPayload {
 	tools: RagToolUsageSummary;
 }
 
+export interface TranslationResultStructuredPayload {
+	kind: "translation_result";
+	reasoning?: string | null;
+}
+
 export interface FloatingPanelOffset {
 	x: number;
 	y: number;
@@ -270,5 +275,21 @@ export function isRagAnswerStructuredPayload(
 		tools.skipped.every((tool) => typeof tool === "string") &&
 		Array.isArray(tools.calls) &&
 		tools.calls.every(isRagToolCall),
+	);
+}
+
+export function isTranslationResultStructuredPayload(
+	payload: unknown,
+): payload is TranslationResultStructuredPayload {
+	if (typeof payload !== "object" || payload === null) {
+		return false;
+	}
+
+	const candidate = payload as Partial<TranslationResultStructuredPayload>;
+	return (
+		candidate.kind === "translation_result" &&
+		(candidate.reasoning === undefined ||
+			candidate.reasoning === null ||
+			typeof candidate.reasoning === "string")
 	);
 }

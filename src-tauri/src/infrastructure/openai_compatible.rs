@@ -16,14 +16,14 @@ pub fn extract_responses_text(payload: &Value) -> Option<String> {
     wabity_openai_compatible::extract_responses_text(payload)
 }
 
-pub fn extract_chat_completions_text(payload: &Value) -> Option<String> {
-    wabity_openai_compatible::extract_chat_completions_text(payload)
-}
-
 pub fn extract_chat_completions_message_parts(
     payload: &Value,
 ) -> Option<ChatCompletionsMessageParts> {
     wabity_openai_compatible::extract_chat_completions_message_parts(payload)
+}
+
+pub fn extract_text_content(payload: &Value) -> Option<String> {
+    wabity_openai_compatible::extract_text_content(payload)
 }
 
 pub fn describe_chat_completions_response_issue(payload: &Value) -> String {

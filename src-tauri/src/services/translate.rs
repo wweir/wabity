@@ -9,11 +9,11 @@ use serde_json::{json, Value};
 
 use crate::domain::{
     execution::ExecutionResult,
-    settings::{LlmProviderConfig, LlmProviderProtocol, LlmSettings, PromptsSettings},
+    settings::{LlmProviderProtocol, LlmSettings, PromptsSettings, ResolvedLlmModelBinding},
 };
 use crate::infrastructure::openai_compatible::{
-    describe_chat_completions_response_issue, extract_chat_completions_text,
-    extract_responses_text, OpenAiCompatibleClient, OpenAiCompatibleResponseFormat,
+    describe_chat_completions_response_issue, extract_chat_completions_message_parts,
+    extract_text_content, OpenAiCompatibleClient, OpenAiCompatibleResponseFormat,
 };
 
 const TRANSLATE_COMMAND_ALIASES: [&str; 3] = ["/translate", "/fy", "/tr"];
@@ -26,6 +26,18 @@ enum TranslationProtocol {
 
 pub struct TranslationCallbacks<'a> {
     pub on_text_delta: Option<&'a mut (dyn FnMut(&str) + Send)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TranslationOutputParts {
+    content: String,
+    reasoning: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct TranslationStreamFilter {
+    raw: String,
+    emitted_visible: String,
 }
 
 fn shared_translation_http_client() -> Result<AsyncHttpClient> {
@@ -54,17 +66,17 @@ pub async fn execute_translation_with_callbacks(
         bail!("请输入要翻译的内容");
     }
 
-    let provider = resolve_translation_provider(llm_settings)?;
-    let model = provider
-        .llm_model_name()
+    let binding = resolve_translation_model_binding(llm_settings)?;
+    let model = binding
+        .model_name()
         .context("翻译使用的 LLM 模型不能为空")?;
-    let protocol = translation_protocol(provider);
+    let protocol = translation_protocol(binding);
 
     let http_client = shared_translation_http_client()?;
     let client = OpenAiCompatibleClient::new_async(
         &http_client,
-        &provider.base_url,
-        &provider.api_key,
+        &binding.provider().base_url,
+        &binding.provider().api_key,
         "LLM provider base URL",
     )?;
 
@@ -78,7 +90,8 @@ pub async fn execute_translation_with_callbacks(
     )
     .await?;
     tracing::info!(
-        provider_id = %provider.id,
+        provider_id = %binding.provider().id,
+        model_id = %binding.model().id,
         protocol = %translation_protocol_label(used_protocol),
         payload_chars = payload.chars().count(),
         elapsed_ms = started_at.elapsed().as_millis(),
@@ -86,12 +99,12 @@ pub async fn execute_translation_with_callbacks(
     );
 
     Ok(ExecutionResult::success(
-        Some(translated),
+        Some(translated.content),
         Some(format!(
             "已使用 {} 进行翻译",
-            translation_provider_label(provider, used_protocol)
+            translation_provider_label(binding, used_protocol)
         )),
-        None,
+        translation_structured_payload(translated.reasoning),
         vec!["copy_text"],
         false,
     ))
@@ -110,34 +123,39 @@ fn translation_payload(raw_text: &str) -> &str {
     raw_text.trim()
 }
 
-fn resolve_translation_provider(llm_settings: &LlmSettings) -> Result<&LlmProviderConfig> {
-    let provider_id = llm_settings
-        .translation_provider_id
+fn resolve_translation_model_binding(
+    llm_settings: &LlmSettings,
+) -> Result<ResolvedLlmModelBinding<'_>> {
+    let model_id = llm_settings
+        .translation_model_id
         .as_deref()
         .context("没有配置翻译 LLM，请先在 AI 功能页选择一个条目")?;
-    let provider = llm_settings
-        .providers
-        .iter()
-        .find(|provider| provider.id == provider_id)
-        .with_context(|| format!("翻译 LLM provider 不存在: {provider_id}"))?;
-    validate_translation_provider(provider)?;
-    Ok(provider)
+    let binding = llm_settings
+        .find_model_binding(model_id)
+        .with_context(|| format!("翻译 LLM 模型不存在: {model_id}"))?;
+    validate_translation_provider(binding)?;
+    Ok(binding)
 }
 
-fn validate_translation_provider(provider: &LlmProviderConfig) -> Result<()> {
-    if provider.base_url.trim().is_empty() {
+#[cfg(test)]
+fn resolve_translation_provider(llm_settings: &LlmSettings) -> Result<ResolvedLlmModelBinding<'_>> {
+    resolve_translation_model_binding(llm_settings)
+}
+
+fn validate_translation_provider(binding: ResolvedLlmModelBinding<'_>) -> Result<()> {
+    if binding.provider().base_url.trim().is_empty() {
         bail!("翻译使用的 LLM provider base URL 不能为空");
     }
 
-    if !provider.resolved_profile().can_handle_ai_task() {
+    if !binding.can_handle_ai_task() {
         bail!("翻译使用的 LLM 模型不能为空");
     }
 
     Ok(())
 }
 
-fn translation_protocol(provider: &LlmProviderConfig) -> TranslationProtocol {
-    match provider.resolved_profile().kind() {
+fn translation_protocol(binding: ResolvedLlmModelBinding<'_>) -> TranslationProtocol {
+    match binding.kind() {
         crate::domain::settings::ResolvedLlmProviderKind::Responses {
             configured: true, ..
         } => TranslationProtocol::Responses,
@@ -149,7 +167,7 @@ fn translation_protocol(provider: &LlmProviderConfig) -> TranslationProtocol {
         }
         | crate::domain::settings::ResolvedLlmProviderKind::ChatCompletions { configured: false }
         | crate::domain::settings::ResolvedLlmProviderKind::Embedding { .. } => {
-            match provider.protocol {
+            match binding.provider().protocol {
                 LlmProviderProtocol::Responses => TranslationProtocol::Responses,
                 LlmProviderProtocol::ChatCompletions => TranslationProtocol::ChatCompletions,
             }
@@ -158,17 +176,18 @@ fn translation_protocol(provider: &LlmProviderConfig) -> TranslationProtocol {
 }
 
 fn translation_provider_label(
-    provider: &LlmProviderConfig,
+    binding: ResolvedLlmModelBinding<'_>,
     protocol: TranslationProtocol,
 ) -> String {
-    let provider_label = provider
+    let provider_label = binding
+        .provider()
         .name
         .trim()
         .split('\n')
         .next()
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| provider.model_name().to_string());
+        .unwrap_or_else(|| binding.model().model.trim().to_string());
     format!(
         "{provider_label} ({})",
         translation_protocol_label(protocol)
@@ -189,12 +208,25 @@ async fn request_translation(
     prompt: &str,
     payload: &str,
     callbacks: TranslationCallbacks<'_>,
-) -> Result<(String, TranslationProtocol)> {
+) -> Result<(TranslationOutputParts, TranslationProtocol)> {
     let translated = if let Some(on_text_delta) = callbacks.on_text_delta {
+        let mut stream_filter = TranslationStreamFilter::default();
+        let mut filtered_on_text_delta = |delta: &str| {
+            if let Some(visible_delta) = stream_filter.push(delta) {
+                on_text_delta(visible_delta);
+            }
+        };
         let translated = match protocol {
             TranslationProtocol::Responses => {
-                translate_with_responses(client, model, prompt, payload, true, Some(on_text_delta))
-                    .await
+                translate_with_responses(
+                    client,
+                    model,
+                    prompt,
+                    payload,
+                    true,
+                    Some(&mut filtered_on_text_delta),
+                )
+                .await
             }
             TranslationProtocol::ChatCompletions => {
                 translate_with_chat_completions(
@@ -203,7 +235,7 @@ async fn request_translation(
                     prompt,
                     payload,
                     true,
-                    Some(on_text_delta),
+                    Some(&mut filtered_on_text_delta),
                 )
                 .await
             }
@@ -251,7 +283,7 @@ async fn translate_with_responses(
     payload: &str,
     streaming_enabled: bool,
     on_text_delta: Option<&mut (dyn FnMut(&str) + Send)>,
-) -> Result<String> {
+) -> Result<TranslationOutputParts> {
     let request_body =
         build_responses_translation_request_body(model, prompt, payload, streaming_enabled);
     let payload: Value = if streaming_enabled {
@@ -274,7 +306,7 @@ async fn translate_with_responses(
             )
             .await?
     };
-    extract_responses_text(&payload).context("LLM provider responses 未返回可识别的译文")
+    extract_responses_translation_parts(&payload)
 }
 
 async fn translate_with_chat_completions(
@@ -284,7 +316,7 @@ async fn translate_with_chat_completions(
     payload: &str,
     streaming_enabled: bool,
     on_text_delta: Option<&mut (dyn FnMut(&str) + Send)>,
-) -> Result<String> {
+) -> Result<TranslationOutputParts> {
     let request_body =
         build_chat_completions_translation_request_body(model, prompt, payload, streaming_enabled);
     let payload: Value = if streaming_enabled {
@@ -307,12 +339,7 @@ async fn translate_with_chat_completions(
             )
             .await?
     };
-    extract_chat_completions_text(&payload).with_context(|| {
-        format!(
-            "LLM provider chat/completions 未返回可识别的译文: {}",
-            describe_chat_completions_response_issue(&payload)
-        )
-    })
+    extract_chat_completions_translation_parts(&payload)
 }
 
 fn build_responses_translation_request_body(
@@ -375,17 +402,308 @@ fn should_retry_without_stream(streaming_enabled: bool, error: &anyhow::Error) -
     }
 
     let message = error.to_string().to_ascii_lowercase();
-    (message.contains("stream") || message.contains("sse"))
-        && [
-            "unsupported",
-            "not supported",
-            "does not support",
-            "disabled",
-            "invalid",
-            "unexpected",
-        ]
+    let stream_related =
+        message.contains("stream") || message.contains("sse") || message.contains("response body");
+    if !stream_related {
+        return false;
+    }
+
+    let stream_unsupported = [
+        "unsupported",
+        "not supported",
+        "does not support",
+        "disabled",
+        "invalid",
+        "unexpected",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle));
+    if stream_unsupported {
+        return true;
+    }
+
+    error
+        .chain()
+        .filter_map(|source| source.downcast_ref::<reqwest::Error>())
+        .any(reqwest::Error::is_timeout)
+        || message.contains("timed out")
+        || message.contains("timeout")
+}
+
+fn translation_structured_payload(reasoning: Option<String>) -> Option<Value> {
+    reasoning.map(|reasoning| {
+        json!({
+            "kind": "translation_result",
+            "reasoning": reasoning,
+        })
+    })
+}
+
+fn extract_responses_translation_parts(payload: &Value) -> Result<TranslationOutputParts> {
+    let mut content_segments = Vec::new();
+    let mut reasoning_segments = Vec::new();
+
+    if let Some(output_text) = trim_to_owned(payload.get("output_text").and_then(Value::as_str)) {
+        content_segments.push(output_text);
+    }
+
+    for output in payload
+        .get("output")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        for content in output
+            .get("content")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(segment) = extract_text_content(content)
+                .as_deref()
+                .and_then(|value| trim_to_owned(Some(value)))
+            else {
+                continue;
+            };
+
+            if content
+                .get("type")
+                .and_then(Value::as_str)
+                .map(is_reasoning_content_type)
+                .unwrap_or(false)
+            {
+                reasoning_segments.push(segment);
+            } else {
+                content_segments.push(segment);
+            }
+        }
+    }
+
+    let (content, reasoning) = normalize_translation_content_and_reasoning(
+        join_non_empty_segments(content_segments),
+        join_non_empty_segments(reasoning_segments),
+    );
+
+    build_translation_output_parts(
+        content,
+        reasoning,
+        "LLM provider responses 未返回可识别的译文",
+        "LLM provider responses 返回了思考内容，但没有可识别的译文",
+    )
+}
+
+fn extract_chat_completions_translation_parts(payload: &Value) -> Result<TranslationOutputParts> {
+    let missing_content_error = format!(
+        "LLM provider chat/completions 未返回可识别的译文: {}",
+        describe_chat_completions_response_issue(payload)
+    );
+    let parts = extract_chat_completions_message_parts(payload)
+        .with_context(|| missing_content_error.clone())?;
+
+    let (content, reasoning) = normalize_translation_content_and_reasoning(
+        trim_to_owned(parts.content.as_deref()),
+        trim_to_owned(parts.reasoning.as_deref()),
+    );
+
+    build_translation_output_parts(
+        content,
+        reasoning,
+        &missing_content_error,
+        "LLM provider chat/completions 返回了思考内容，但没有可识别的译文",
+    )
+}
+
+fn build_translation_output_parts(
+    content: Option<String>,
+    reasoning: Option<String>,
+    missing_content_error: &str,
+    reasoning_only_error: &str,
+) -> Result<TranslationOutputParts> {
+    let content = match content {
+        Some(content) => content,
+        None if reasoning.is_some() => bail!(reasoning_only_error.to_string()),
+        None => bail!(missing_content_error.to_string()),
+    };
+
+    Ok(TranslationOutputParts { content, reasoning })
+}
+
+fn trim_to_owned(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn join_non_empty_segments(segments: Vec<String>) -> Option<String> {
+    let filtered = segments
+        .into_iter()
+        .map(|segment| segment.trim().to_string())
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+
+    (!filtered.is_empty()).then(|| filtered.join("\n"))
+}
+
+fn normalize_translation_content_and_reasoning(
+    content: Option<String>,
+    reasoning: Option<String>,
+) -> (Option<String>, Option<String>) {
+    let content = trim_to_owned(content.as_deref());
+    let reasoning = trim_to_owned(reasoning.as_deref());
+
+    let Some(content) = content else {
+        return (None, reasoning);
+    };
+
+    if let Some(extracted_content) = extract_visible_translation_candidate(&content) {
+        let merged_reasoning = join_non_empty_segments(
+            [reasoning, Some(content)]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>(),
+        );
+        return (Some(extracted_content), merged_reasoning);
+    }
+
+    if looks_like_translation_reasoning_scaffold(&content) {
+        let merged_reasoning = join_non_empty_segments(
+            [reasoning, Some(content)]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>(),
+        );
+        return (None, merged_reasoning);
+    }
+
+    (Some(content), reasoning)
+}
+
+fn extract_visible_translation_candidate(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    for label in [
+        "最终译文：",
+        "最终译文:",
+        "最终翻译：",
+        "最终翻译:",
+        "译文：",
+        "译文:",
+        "翻译：",
+        "翻译:",
+        "final translation:",
+        "final translation：",
+        "finaltranslation:",
+        "finaltranslation：",
+        "translated text:",
+        "translated text：",
+        "translatedtext:",
+        "translatedtext：",
+    ] {
+        let lower = trimmed.to_ascii_lowercase();
+        let label_lower = label.to_ascii_lowercase();
+        let Some(index) = lower.rfind(&label_lower) else {
+            continue;
+        };
+
+        let start = index + label_lower.len();
+        let Some(suffix) = trimmed.get(start..) else {
+            continue;
+        };
+        let candidate = trim_to_owned(Some(suffix.trim_start_matches(['*', '-', ' ', '\t'])));
+        if let Some(candidate) =
+            candidate.filter(|value| !looks_like_translation_reasoning_scaffold(value))
+        {
+            return Some(candidate);
+        }
+    }
+
+    None
+}
+
+fn looks_like_translation_reasoning_scaffold(value: &str) -> bool {
+    let normalized = value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(|character| character.to_lowercase())
+        .collect::<String>();
+
+    if normalized.is_empty() {
+        return false;
+    }
+
+    if normalized.starts_with("thinkingprocess")
+        || normalized.starts_with("thoughtprocess")
+        || normalized.starts_with("analysis")
+    {
+        return true;
+    }
+
+    let markers = [
+        "analyzetherequest",
+        "analyzethesourcetext",
+        "determinethetargettranslation",
+        "returnonlythetranslation",
+        "inputtext",
+        "partofspeech",
+        "simplifiedchinesetranslation",
+        "commonmedicalcontext",
+        "processfieldofstudy",
+        "likelymedicaltechnicalorcomputerrelated",
+    ];
+
+    markers
         .iter()
-        .any(|needle| message.contains(needle))
+        .filter(|marker| normalized.contains(**marker))
+        .count()
+        >= 2
+}
+
+fn is_reasoning_content_type(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "analysis"
+            | "reasoning"
+            | "reasoning_content"
+            | "reasoning_text"
+            | "thinking"
+            | "thinking_text"
+            | "thought"
+    )
+}
+
+impl TranslationStreamFilter {
+    fn push<'a>(&'a mut self, delta: &str) -> Option<&'a str> {
+        if delta.is_empty() {
+            return None;
+        }
+
+        self.raw.push_str(delta);
+        let next_visible = if let Some(candidate) = extract_visible_translation_candidate(&self.raw)
+        {
+            candidate
+        } else if looks_like_translation_reasoning_scaffold(&self.raw) {
+            String::new()
+        } else {
+            self.raw.clone()
+        };
+
+        if next_visible.len() <= self.emitted_visible.len()
+            || !next_visible.starts_with(&self.emitted_visible)
+        {
+            if next_visible.is_empty() {
+                self.emitted_visible.clear();
+            }
+            return None;
+        }
+
+        let suffix_start = self.emitted_visible.len();
+        self.emitted_visible = next_visible;
+        Some(&self.emitted_visible[suffix_start..])
+    }
 }
 
 fn extract_prefixed_payload<'a>(raw_text: &'a str, aliases: &[&str]) -> Option<&'a str> {
@@ -441,15 +759,15 @@ fn extract_prefixed_payload<'a>(raw_text: &'a str, aliases: &[&str]) -> Option<&
 mod tests {
     use super::{
         build_chat_completions_translation_request_body, build_responses_translation_request_body,
-        execute_translation_with_callbacks, extract_translate_payload,
-        resolve_translation_provider, TranslationCallbacks,
+        execute_translation_with_callbacks, extract_chat_completions_translation_parts,
+        extract_responses_translation_parts, extract_translate_payload,
+        extract_visible_translation_candidate, looks_like_translation_reasoning_scaffold,
+        resolve_translation_provider, should_retry_without_stream, TranslationCallbacks,
+        TranslationStreamFilter,
     };
     use crate::domain::settings::{
         default_translation_prompt, LlmModelType, LlmProviderConfig, LlmProviderProtocol,
         LlmSettings, PromptsSettings,
-    };
-    use crate::infrastructure::openai_compatible::{
-        extract_chat_completions_text, extract_responses_text,
     };
     use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
     use serde_json::json;
@@ -462,6 +780,8 @@ mod tests {
     #[derive(Clone)]
     enum MockTranslationScenario {
         ChatRejectsStreaming,
+        ChatReturnsContentAndReasoning,
+        ChatReturnsReasoningOnly,
         ResponsesRejectsStreaming,
     }
 
@@ -478,9 +798,13 @@ mod tests {
             name: "Default".to_string(),
             base_url: "https://api.example.com/v1".to_string(),
             api_key: String::new(),
-            model_type: LlmModelType::Llm,
-            model: "gpt-4.1-mini".to_string(),
-            supports_multimodal: false,
+            models: vec![crate::domain::settings::LlmModelConfig {
+                id: "default".to_string(),
+                model_type: LlmModelType::Llm,
+                model: "gpt-4.1-mini".to_string(),
+                supports_multimodal: false,
+                ..crate::domain::settings::LlmModelConfig::default()
+            }],
             ..LlmProviderConfig::default()
         }
     }
@@ -495,15 +819,18 @@ mod tests {
             "name": "Translate Provider",
             "baseUrl": base_url,
             "apiKey": "test-key",
-            "modelType": "llm",
             "protocol": protocol_name,
-            "model": "mock-model"
+            "models": [{
+                "id": "translate-provider",
+                "modelType": "llm",
+                "model": "mock-model"
+            }]
         }))
         .expect("failed to deserialize translation test provider");
 
         serde_json::from_value(json!({
             "providers": [provider],
-            "translationProviderId": "translate-provider"
+            "translationModelId": "translate-provider"
         }))
         .expect("failed to deserialize translation test settings")
     }
@@ -600,6 +927,36 @@ mod tests {
                     }]
                 })),
             ),
+            (MockTranslationScenario::ChatReturnsContentAndReasoning, _) => (
+                StatusCode::OK,
+                Json(json!({
+                    "id": "chatcmpl-translate-reasoning",
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "最终译文",
+                            "reasoning_content": "先判断语言方向，再保留原文语气。"
+                        },
+                        "finish_reason": "stop"
+                    }]
+                })),
+            ),
+            (MockTranslationScenario::ChatReturnsReasoningOnly, _) => (
+                StatusCode::OK,
+                Json(json!({
+                    "id": "chatcmpl-translate-reasoning-only",
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "reasoning_content": "这里只有思考，没有译文。"
+                        },
+                        "finish_reason": "stop"
+                    }]
+                })),
+            ),
             _ => unreachable!("unexpected chat translation scenario"),
         }
     }
@@ -657,22 +1014,22 @@ mod tests {
         let provider = provider();
         let settings = LlmSettings {
             providers: vec![provider.clone()],
-            translation_provider_id: Some(provider.id.clone()),
+            translation_model_id: Some(provider.models[0].id.clone()),
             ..LlmSettings::default()
         };
 
         let resolved = resolve_translation_provider(&settings).unwrap();
-        assert_eq!(resolved.id, provider.id);
+        assert_eq!(resolved.provider().id, provider.id);
     }
 
     #[test]
     fn resolve_translation_provider_rejects_embedding_provider() {
         let mut provider = provider();
-        provider.model_type = LlmModelType::Embedding;
-        provider.model = "text-embedding-3-small".to_string();
+        provider.models[0].model_type = LlmModelType::Embedding;
+        provider.models[0].model = "text-embedding-3-small".to_string();
         let settings = LlmSettings {
             providers: vec![provider.clone()],
-            translation_provider_id: Some(provider.id.clone()),
+            translation_model_id: Some(provider.models[0].id.clone()),
             ..LlmSettings::default()
         };
 
@@ -709,21 +1066,25 @@ mod tests {
         provider.protocol = LlmProviderProtocol::ChatCompletions;
         let settings = LlmSettings {
             providers: vec![provider.clone()],
-            translation_provider_id: Some(provider.id.clone()),
+            translation_model_id: Some(provider.models[0].id.clone()),
             ..LlmSettings::default()
         };
 
         let resolved = resolve_translation_provider(&settings).unwrap();
-        assert_eq!(resolved.id, provider.id);
+        assert_eq!(resolved.provider().id, provider.id);
     }
 
     #[test]
-    fn extract_responses_text_reads_output_text_fallback() {
+    fn extract_responses_translation_parts_separates_reasoning() {
         let payload = json!({
             "output": [
                 {
                     "type": "message",
                     "content": [
+                        {
+                            "type": "reasoning",
+                            "text": "reasoning text"
+                        },
                         {
                             "type": "output_text",
                             "text": "translated text"
@@ -733,33 +1094,36 @@ mod tests {
             ]
         });
 
-        assert_eq!(
-            extract_responses_text(&payload).as_deref(),
-            Some("translated text")
-        );
+        let parts = extract_responses_translation_parts(&payload)
+            .expect("responses translation payload should parse");
+
+        assert_eq!(parts.content, "translated text");
+        assert_eq!(parts.reasoning.as_deref(), Some("reasoning text"));
     }
 
     #[test]
-    fn extract_chat_completions_text_reads_string_content() {
+    fn extract_chat_completions_translation_parts_reads_string_content() {
         let payload = json!({
             "choices": [
                 {
                     "message": {
                         "role": "assistant",
-                        "content": "translated text"
+                        "content": "translated text",
+                        "reasoning_content": "reasoning text"
                     }
                 }
             ]
         });
 
-        assert_eq!(
-            extract_chat_completions_text(&payload).as_deref(),
-            Some("translated text")
-        );
+        let parts = extract_chat_completions_translation_parts(&payload)
+            .expect("chat/completions translation payload should parse");
+
+        assert_eq!(parts.content, "translated text");
+        assert_eq!(parts.reasoning.as_deref(), Some("reasoning text"));
     }
 
     #[test]
-    fn extract_chat_completions_text_reads_array_content() {
+    fn extract_chat_completions_translation_parts_reads_array_content() {
         let payload = json!({
             "choices": [
                 {
@@ -769,6 +1133,10 @@ mod tests {
                             {
                                 "type": "text",
                                 "text": "translated text"
+                            },
+                            {
+                                "type": "thinking",
+                                "text": "reasoning text"
                             }
                         ]
                     }
@@ -776,10 +1144,108 @@ mod tests {
             ]
         });
 
+        let parts = extract_chat_completions_translation_parts(&payload)
+            .expect("chat/completions translation payload should parse");
+
+        assert_eq!(parts.content, "translated text");
+        assert_eq!(parts.reasoning.as_deref(), Some("reasoning text"));
+    }
+
+    #[test]
+    fn extract_chat_completions_translation_parts_rejects_reasoning_only_payload() {
+        let payload = json!({
+            "choices": [
+                {
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning_content": "only reasoning"
+                    }
+                }
+            ]
+        });
+
+        let error = extract_chat_completions_translation_parts(&payload)
+            .expect_err("reasoning-only payload must be rejected");
+
         assert_eq!(
-            extract_chat_completions_text(&payload).as_deref(),
-            Some("translated text")
+            error.to_string(),
+            "LLM provider chat/completions 返回了思考内容，但没有可识别的译文"
         );
+    }
+
+    #[test]
+    fn reasoning_scaffold_detector_catches_plain_text_thinking() {
+        let content = "ThinkingProcess:1.**AnalyzetheRequest:**Inputtext:\"diagnostics\"\
+            2.**AnalyzetheSourceText:**PartofSpeech:Noun\
+            3.**DeterminetheTargetTranslation:**SimplifiedChinesetranslation:";
+
+        assert!(looks_like_translation_reasoning_scaffold(content));
+    }
+
+    #[test]
+    fn visible_translation_candidate_extracts_labeled_suffix() {
+        let content = "Thinking process...\nFinal translation: 诊断";
+
+        assert_eq!(
+            extract_visible_translation_candidate(content).as_deref(),
+            Some("诊断")
+        );
+    }
+
+    #[test]
+    fn visible_translation_candidate_extracts_ocr_collapsed_label_suffix() {
+        let content = "Thinking process...\nFinaltranslation: 诊断";
+
+        assert_eq!(
+            extract_visible_translation_candidate(content).as_deref(),
+            Some("诊断")
+        );
+    }
+
+    #[test]
+    fn translation_stream_filter_suppresses_reasoning_scaffold_chunks() {
+        let mut filter = TranslationStreamFilter::default();
+
+        assert_eq!(filter.push("ThinkingProcess:"), None);
+        assert_eq!(filter.push("1.**AnalyzetheRequest:**"), None);
+        assert_eq!(filter.push("Inputtext:\"diagnostics\""), None);
+    }
+
+    #[test]
+    fn translation_stream_filter_extracts_ocr_collapsed_label_chunks() {
+        let mut filter = TranslationStreamFilter::default();
+
+        assert_eq!(filter.push("ThinkingProcess:"), None);
+        assert_eq!(filter.push("Finaltranslation:"), None);
+        assert_eq!(filter.push("诊"), Some("诊"));
+        assert_eq!(filter.push("断"), Some("断"));
+    }
+
+    #[test]
+    fn translation_stream_filter_passes_plain_translation_chunks() {
+        let mut filter = TranslationStreamFilter::default();
+
+        assert_eq!(filter.push("诊"), Some("诊"));
+        assert_eq!(filter.push("断"), Some("断"));
+    }
+
+    #[test]
+    fn should_retry_without_stream_for_stream_timeout() {
+        let error = anyhow::anyhow!(
+            "failed to read translation from chat/completions API response stream: error decoding response body: request or response body error: operation timed out"
+        );
+
+        assert!(should_retry_without_stream(true, &error));
+    }
+
+    #[test]
+    fn should_not_retry_without_stream_for_non_stream_timeout() {
+        let error = anyhow::anyhow!(
+            "failed to request translation from chat/completions API: operation timed out"
+        );
+
+        assert!(!should_retry_without_stream(true, &error));
     }
 
     #[test]
@@ -875,5 +1341,60 @@ mod tests {
         assert_eq!(recorded_requests.len(), 2);
         assert_eq!(recorded_requests[0]["stream"], json!(true));
         assert_eq!(recorded_requests[1]["stream"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn translation_keeps_reasoning_as_structured_secondary_content() {
+        let (base_url, _requests, server_handle) =
+            spawn_chat_translation_server(MockTranslationScenario::ChatReturnsContentAndReasoning)
+                .await;
+        let llm_settings = llm_settings(base_url, LlmProviderProtocol::ChatCompletions);
+
+        let result = execute_translation_with_callbacks(
+            "hello",
+            &PromptsSettings::default(),
+            &llm_settings,
+            TranslationCallbacks {
+                on_text_delta: None,
+            },
+        )
+        .await
+        .expect("translation should preserve reasoning as secondary content");
+
+        server_handle.abort();
+
+        assert_eq!(result.primary_text.as_deref(), Some("最终译文"));
+        assert_eq!(
+            result.structured_payload,
+            Some(json!({
+                "kind": "translation_result",
+                "reasoning": "先判断语言方向，再保留原文语气。"
+            }))
+        );
+    }
+
+    #[tokio::test]
+    async fn translation_rejects_reasoning_only_chat_response() {
+        let (base_url, _requests, server_handle) =
+            spawn_chat_translation_server(MockTranslationScenario::ChatReturnsReasoningOnly).await;
+        let llm_settings = llm_settings(base_url, LlmProviderProtocol::ChatCompletions);
+
+        let error = execute_translation_with_callbacks(
+            "hello",
+            &PromptsSettings::default(),
+            &llm_settings,
+            TranslationCallbacks {
+                on_text_delta: None,
+            },
+        )
+        .await
+        .expect_err("reasoning-only chat response must be rejected");
+
+        server_handle.abort();
+
+        assert_eq!(
+            error.to_string(),
+            "LLM provider chat/completions 返回了思考内容，但没有可识别的译文"
+        );
     }
 }

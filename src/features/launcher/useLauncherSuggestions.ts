@@ -231,10 +231,7 @@ export function useLauncherSuggestions(args: UseLauncherSuggestionsArgs) {
 						resultCount: nextMatches.length,
 					});
 					if (!cancelled) {
-						killSuggestionCacheRef.current.set(
-							killSearchQuery.trim().toLowerCase(),
-							nextMatches,
-						);
+						killSuggestionCacheRef.current.set(killSearchQuery.trim().toLowerCase(), nextMatches);
 						showSuggestions({ killMatches: nextMatches });
 					}
 				} catch (loadError) {
