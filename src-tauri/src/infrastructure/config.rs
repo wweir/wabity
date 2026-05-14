@@ -19,8 +19,9 @@ use crate::domain::acp::{
 };
 use crate::domain::notification::NotificationSettings;
 use crate::domain::settings::{
-    fixed_rag_ignore_globs, AppearanceSettings, GeneralSettings, LlmModelConfig, LlmModelType,
-    LlmProviderConfig, LlmProviderProtocol, LlmSettings, OcrSettings, PromptsSettings, RagSettings,
+    find_builtin_llm_provider_template, fixed_rag_ignore_globs, AppearanceSettings,
+    GeneralSettings, LlmModelConfig, LlmModelType, LlmProviderConfig, LlmProviderProtocol,
+    LlmSettings, OcrSettings, PromptsSettings, RagSettings,
 };
 
 const CONFIG_FILE_NAME: &str = "config.toml";
@@ -560,6 +561,7 @@ impl LlmSettings {
             for model in &mut provider.models {
                 let original_model_id = model.id.clone();
                 normalize_llm_model_config(provider.protocol, model);
+                normalize_builtin_preset_model_id(&provider.builtin_preset_id, model);
                 model.id = make_llm_model_id(
                     &build_llm_model_id_seed(
                         &original_model_id,
@@ -841,6 +843,33 @@ fn normalize_llm_model_config(protocol: LlmProviderProtocol, model: &mut LlmMode
     if model.model_type == LlmModelType::Embedding {
         model.supports_stateful = false;
     }
+}
+
+fn normalize_builtin_preset_model_id(
+    builtin_preset_id: &Option<String>,
+    model: &mut LlmModelConfig,
+) {
+    let Some(template_id) = builtin_preset_id.as_deref() else {
+        model.builtin_preset_model_id = None;
+        return;
+    };
+    let Some(template_model_id) = model.builtin_preset_model_id.as_deref() else {
+        return;
+    };
+    let Some(template) = find_builtin_llm_provider_template(template_id) else {
+        model.builtin_preset_model_id = None;
+        return;
+    };
+
+    if template
+        .models
+        .iter()
+        .any(|template_model| template_model.id == template_model_id)
+    {
+        return;
+    }
+
+    model.builtin_preset_model_id = None;
 }
 
 fn normalize_llm_provider_name(
@@ -1774,6 +1803,38 @@ sourceDirectories = ["/tmp/docs"]
             crate::domain::settings::LlmModelType::Embedding
         );
         assert!(settings.providers[0].models[0].supports_multimodal);
+    }
+
+    #[test]
+    fn normalize_llm_settings_clears_unknown_builtin_model_binding() {
+        let mut settings = LlmSettings {
+            providers: vec![crate::domain::settings::LlmProviderConfig {
+                id: "openrouter".to_string(),
+                name: "OpenRouter".to_string(),
+                base_url: "https://openrouter.ai/api/v1".to_string(),
+                api_key: String::new(),
+                protocol: crate::domain::settings::LlmProviderProtocol::ChatCompletions,
+                models: vec![crate::domain::settings::LlmModelConfig {
+                    id: "openrouter-qwen".to_string(),
+                    model_type: crate::domain::settings::LlmModelType::Llm,
+                    model: "qwen/qwen3.6-27b".to_string(),
+                    builtin_preset_model_id: Some("qwen/qwen3.6-27b".to_string()),
+                    supports_multimodal: false,
+                    supports_stateful: false,
+                    ..crate::domain::settings::LlmModelConfig::default()
+                }],
+                builtin_preset_id: Some("openrouter".to_string()),
+                managed_base_url: true,
+            }],
+            ..LlmSettings::default()
+        };
+
+        settings.normalize();
+
+        assert_eq!(
+            settings.providers[0].models[0].builtin_preset_model_id,
+            None
+        );
     }
 
     #[tokio::test]

@@ -222,6 +222,24 @@ pub fn set_launcher_blur_auto_hide_enabled(
     Ok(())
 }
 
+pub fn get_launcher_pinned(shortcut_state: State<'_, ShortcutRuntimeState>) -> bool {
+    shortcut_state.is_launcher_pinned()
+}
+
+pub fn set_launcher_pinned(
+    shortcut_state: State<'_, ShortcutRuntimeState>,
+    pinned: bool,
+) -> Result<bool, String> {
+    let sequence = shortcut_state.cancel_launcher_blur_auto_hide_confirmation();
+    shortcut_state.set_launcher_pinned(pinned);
+    tracing::info!(
+        pinned,
+        blur_auto_hide_sequence = sequence,
+        "set launcher pinned state via IPC"
+    );
+    Ok(pinned)
+}
+
 pub async fn get_shortcut(
     state: State<'_, AppState>,
 ) -> Result<crate::infrastructure::config::ShortcutConfig, String> {
@@ -606,6 +624,37 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
                 resolver,
                 set_launcher_blur_auto_hide_enabled(shortcut_state, enabled)
                     .map_err(InvokeError::from),
+            )
+        }
+        "get_launcher_pinned" => {
+            let resolver = invoke.resolver.clone();
+            let Some(shortcut_state) =
+                super::parse_or_invoke_error(&invoke, "get_launcher_pinned", "shortcutState")
+            else {
+                return true;
+            };
+
+            super::respond_sync(
+                resolver,
+                Ok::<bool, InvokeError>(get_launcher_pinned(shortcut_state)),
+            )
+        }
+        "set_launcher_pinned" => {
+            let resolver = invoke.resolver.clone();
+            let Some(shortcut_state) =
+                super::parse_or_invoke_error(&invoke, "set_launcher_pinned", "shortcutState")
+            else {
+                return true;
+            };
+            let Some(pinned) =
+                super::parse_or_invoke_error(&invoke, "set_launcher_pinned", "pinned")
+            else {
+                return true;
+            };
+
+            super::respond_sync(
+                resolver,
+                set_launcher_pinned(shortcut_state, pinned).map_err(InvokeError::from),
             )
         }
         "get_shortcut" => super::respond_async(invoke.resolver.clone(), async move {

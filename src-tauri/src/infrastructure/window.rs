@@ -373,6 +373,47 @@ pub fn configure_main_window(window: &WebviewWindow) -> Result<()> {
                     return;
                 }
 
+                if launcher_state.is_launcher_pinned() {
+                    let sequence = launcher_state.cancel_launcher_blur_auto_hide_confirmation();
+                    launcher_state.arm_launcher_blur_auto_hide_suppression(
+                        LAUNCHER_SHOW_BLUR_AUTO_HIDE_SUPPRESSION_PERIOD,
+                    );
+                    #[cfg(target_os = "macos")]
+                    {
+                        match inspect_macos_panel_state_from_app(&launcher_app_handle, &window_label) {
+                            Ok(panel_state) => {
+                                tracing::info!(
+                                    window_label,
+                                    panel_visible = panel_state.visible,
+                                    panel_key_window = panel_state.key_window,
+                                    panel_occlusion_visible = panel_state.occlusion_visible,
+                                    app_active = panel_state.app_active,
+                                    "captured macOS panel state after blur while launcher is pinned"
+                                );
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    error = format_args!("{:#}", error),
+                                    window_label,
+                                    "failed to inspect macOS panel state after blur while launcher is pinned"
+                                );
+                            }
+                        }
+
+                        schedule_macos_panel_visibility_reinforcement(
+                            launcher_app_handle.clone(),
+                            launcher_state.clone(),
+                            window_label.clone(),
+                        );
+                    }
+                    tracing::info!(
+                        window_label,
+                        blur_auto_hide_sequence = sequence,
+                        "ignoring launcher blur because launcher is pinned"
+                    );
+                    return;
+                }
+
                 if !launcher_state.is_launcher_blur_auto_hide_enabled() {
                     let sequence = launcher_state.cancel_launcher_blur_auto_hide_confirmation();
                     launcher_state.arm_launcher_blur_auto_hide_suppression(
@@ -485,6 +526,17 @@ pub fn configure_main_window(window: &WebviewWindow) -> Result<()> {
                             window_label,
                             blur_auto_hide_sequence = sequence,
                             "cancelling launcher auto-hide because blur suppression re-armed"
+                        );
+                        return;
+                    }
+
+                    if launcher_state.is_launcher_pinned() {
+                        let cancelled_sequence =
+                            launcher_state.cancel_launcher_blur_auto_hide_confirmation();
+                        tracing::info!(
+                            window_label,
+                            blur_auto_hide_sequence = cancelled_sequence,
+                            "cancelling launcher auto-hide because launcher was pinned"
                         );
                         return;
                     }

@@ -29,10 +29,13 @@ pub async fn set_app_settings(
         .app_settings()
         .await
         .map_err(|error| error.to_string())?;
-    let saved_settings = state
-        .update_app_settings(settings)
-        .await
-        .map_err(|error| error.to_string())?;
+    let saved_settings = match state.update_app_settings(settings).await {
+        Ok(saved_settings) => saved_settings,
+        Err(error) => {
+            error!(?error, "failed to update app settings");
+            return Err(error.to_string());
+        }
+    };
 
     if previous_settings.general.auto_start != saved_settings.general.auto_start {
         if let Err(sync_error) = autostart::sync_autostart(&app, saved_settings.general.auto_start)

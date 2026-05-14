@@ -32,6 +32,8 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
         | "end_transient_window_interaction"
         | "arm_launcher_blur_auto_hide_suppression"
         | "set_launcher_blur_auto_hide_enabled"
+        | "get_launcher_pinned"
+        | "set_launcher_pinned"
         | "get_shortcut"
         | "get_shortcut_runtime_status"
         | "set_shortcut" => launcher::handle_invoke(invoke),

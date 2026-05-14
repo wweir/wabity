@@ -761,6 +761,7 @@ pub struct ShortcutRuntimeState {
     launcher_visible: Arc<AtomicBool>,
     clipboard_history_visible: Arc<AtomicBool>,
     clipboard_window_preserves_launcher_focus: Arc<AtomicBool>,
+    launcher_pinned: Arc<AtomicBool>,
     launcher_blur_auto_hide_enabled: Arc<AtomicBool>,
     launcher_resize_reposition_until: Arc<StdRwLock<Option<Instant>>>,
     launcher_blur_auto_hide_suppressed_until: Arc<StdRwLock<Option<Instant>>>,
@@ -795,6 +796,7 @@ impl Default for ShortcutRuntimeState {
             launcher_visible: Arc::new(AtomicBool::new(false)),
             clipboard_history_visible: Arc::new(AtomicBool::new(false)),
             clipboard_window_preserves_launcher_focus: Arc::new(AtomicBool::new(false)),
+            launcher_pinned: Arc::new(AtomicBool::new(false)),
             launcher_blur_auto_hide_enabled: Arc::new(AtomicBool::new(true)),
             launcher_resize_reposition_until: Arc::new(StdRwLock::new(None)),
             launcher_blur_auto_hide_suppressed_until: Arc::new(StdRwLock::new(None)),
@@ -1031,6 +1033,14 @@ impl ShortcutRuntimeState {
     pub fn set_clipboard_window_preserves_launcher_focus(&self, preserve: bool) {
         self.clipboard_window_preserves_launcher_focus
             .store(preserve, Ordering::SeqCst);
+    }
+
+    pub fn is_launcher_pinned(&self) -> bool {
+        self.launcher_pinned.load(Ordering::SeqCst)
+    }
+
+    pub fn set_launcher_pinned(&self, pinned: bool) {
+        self.launcher_pinned.store(pinned, Ordering::SeqCst);
     }
 
     pub fn is_launcher_blur_auto_hide_enabled(&self) -> bool {
@@ -1382,6 +1392,17 @@ mod tests {
         assert!(!state.is_launcher_blur_auto_hide_enabled());
         state.set_launcher_blur_auto_hide_enabled(true);
         assert!(state.is_launcher_blur_auto_hide_enabled());
+    }
+
+    #[test]
+    fn launcher_pinned_flag_round_trips() {
+        let state = ShortcutRuntimeState::default();
+
+        assert!(!state.is_launcher_pinned());
+        state.set_launcher_pinned(true);
+        assert!(state.is_launcher_pinned());
+        state.set_launcher_pinned(false);
+        assert!(!state.is_launcher_pinned());
     }
 
     #[cfg(not(target_os = "macos"))]
