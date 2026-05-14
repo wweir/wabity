@@ -39,6 +39,54 @@ export interface InsertClipboardHistoryTextIntoLauncherEvent {
 	text: string;
 }
 
+export interface ScreenshotReviewBoundingBox {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+}
+
+export interface ScreenshotReviewBlock {
+	id: string;
+	text: string;
+	confidence?: number | null;
+	boundingBox: ScreenshotReviewBoundingBox;
+}
+
+export interface ScreenCaptureRect {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+}
+
+export interface ScreenshotReviewPayload {
+	sessionId: string;
+	imageWidth: number;
+	imageHeight: number;
+	capture: {
+		backend: "screen_capture_kit";
+		mode: "region";
+		rect: ScreenCaptureRect;
+	};
+	ocr: {
+		provider: "system" | "llm_ocr";
+		status: "success" | "empty" | "failed";
+		text: string;
+		language?: string | null;
+		confidence?: number | null;
+		errorMessage?: string | null;
+		blocks: ScreenshotReviewBlock[];
+	};
+	requestedAction: "translate";
+}
+
+export interface LauncherFailureEvent {
+	message: string;
+}
+
+export type ScreenshotReviewAction = "translate_selected_text" | "copy_selected_text";
+
 export interface GeneralSettings {
 	autoStart: boolean;
 	showInDock: boolean;

@@ -6,14 +6,17 @@ import {
 	activateAcpSession,
 	armLauncherBlurAutoHideSuppression,
 	cancelAcpSession,
+	cancelScreenshotReview,
 	chooseWorkspaceDirectory,
 	closeAcpSession,
+	confirmScreenshotReview,
 	createAcpSession,
 	deleteClipboardHistoryEntry,
 	dismissClipboardHistoryPanel as dismissClipboardHistoryWindow,
 	executeAction,
 	getClipboardHistory,
 	getAcpAgents,
+	getScreenshotReviewPreview,
 	getAcpSessionDetail,
 	getWorkspace,
 	hideLauncherWindow,
@@ -26,10 +29,12 @@ import {
 	onOpenClipboardHistoryPanel,
 	onRevealLauncherMainPanel,
 	listAcpSessions,
-	onOcrError,
 	onOcrTranslationStream,
 	onOcrTranslationStarted,
 	onOcrTranslationResult,
+	onLauncherFailure,
+	onScreenshotReviewStarted,
+	retryScreenshotReview,
 	subscribeAcpSessionRemovals,
 	subscribeAcpSessionUpdates,
 	openDocumentReference,
@@ -55,6 +60,7 @@ import type {
 	AcpSessionDetail,
 	AcpSessionSummary,
 	ShortcutRuntimeStatus,
+	ScreenshotReviewPayload,
 	WorkspaceState,
 } from "../../lib/tauri/types";
 import type {
@@ -127,6 +133,7 @@ import { AgentPickerPanel } from "./components/AgentPickerPanel";
 import { LauncherSuggestionsSection } from "./components/LauncherSuggestionsSection";
 import { LauncherSessionSection } from "./components/LauncherSessionSection";
 import { LauncherClipboardSection } from "./components/LauncherClipboardSection";
+import { ScreenshotReviewPanel } from "./components/ScreenshotReviewPanel";
 import "./launcher.css";
 import { isRagAnswerStructuredPayload } from "./types";
 import {
@@ -155,6 +162,21 @@ interface LauncherPageProps {
 	onOpenSettings?: () => void;
 	shortcutRuntimeStatus: ShortcutRuntimeStatus;
 	windowKind: "main" | "clipboard_history";
+}
+
+function aggregateScreenshotReviewBlockText(
+	review: ScreenshotReviewPayload | null,
+	selectedBlockIds: string[],
+): string {
+	if (!review || selectedBlockIds.length === 0) {
+		return "";
+	}
+
+	const blocksById = new Map(review.ocr.blocks.map((block) => [block.id, block]));
+	return selectedBlockIds
+		.map((blockId) => blocksById.get(blockId)?.text.trim() ?? "")
+		.filter(Boolean)
+		.join("\n");
 }
 
 export function LauncherPage({
@@ -196,6 +218,16 @@ export function LauncherPage({
 	const [operationPending, setOperationPending] = useState(false);
 	const [agentActionPending, setAgentActionPending] = useState(false);
 	const [shortcutTranslationPending, setShortcutTranslationPending] = useState(false);
+	const [screenshotReview, setScreenshotReview] = useState<ScreenshotReviewPayload | null>(null);
+	const [screenshotReviewPreview, setScreenshotReviewPreview] = useState<string | null>(null);
+	const [screenshotReviewText, setScreenshotReviewText] = useState("");
+	const [selectedScreenshotReviewBlockIds, setSelectedScreenshotReviewBlockIds] = useState<
+		string[]
+	>([]);
+	const [screenshotReviewBusy, setScreenshotReviewBusy] = useState(false);
+	const [screenshotReviewCopyFeedback, setScreenshotReviewCopyFeedback] = useState<string | null>(
+		null,
+	);
 	const [frameWidth, setFrameWidth] = useState(launcherFrameMaxWidth);
 	const [caretIndex, setCaretIndex] = useState(0);
 	const [completionOffset, setCompletionOffset] = useState<FloatingPanelOffset>({
@@ -241,6 +273,8 @@ export function LauncherPage({
 	const shortcutTranslationEpochRef = useRef<number | null>(null);
 	const completionListRef = useRef<HTMLUListElement | null>(null);
 	const sessionLogRef = useRef<HTMLDivElement | null>(null);
+	const screenshotReviewSessionIdRef = useRef<string | null>(null);
+	const screenshotReviewTextManuallyEditedRef = useRef(false);
 	const pendingSelectionRef = useRef<number | null>(null);
 	const boundedCaretIndex = useMemo(
 		() => clampCaretIndex(rawText, caretIndex),
@@ -265,6 +299,7 @@ export function LauncherPage({
 	);
 	const desktopRuntimeAvailable = isDesktopRuntimeAvailable();
 	const clipboardPanelVisible = isClipboardWindow || clipboardPanelOpen;
+	const screenshotReviewOpen = screenshotReview !== null;
 	const fileMode = activeFileToken !== null;
 	const launcherMode = activeSessionId === null;
 	const textStartsWithSlash = textBeforeCaret.trimStart().startsWith("/");
@@ -305,7 +340,7 @@ export function LauncherPage({
 	const currentFileNeedle = activeFileToken?.needle ?? "";
 	const suggestionMode: SuggestionMode = fileMode
 		? "file"
-		: shortcutTranslationPending
+		: shortcutTranslationPending || screenshotReviewOpen
 			? "none"
 			: !launcherMode
 				? "none"
@@ -520,6 +555,7 @@ export function LauncherPage({
 		!clipboardPanelVisible &&
 		!operationPending &&
 		!shortcutTranslationPending &&
+		!screenshotReviewOpen &&
 		result === null &&
 		activeSessionId === null &&
 		!pendingSlashAction;
@@ -566,11 +602,13 @@ export function LauncherPage({
 		!activeSessionId &&
 		!operationPending &&
 		!shortcutTranslationPending &&
+		!screenshotReviewOpen &&
 		!creatingSession &&
 		rawText.trim().length > 0;
 	const canRunPrimaryAction =
 		!operationPending &&
 		!shortcutTranslationPending &&
+		!screenshotReviewOpen &&
 		!creatingSession &&
 		!(suggestionLoading && primaryActionDependsOnSuggestions) &&
 		primaryActionState.enabled &&
@@ -579,6 +617,7 @@ export function LauncherPage({
 		launcherMode &&
 		!operationPending &&
 		!shortcutTranslationPending &&
+		!screenshotReviewOpen &&
 		!creatingSession &&
 		!fileMode &&
 		rawText.trim().length > 0;
@@ -588,6 +627,7 @@ export function LauncherPage({
 		: Boolean(onOpenSettings) &&
 			!operationPending &&
 			!shortcutTranslationPending &&
+			!screenshotReviewOpen &&
 			!creatingSession;
 	const agentActionLabel = "ACP Agent";
 	const agentActionTitle = agentConfigured
@@ -753,6 +793,12 @@ export function LauncherPage({
 		launcherResetEpochRef.current = resetEpoch;
 		activeTrackedRequestEpochRef.current = null;
 		shortcutTranslationEpochRef.current = resetEpoch - 1;
+		const screenshotReviewSessionId = screenshotReviewSessionIdRef.current;
+		if (screenshotReviewSessionId) {
+			void cancelScreenshotReview(screenshotReviewSessionId).catch((error: unknown) => {
+				console.warn("failed to cancel screenshot review while dismissing launcher", error);
+			});
+		}
 		clearScheduledLauncherInputFocus();
 		pendingSelectionRef.current = null;
 		setInputMode(defaultInputMode);
@@ -768,6 +814,14 @@ export function LauncherPage({
 		setOperationPending(false);
 		setAgentActionPending(false);
 		setShortcutTranslationPending(false);
+		screenshotReviewSessionIdRef.current = null;
+		screenshotReviewTextManuallyEditedRef.current = false;
+		setScreenshotReview(null);
+		setScreenshotReviewPreview(null);
+		setScreenshotReviewText("");
+		setSelectedScreenshotReviewBlockIds([]);
+		setScreenshotReviewBusy(false);
+		setScreenshotReviewCopyFeedback(null);
 		setCreatingSession(false);
 		setSessionPanelOpen(false);
 		setClipboardPanelOpen(false);
@@ -1086,7 +1140,11 @@ export function LauncherPage({
 		enabled: launcherViewActive,
 		allowShrink: !qaAutoResizeFrozen,
 		onResizeSettled: handleQaResultResizeSettled,
-		resetKey: clipboardPanelVisible ? "clipboard-panel" : "launcher",
+		resetKey: clipboardPanelVisible
+			? "clipboard-panel"
+			: screenshotReviewOpen
+				? "screenshot-review"
+				: "launcher",
 	});
 
 	useEffect(
@@ -1183,23 +1241,20 @@ export function LauncherPage({
 			onRevealLauncherMainPanel(() => {
 				setClipboardPanelOpen(false);
 				setClipboardSelectionMode("paste_externally");
-			}),
-		);
-		registerUnlisten(
-			"OCR error",
-			onOcrError((message) => {
-				if (
-					shortcutTranslationEpochRef.current !== null &&
-					shortcutTranslationEpochRef.current !== launcherResetEpochRef.current
-				) {
-					return;
+				const sessionId = screenshotReviewSessionIdRef.current;
+				if (sessionId) {
+					void cancelScreenshotReview(sessionId).catch((error: unknown) => {
+						console.warn("failed to cancel screenshot review while revealing launcher", error);
+					});
 				}
-
-				shortcutTranslationEpochRef.current = null;
-				setShortcutTranslationPending(false);
-				setOperationStatusText(null);
-				setError(message);
-				scheduleLauncherInputFocusRef.current();
+				screenshotReviewSessionIdRef.current = null;
+				screenshotReviewTextManuallyEditedRef.current = false;
+				setScreenshotReview(null);
+				setScreenshotReviewPreview(null);
+				setScreenshotReviewText("");
+				setSelectedScreenshotReviewBlockIds([]);
+				setScreenshotReviewBusy(false);
+				setScreenshotReviewCopyFeedback(null);
 			}),
 		);
 		registerUnlisten(
@@ -1207,6 +1262,14 @@ export function LauncherPage({
 			onOcrTranslationStarted((payload) => {
 				shortcutTranslationEpochRef.current = launcherResetEpochRef.current;
 				setShortcutTranslationPending(true);
+				screenshotReviewSessionIdRef.current = null;
+				screenshotReviewTextManuallyEditedRef.current = false;
+				setScreenshotReview(null);
+				setScreenshotReviewPreview(null);
+				setScreenshotReviewText("");
+				setSelectedScreenshotReviewBlockIds([]);
+				setScreenshotReviewBusy(false);
+				setScreenshotReviewCopyFeedback(null);
 				setOperationStatusText("模型请求中 · 正在翻译文本");
 				setResult(null);
 				prepareShortcutTranslationViewRef.current(payload.sourceText, payload.sourceMode);
@@ -1250,6 +1313,64 @@ export function LauncherPage({
 				setOperationStatusText(null);
 				setLatestSubmittedText(payload.sourceText.trim() || "快捷翻译");
 				setResult(payload.result);
+			}),
+		);
+		registerUnlisten(
+			"screenshot review started",
+			onScreenshotReviewStarted((payload) => {
+				const selectedBlockIds = payload.ocr.blocks.map((block) => block.id);
+				shortcutTranslationEpochRef.current = null;
+				setShortcutTranslationPending(false);
+				screenshotReviewSessionIdRef.current = payload.sessionId;
+				screenshotReviewTextManuallyEditedRef.current = false;
+				setScreenshotReview(payload);
+				setScreenshotReviewPreview(null);
+				setScreenshotReviewText(
+					aggregateScreenshotReviewBlockText(payload, selectedBlockIds) || payload.ocr.text,
+				);
+				setSelectedScreenshotReviewBlockIds(selectedBlockIds);
+				setScreenshotReviewBusy(false);
+				setScreenshotReviewCopyFeedback(null);
+				setOperationStatusText(null);
+				setResult(null);
+				setError(null);
+				setClipboardPanelOpen(false);
+				setWorkspacePickerOpen(false);
+				setAgentPickerOpen(false);
+				setSessionPanelOpen(false);
+				void getScreenshotReviewPreview(payload.sessionId)
+					.then((preview) => {
+						if (screenshotReviewSessionIdRef.current !== payload.sessionId) {
+							return;
+						}
+
+						setScreenshotReviewPreview(preview || null);
+					})
+					.catch((previewError: unknown) => {
+						if (screenshotReviewSessionIdRef.current !== payload.sessionId) {
+							return;
+						}
+
+						setError(getErrorMessage(previewError, "加载截图预览失败"));
+					});
+			}),
+		);
+		registerUnlisten(
+			"launcher failure",
+			onLauncherFailure((payload) => {
+				shortcutTranslationEpochRef.current = null;
+				screenshotReviewSessionIdRef.current = null;
+				screenshotReviewTextManuallyEditedRef.current = false;
+				setScreenshotReview(null);
+				setScreenshotReviewPreview(null);
+				setScreenshotReviewText("");
+				setSelectedScreenshotReviewBlockIds([]);
+				setScreenshotReviewBusy(false);
+				setScreenshotReviewCopyFeedback(null);
+				setShortcutTranslationPending(false);
+				setOperationStatusText(null);
+				setError(payload.message);
+				scheduleLauncherInputFocusRef.current();
 			}),
 		);
 		registerUnlisten(
@@ -2358,9 +2479,203 @@ export function LauncherPage({
 		}
 	}
 
+	const applyScreenshotReviewBlockSelection = useCallback(
+		(nextSelectedBlockIds: string[]) => {
+			setSelectedScreenshotReviewBlockIds(nextSelectedBlockIds);
+			if (!screenshotReviewTextManuallyEditedRef.current) {
+				setScreenshotReviewText(
+					aggregateScreenshotReviewBlockText(screenshotReview, nextSelectedBlockIds),
+				);
+			}
+			setScreenshotReviewCopyFeedback(null);
+		},
+		[screenshotReview],
+	);
+
+	const handleScreenshotReviewBlockToggle = useCallback(
+		(blockId: string) => {
+			const nextSelectedBlockIds = selectedScreenshotReviewBlockIds.includes(blockId)
+				? selectedScreenshotReviewBlockIds.filter((selectedId) => selectedId !== blockId)
+				: [...selectedScreenshotReviewBlockIds, blockId];
+			applyScreenshotReviewBlockSelection(nextSelectedBlockIds);
+		},
+		[applyScreenshotReviewBlockSelection, selectedScreenshotReviewBlockIds],
+	);
+
+	const handleScreenshotReviewSelectAll = useCallback(() => {
+		applyScreenshotReviewBlockSelection(
+			screenshotReview?.ocr.blocks.map((block) => block.id) ?? [],
+		);
+	}, [applyScreenshotReviewBlockSelection, screenshotReview]);
+
+	const handleScreenshotReviewClearSelection = useCallback(() => {
+		applyScreenshotReviewBlockSelection([]);
+	}, [applyScreenshotReviewBlockSelection]);
+
+	const handleScreenshotReviewTextChange = useCallback((value: string) => {
+		screenshotReviewTextManuallyEditedRef.current = true;
+		setScreenshotReviewText(value);
+		setScreenshotReviewCopyFeedback(null);
+	}, []);
+
+	const handleScreenshotReviewUseSelectedBlocks = useCallback(() => {
+		const nextText = aggregateScreenshotReviewBlockText(
+			screenshotReview,
+			selectedScreenshotReviewBlockIds,
+		);
+		screenshotReviewTextManuallyEditedRef.current = false;
+		setScreenshotReviewText(nextText);
+		setScreenshotReviewCopyFeedback(null);
+	}, [screenshotReview, selectedScreenshotReviewBlockIds]);
+
+	const clearScreenshotReviewState = useCallback(() => {
+		screenshotReviewSessionIdRef.current = null;
+		screenshotReviewTextManuallyEditedRef.current = false;
+		setScreenshotReview(null);
+		setScreenshotReviewPreview(null);
+		setScreenshotReviewText("");
+		setSelectedScreenshotReviewBlockIds([]);
+		setScreenshotReviewBusy(false);
+		setScreenshotReviewCopyFeedback(null);
+	}, []);
+
+	const handleScreenshotReviewCancel = useCallback(async () => {
+		if (!screenshotReview || screenshotReviewBusy) {
+			return;
+		}
+
+		const sessionId = screenshotReview.sessionId;
+		setScreenshotReviewBusy(true);
+		try {
+			await cancelScreenshotReview(sessionId);
+			if (screenshotReviewSessionIdRef.current === sessionId) {
+				clearScreenshotReviewState();
+				setError(null);
+				scheduleLauncherInputFocus();
+			}
+		} catch (cancelError) {
+			if (screenshotReviewSessionIdRef.current === sessionId) {
+				setScreenshotReviewBusy(false);
+				setError(getErrorMessage(cancelError, "取消截图 Review 失败"));
+			}
+		}
+	}, [
+		clearScreenshotReviewState,
+		scheduleLauncherInputFocus,
+		screenshotReview,
+		screenshotReviewBusy,
+	]);
+
+	const handleScreenshotReviewRetry = useCallback(async () => {
+		if (!screenshotReview) {
+			return;
+		}
+
+		const sessionId = screenshotReview.sessionId;
+		setScreenshotReviewBusy(true);
+		setScreenshotReviewCopyFeedback(null);
+		setError(null);
+		try {
+			await retryScreenshotReview(sessionId);
+			if (screenshotReviewSessionIdRef.current === sessionId) {
+				clearScreenshotReviewState();
+				scheduleLauncherInputFocus();
+			}
+		} catch (retryError) {
+			if (screenshotReviewSessionIdRef.current === sessionId) {
+				clearScreenshotReviewState();
+				setError(getErrorMessage(retryError, "重新截图失败"));
+				scheduleLauncherInputFocus();
+			}
+		}
+	}, [clearScreenshotReviewState, scheduleLauncherInputFocus, screenshotReview]);
+
+	const handleScreenshotReviewCopy = useCallback(async () => {
+		if (!screenshotReview) {
+			return;
+		}
+
+		const sessionId = screenshotReview.sessionId;
+		setScreenshotReviewBusy(true);
+		try {
+			await confirmScreenshotReview(sessionId, "copy_selected_text", screenshotReviewText);
+			if (screenshotReviewSessionIdRef.current === sessionId) {
+				setScreenshotReviewCopyFeedback("已复制");
+				setError(null);
+			}
+		} catch (copyError) {
+			if (screenshotReviewSessionIdRef.current === sessionId) {
+				setError(getErrorMessage(copyError, "复制截图文字失败"));
+			}
+		} finally {
+			if (screenshotReviewSessionIdRef.current === sessionId) {
+				setScreenshotReviewBusy(false);
+			}
+		}
+	}, [screenshotReview, screenshotReviewText]);
+
+	const handleScreenshotReviewTranslate = useCallback(async () => {
+		if (!screenshotReview) {
+			return;
+		}
+
+		const sessionId = screenshotReview.sessionId;
+		setScreenshotReviewBusy(true);
+		try {
+			await confirmScreenshotReview(sessionId, "translate_selected_text", screenshotReviewText);
+			if (screenshotReviewSessionIdRef.current === sessionId) {
+				clearScreenshotReviewState();
+				setError(null);
+			}
+		} catch (translateError) {
+			if (screenshotReviewSessionIdRef.current === sessionId) {
+				setScreenshotReviewBusy(false);
+			} else {
+				clearScreenshotReviewState();
+				setShortcutTranslationPending(false);
+				setOperationStatusText(null);
+				scheduleLauncherInputFocus();
+			}
+			setError(getErrorMessage(translateError, "确认翻译失败"));
+		}
+	}, [
+		clearScreenshotReviewState,
+		scheduleLauncherInputFocus,
+		screenshotReview,
+		screenshotReviewText,
+	]);
+
+	useEffect(() => {
+		if (typeof document === "undefined" || !screenshotReviewOpen) {
+			return;
+		}
+
+		function handleScreenshotReviewDocumentKeyDown(event: globalThis.KeyboardEvent) {
+			if (event.key !== "Escape") {
+				return;
+			}
+
+			event.preventDefault();
+			void handleScreenshotReviewCancel();
+		}
+
+		document.addEventListener("keydown", handleScreenshotReviewDocumentKeyDown);
+		return () => {
+			document.removeEventListener("keydown", handleScreenshotReviewDocumentKeyDown);
+		};
+	}, [handleScreenshotReviewCancel, screenshotReviewOpen]);
+
 	async function handleKeyDown(
 		event: KeyboardEvent<HTMLInputElement> | KeyboardEvent<HTMLTextAreaElement>,
 	) {
+		if (screenshotReviewOpen) {
+			if (event.key === "Escape") {
+				event.preventDefault();
+				await handleScreenshotReviewCancel();
+			}
+			return;
+		}
+
 		if (event.key === "Backspace" && pendingSlashAction && rawText.length === 0) {
 			setActiveSlashAction(null);
 			setResult(null);
@@ -2850,77 +3165,99 @@ export function LauncherPage({
 						</div>
 					) : null}
 
-					<LauncherComposer
-						inputAnchorRef={inputAnchorRef}
-						inputMode={inputMode}
-						inputRef={inputRef}
-						rawText={rawText}
-						inputPlaceholder={inputPlaceholder}
-						inputLabel="输入动作、问题或文件路径"
-						inputDescriptionId="launcher-status-region"
-						announceStatus={statusBarState.announce}
-						statusLabel={statusBarState.label}
-						statusItems={statusBarState.items}
-						statusTone={statusBarState.tone}
-						onUpdateRawText={updateRawText}
-						onSyncCaretIndex={syncCaretIndex}
-						onKeyDown={handleKeyDown}
-						onOpenSettings={onOpenSettings}
-						hasCompletion={hasCompletion}
-						hasSuggestions={hasSuggestions}
-						completionPopupId={launcherCompletionPopupId}
-						activeCompletionOptionId={activeCompletionOptionId}
-						onAcceptCompletion={acceptCompletion}
-						agentActionPending={agentActionPending}
-						showAgentAction={showAgentActionButton}
-						agentActionLabel={agentActionLabel}
-						agentActionTitle={agentActionTitle}
-						canRunAgentAction={canRunAgentAction}
-						showAgentActionShortcut={showAgentActionShortcut}
-						showTranslateAction={showTranslateAction}
-						primaryActionShortcutLabel={primaryActionShortcutLabel}
-						primaryActionLabel={primaryActionState.label}
-						primaryActionTone={primaryActionState.tone}
-						canRunPrimaryAction={canRunPrimaryAction}
-						canRunTranslateAction={canRunTranslateAction}
-						agentActionShortcutLabel={agentActionShortcutLabel}
-						onAgentExecute={() => {
-							if (agentConfigured) {
-								void handleAgentExecute();
-								return;
+					{screenshotReview ? (
+						<ScreenshotReviewPanel
+							review={screenshotReview}
+							previewDataUrl={screenshotReviewPreview}
+							editedText={screenshotReviewText}
+							selectedBlockIds={selectedScreenshotReviewBlockIds}
+							busy={screenshotReviewBusy}
+							copyFeedback={screenshotReviewCopyFeedback}
+							onEditedTextChange={handleScreenshotReviewTextChange}
+							onToggleBlock={handleScreenshotReviewBlockToggle}
+							onSelectAllBlocks={handleScreenshotReviewSelectAll}
+							onClearBlockSelection={handleScreenshotReviewClearSelection}
+							onUseSelectedBlocks={handleScreenshotReviewUseSelectedBlocks}
+							onTranslate={() => void handleScreenshotReviewTranslate()}
+							onCopy={() => void handleScreenshotReviewCopy()}
+							onRetry={() => void handleScreenshotReviewRetry()}
+							onCancel={() => void handleScreenshotReviewCancel()}
+						/>
+					) : (
+						<LauncherComposer
+							inputAnchorRef={inputAnchorRef}
+							inputMode={inputMode}
+							inputRef={inputRef}
+							rawText={rawText}
+							inputPlaceholder={inputPlaceholder}
+							inputLabel="输入动作、问题或文件路径"
+							inputDescriptionId="launcher-status-region"
+							announceStatus={statusBarState.announce}
+							statusLabel={statusBarState.label}
+							statusItems={statusBarState.items}
+							statusTone={statusBarState.tone}
+							onUpdateRawText={updateRawText}
+							onSyncCaretIndex={syncCaretIndex}
+							onKeyDown={handleKeyDown}
+							onOpenSettings={onOpenSettings}
+							hasCompletion={hasCompletion}
+							hasSuggestions={hasSuggestions}
+							completionPopupId={launcherCompletionPopupId}
+							activeCompletionOptionId={activeCompletionOptionId}
+							onAcceptCompletion={acceptCompletion}
+							agentActionPending={agentActionPending}
+							showAgentAction={showAgentActionButton}
+							agentActionLabel={agentActionLabel}
+							agentActionTitle={agentActionTitle}
+							canRunAgentAction={canRunAgentAction}
+							showAgentActionShortcut={showAgentActionShortcut}
+							showTranslateAction={showTranslateAction}
+							primaryActionShortcutLabel={primaryActionShortcutLabel}
+							primaryActionLabel={primaryActionState.label}
+							primaryActionTone={primaryActionState.tone}
+							canRunPrimaryAction={canRunPrimaryAction}
+							canRunTranslateAction={canRunTranslateAction}
+							agentActionShortcutLabel={agentActionShortcutLabel}
+							onAgentExecute={() => {
+								if (agentConfigured) {
+									void handleAgentExecute();
+									return;
+								}
+
+								onOpenSettings?.();
+							}}
+							onRunTranslateAction={() => void handleTranslateAction()}
+							showCancelActiveSession={showCancelActiveSession}
+							onCancelActiveSession={() => void handleCancelActiveSession()}
+							onRunPrimaryAction={() => void runPrimaryAction()}
+						/>
+					)}
+
+					{!screenshotReview ? (
+						<LauncherFeedback
+							activeSession={activeSession}
+							launcherPinned={launcherPinned}
+							runtimeControlPendingKey={runtimeControlPendingKey}
+							qaCitations={qaConversationState?.citations ?? []}
+							qaRetrieval={qaRetrieval}
+							qaMessages={qaMessages}
+							sessionLogRef={sessionLogRef}
+							result={result}
+							resultPending={operationPending || shortcutTranslationPending}
+							jsonPreview={jsonPreview}
+							markdownPreview={markdownPreview}
+							onSetAcpSessionConfigOption={(configId, valueId) =>
+								void handleSetActiveSessionConfigOption(configId, valueId)
 							}
-
-							onOpenSettings?.();
-						}}
-						onRunTranslateAction={() => void handleTranslateAction()}
-						showCancelActiveSession={showCancelActiveSession}
-						onCancelActiveSession={() => void handleCancelActiveSession()}
-						onRunPrimaryAction={() => void runPrimaryAction()}
-					/>
-
-					<LauncherFeedback
-						activeSession={activeSession}
-						launcherPinned={launcherPinned}
-						runtimeControlPendingKey={runtimeControlPendingKey}
-						qaCitations={qaConversationState?.citations ?? []}
-						qaRetrieval={qaRetrieval}
-						qaMessages={qaMessages}
-						sessionLogRef={sessionLogRef}
-						result={result}
-						resultPending={operationPending || shortcutTranslationPending}
-						jsonPreview={jsonPreview}
-						markdownPreview={markdownPreview}
-						onSetAcpSessionConfigOption={(configId, valueId) =>
-							void handleSetActiveSessionConfigOption(configId, valueId)
-						}
-						onSetAcpSessionMode={(modeId) => void handleSetActiveSessionMode(modeId)}
-						onLauncherPinnedChange={onLauncherPinnedChange}
-						onOpenRagCitation={(citation) => void handleOpenRagCitation(citation)}
-					/>
+							onSetAcpSessionMode={(modeId) => void handleSetActiveSessionMode(modeId)}
+							onLauncherPinnedChange={onLauncherPinnedChange}
+							onOpenRagCitation={(citation) => void handleOpenRagCitation(citation)}
+						/>
+					) : null}
 				</section>
 			) : null}
 
-			{!clipboardPanelVisible ? (
+			{!clipboardPanelVisible && !screenshotReview ? (
 				<>
 					<LauncherSuggestionsSection
 						hasSuggestions={hasSuggestions}
@@ -2970,7 +3307,7 @@ export function LauncherPage({
 				onDeleteEntry={handleDeleteClipboardEntryFromPanel}
 			/>
 
-			{!clipboardPanelVisible ? (
+			{!clipboardPanelVisible && !screenshotReview ? (
 				<>
 					<WorkspacePickerPanel
 						open={workspacePickerOpen}

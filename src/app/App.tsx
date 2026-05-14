@@ -1,12 +1,14 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LauncherPage } from "../features/launcher/LauncherPage";
+import { ScreenCaptureOverlay } from "./ScreenCaptureOverlay";
 import {
 	getAppSettings,
 	getLauncherPinned,
 	getShortcutRuntimeStatus,
 	onOcrTranslationStarted,
 	onRevealLauncherMainPanel,
+	onScreenshotReviewStarted,
 	onShortcutRuntimeStatusChanged,
 	setLauncherPinned,
 } from "../lib/tauri/client";
@@ -20,11 +22,18 @@ const SettingsPage = lazy(() =>
 );
 
 export type AppView = "launcher" | "settings";
-export type AppWindowKind = "main" | "clipboard_history";
+export type AppWindowKind = "main" | "clipboard_history" | "screenshot_capture_overlay";
 
 function resolveInitialWindowKind(): AppWindowKind {
 	try {
-		return getCurrentWindow().label === "clipboard" ? "clipboard_history" : "main";
+		const label = getCurrentWindow().label;
+		if (label === "clipboard") {
+			return "clipboard_history";
+		}
+		if (label === "screenshot-capture-overlay") {
+			return "screenshot_capture_overlay";
+		}
+		return "main";
 	} catch {
 		return "main";
 	}
@@ -140,54 +149,59 @@ export function App() {
 			return;
 		}
 
+		const switchToLauncher = () => setCurrentView("launcher");
 		let active = true;
 		let unlistenOcrStarted: (() => void) | null = null;
 		let unlistenRevealMainPanel: (() => void) | null = null;
+		let unlistenScreenshotReview: (() => void) | null = null;
 
-		void onOcrTranslationStarted(() => {
-			setCurrentView("launcher");
-		})
+		void onOcrTranslationStarted(switchToLauncher)
 			.then((unlisten) => {
-				if (!unlisten) {
+				if (!unlisten || !active) {
+					unlisten?.();
 					return;
 				}
-
-				if (!active) {
-					unlisten();
-					return;
-				}
-
 				unlistenOcrStarted = unlisten;
 			})
 			.catch((error: unknown) => {
 				console.warn("failed to subscribe OCR started event in App", error);
 			});
 
-		void onRevealLauncherMainPanel(() => {
-			setCurrentView("launcher");
-		})
+		void onRevealLauncherMainPanel(switchToLauncher)
 			.then((unlisten) => {
-				if (!unlisten) {
+				if (!unlisten || !active) {
+					unlisten?.();
 					return;
 				}
-
-				if (!active) {
-					unlisten();
-					return;
-				}
-
 				unlistenRevealMainPanel = unlisten;
 			})
 			.catch((error: unknown) => {
 				console.warn("failed to subscribe launcher reveal event in App", error);
 			});
 
+		void onScreenshotReviewStarted(switchToLauncher)
+			.then((unlisten) => {
+				if (!unlisten || !active) {
+					unlisten?.();
+					return;
+				}
+				unlistenScreenshotReview = unlisten;
+			})
+			.catch((error: unknown) => {
+				console.warn("failed to subscribe screenshot review event in App", error);
+			});
+
 		return () => {
 			active = false;
 			unlistenOcrStarted?.();
 			unlistenRevealMainPanel?.();
+			unlistenScreenshotReview?.();
 		};
 	}, [windowKind]);
+
+	if (windowKind === "screenshot_capture_overlay") {
+		return <ScreenCaptureOverlay />;
+	}
 
 	if (windowKind === "clipboard_history") {
 		return (

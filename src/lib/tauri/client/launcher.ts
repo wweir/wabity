@@ -35,6 +35,10 @@ import type {
 	AcpSessionDetail,
 	AcpSessionSummary,
 	RagRuntimeStatus,
+	ScreenCaptureRect,
+	ScreenshotReviewAction,
+	LauncherFailureEvent,
+	ScreenshotReviewPayload,
 	WorkspaceState,
 } from "../types";
 
@@ -101,10 +105,6 @@ export async function setLauncherPinned(pinned: boolean): Promise<boolean> {
 	return invokeOrDefault("set_launcher_pinned", pinned, { pinned });
 }
 
-export async function onOcrError(callback: (message: string) => void) {
-	return listenIfDesktop("ocr-error", callback);
-}
-
 export async function onOcrTranslationResult(
 	callback: (payload: OcrTranslationResultEvent) => void,
 ) {
@@ -125,6 +125,51 @@ export async function onOcrTranslationStream(
 
 export async function onExecutionProgress(callback: (payload: ExecutionProgressEvent) => void) {
 	return listenIfDesktop("execution-progress", callback);
+}
+
+export async function onScreenshotReviewStarted(
+	callback: (payload: ScreenshotReviewPayload) => void,
+) {
+	return listenIfDesktop("screenshot-review-started", callback);
+}
+
+export async function onLauncherFailure(callback: (payload: LauncherFailureEvent) => void) {
+	return listenIfDesktop("launcher-failure", callback);
+}
+
+export async function getScreenshotReviewPreview(sessionId: string): Promise<string> {
+	return invokeOrDefault("get_screenshot_review_preview", "", { sessionId });
+}
+
+export async function confirmScreenshotReview(
+	sessionId: string,
+	action: ScreenshotReviewAction,
+	editedText: string | null,
+): Promise<void> {
+	return invokeIfDesktop("confirm_screenshot_review", {
+		sessionId,
+		action,
+		editedText,
+	});
+}
+
+export async function cancelScreenshotReview(sessionId: string): Promise<void> {
+	return invokeIfDesktop("cancel_screenshot_review", { sessionId });
+}
+
+export async function retryScreenshotReview(sessionId: string): Promise<void> {
+	return invokeIfDesktop("retry_screenshot_review", { sessionId });
+}
+
+export async function completeScreenCaptureRegion(
+	token: string,
+	rect: ScreenCaptureRect,
+): Promise<void> {
+	return invokeIfDesktop("complete_screen_capture_region", { token, rect });
+}
+
+export async function cancelScreenCaptureRegion(token: string): Promise<void> {
+	return invokeIfDesktop("cancel_screen_capture_region", { token });
 }
 
 export async function onRagRuntimeStatus(callback: (payload: RagRuntimeStatus) => void) {
