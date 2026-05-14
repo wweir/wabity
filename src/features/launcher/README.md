@@ -12,7 +12,9 @@
 
 - `LauncherPage.tsx`：页面级状态、effect、键盘流和 Tauri 命令编排；顶部栏、输入区、反馈区都只负责装配组件，不再内联大段 JSX
 - `LauncherPage.tsx` 里的建议请求只保留最小前端观测：按 `file / action / app / kill` 输出请求耗时和命中数，便于和 Rust 侧 `tracing` 对齐；不要在页面层再铺一层自定义埋点系统
-- `launcher.css`：只保留 launcher 特有布局、状态和消息流样式；按钮、输入框、浮层和冷静中性色 design tokens 等共享外观基线统一回收到 `src/app/global.css`
+- `launcherPageModel.ts`：承接主按钮状态、状态栏文案、问答消息块和本地前端副作用这类纯推导，避免继续堆在页面组件顶部
+- `useRagRuntimeStatus.ts` / `useLauncherSelectionEffects.ts`：分别承接 RAG 运行态事件订阅、补全选择复位、补全列表滚动和剪贴板默认选中项维护
+- `launcher.css`：只保留样式入口和 `styles/` 子文件导入；launcher 特有布局、状态、消息流、Markdown、suggestions、clipboard 和响应式规则按职责拆到 `styles/launcher.*.css`，按钮、输入框、浮层和冷静中性色 design tokens 等共享外观基线统一回收到 `src/app/global.css`
 - ACP 会话时间线里的 `user / assistant / system` 消息卡片底色必须基于全局 token 组合，禁止在 `launcher.css` 里直接写死只适合浅色主题的消息背景
 - `MarkdownRenderer` 衍生出来的 Mermaid 状态文本、错误文案和 highlight.js 语法色同样必须走全局 code token；浅色和深色都不能继续保留私有 code palette 或只适合浅底块的 hex 色
 - session panel、restore notice、Markdown 辅助元素和轻量问答元信息区都必须复用全局 surface / text / status token；不要再靠 feature 私有的乳白半透明面和浅描边硬编码制造层级
@@ -54,6 +56,7 @@
 - launcher 启动时优先恢复上次保存的当前 workspace；无效时回退到用户 `HOME`，最近目录只保留 3 个
 - launcher 外观跟随设置页的外观配置：启动时和设置保存后都会同步应用 `theme` / `fontSize`
 - launcher 默认失焦自动隐藏，但打开原生目录选择器时会临时抑制自动隐藏，避免页面看起来“闪退”
+- launcher 支持会话级窗口固定状态；固定只关闭失焦自动隐藏，不改变 `Esc`、`Alt+Space`、关闭按钮或执行结果显式关闭窗口的语义。标准空态不展示固定入口，只有结果、问答、ACP 会话、预览等下方交互区出现时才在交互区右上角展示固定按钮
 - 问答结果落地不是普通文本更新；`LauncherPage.tsx` 在写入 QA message 前必须显式调用 `armLauncherBlurAutoHideSuppression(...)`，并在结果初次落地与后续 resize 稳定期内临时关闭 blur auto-hide，同时暂停 `window focus`、`visibilitychange`、`onFocusChanged` 这类被动 refocus 链；稳定期结束后这两条保护要自动恢复，显式退出 QA 展示态时也要立即恢复，不能再把“等待下一次用户输入”当成唯一恢复路径，否则失焦隐藏会被长期关死。macOS 窗口层已经放弃 `nonactivating panel`，改成“可激活、只抢 key 不争 main”的 floating panel；同时结果展示期如果仍发生原生失焦，窗口层默认不会再自动抢回 key 焦点，而是只保留 suppression，等待用户显式重新聚焦；只有在原生 panel 已经掉出可见层时，窗口层才允许做一次不抢焦点的 `show/orderFrontRegardless` 补偿，避免结果面看起来像“自动隐藏”
 - QA 结果展示期不能简单粗暴地把原生 auto-resize 全关掉；当前策略是继续保留尺寸观察，但进入 QA 后切到“只增不减”的窗口同步。这样首屏回答、懒加载的 Markdown / 语法高亮 / citation 仍能把窗口继续撑开，而短时测量抖动不会把窗口又缩回去截断下半截内容；离开 QA 展示态后才恢复正常的可增可减 resize
 - launcher 通过快捷键、OCR 回填、快捷翻译结果回填或其他显示路径重新出现时，主输入框会主动恢复焦点，不能只依赖首次挂载时的 `autoFocus`

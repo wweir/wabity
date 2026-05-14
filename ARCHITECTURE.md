@@ -90,6 +90,8 @@
 - 根级 `src/` 不保留没有实际内容的预留目录；空的 `components`、`assets` 一类目录应删除，而不是提前占位
 - feature 内部优先直接依赖 `src/lib/tauri/client/*` 职责子模块；`src/lib/tauri/client.ts` 只保留少量稳定公共入口，不作为默认的大一统导出层
 - 不新增 `shared`、`common`、`utils` 这类语义空洞的根级目录；跨 feature 复用未形成稳定边界前，代码先留在所属 feature 内
+- launcher 页面入口只保留页面级装配和事件分发；纯展示推导放在 `launcherPageModel.ts`，RAG 运行状态订阅和候选/剪贴板选择副作用分别放在专用 hook，样式入口只负责按稳定顺序导入 `styles/` 子文件
+- settings 样式入口只负责导入 `styles/` 子文件；具体 frame、section、LLM 和响应式规则按职责拆分，避免继续把整个设置页 cascade 堆在单个 CSS 文件
 
 ### 4.2 Rust 后端
 
@@ -108,6 +110,7 @@
 
 - OpenAI-compatible 传输与 payload 兼容逻辑沉到 workspace crate `src-tauri/crates/openai-compatible`
 - 该 crate 内部固定按 `client`、`parsing`、`streaming`、`extract`、`models` 分层；宿主 `src/infrastructure/openai_compatible.rs` 只保留兼容导出与本地类型转换
+- RAG storage 使用 `storage/` 目录承接持久化边界；`mod.rs` 保留 chunk/vector store 和恢复编排，`metadata.rs` 承接 `rag_files`、FTS lexical index 和相关 SQLite 投影逻辑
 
 允许的依赖方向：
 
@@ -221,6 +224,7 @@ ACP 链路是独立运行时：
 
 补充约束：
 
+- 设置页可以在具体分组内展示保存状态和操作入口，但保存语义必须绑定到该分组的结构化草稿提交，不能上提到窗口头部或跨分组入口
 - 模型接入分组保存时，允许沿用当前已落盘的翻译 / 问答 / OCR / RAG 模型引用；但 Rust 侧必须先按最新 `providers/models` 目录修复或清空这些引用，再执行跨分组校验，不能先拿旧引用直接判错
 
 典型投影包括：
@@ -241,9 +245,21 @@ ACP 链路是独立运行时：
 - provider 是分组容器，一个 provider 下可以维护多个 `models[]`
 - model 层才是最小可引用单元；翻译、OCR、RAG 问答和 RAG embedding 都只保存 `modelId`
 - 设置页编辑顺序固定为“先选 provider 组，再在同一条主流程中编辑 provider 层连接信息和当前 model 层能力”；界面可以合并展示，但不能把两层数据边界混写
+- 模型接入页的前端结构必须保留 provider 目录与当前编辑表单的边界；宽窗口可用双栏 master-detail，窄窗口回退单列；有条目时不显示顶部 quick jump，页头之后直接进入双栏工作区。右侧编辑区外层卡片必须保留稳定内边距，状态条和分段标题不能贴到或越过外框。组内模型列表使用纵向单选目录展示模型名、调用方式和可用功能，并支持方向键切换；新增和删除动作不能混进模型目录项。模型名远端候选使用可手填 combobox + listbox 语义，候选面板在字段内占位并由列表自身滚动，筛选/刷新动作不能混进 option 列表语义。设置页初始化 LLM 草稿时必须结合内置模板目录清理无效 `builtin_preset_model_id`，Rust 保存链路也必须在校验前做同样归一化
 - 配置读取只接受当前两层结构和 `*ModelId` 引用；旧版平铺模型字段、`*ProviderId` 路由字段和 `responsesModel + embeddingModel` 拆分逻辑已移除
 
-### 6.5 RAG 文档摄取与状态反馈
+### 6.5 Launcher 固定窗口
+
+Launcher 固定状态是会话级运行态，只保存在 `ShortcutRuntimeState`，不写入 `config.toml`。它只改变失焦自动隐藏判断：`launcher_pinned = true` 时窗口层跳过 blur auto-hide，并保留 macOS panel 可见性补偿；`Esc`、`Alt+Space`、关闭按钮、执行结果要求关闭窗口等显式隐藏路径仍然生效。
+
+前端入口必须保持上下文相关：
+
+- 标准 launcher 空态不展示固定按钮
+- 下方交互区出现结果、问答、预览或 ACP session 时展示固定按钮
+- 设置页 header 在关闭按钮旁展示同一个固定按钮
+- 所有入口控制同一个 `launcherPinned` 状态，不区分 launcher 和设置页
+
+### 6.6 RAG 文档摄取与状态反馈
 
 RAG 建索引固定分两层：
 

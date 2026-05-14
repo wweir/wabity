@@ -68,9 +68,13 @@
 - `src-tauri/src/infrastructure/config.rs`：ACP agent 命令解析、命名和 ID 生成下沉到 `config/acp_agent.rs`
 - `src-tauri/src/services/acp/mod.rs`：命令构建和运行态映射分别下沉到 `command_builder.rs`、`mapping.rs`
 - `src-tauri/src/services/rag_answer.rs`：进度事件投影下沉到 `progress.rs`
+- `src-tauri/src/services/rag/tests.rs`：拆为 `tests/` 目录，按 chunking、runtime、SQLite、vector index、embedding/status 行为分组
+- `src-tauri/src/services/rag/storage.rs`：改为 `storage/mod.rs`，并把 `rag_files`、FTS lexical index 和 SQLite 投影读写下沉到 `storage/metadata.rs`
+- `src/features/launcher/LauncherPage.tsx`：纯推导下沉到 `launcherPageModel.ts`，RAG 状态订阅和补全/剪贴板选择副作用下沉到专用 hook
+- `src/features/launcher/launcher.css` / `src/features/settings/settings.css`：入口文件只保留 `styles/` 子文件导入，具体规则按布局、区域、Markdown、suggestions、clipboard、响应式等职责拆分
 
 ## 当前验证进度
 
 - 前端：`npm run lint -- --quiet`、`npx tsc --noEmit` 已通过
-- Rust：`cargo fmt --manifest-path src-tauri/Cargo.toml`、`cargo check --manifest-path src-tauri/Cargo.toml` 已通过
-- 待执行：`cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings`、`cargo test --manifest-path src-tauri/Cargo.toml`、`rust-analyzer diagnostics ...`
+- Rust：`cargo fmt --manifest-path src-tauri/Cargo.toml`、`cargo check --manifest-path src-tauri/Cargo.toml`、`cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings`、`cargo test --manifest-path src-tauri/Cargo.toml` 已通过
+- `rust-analyzer diagnostics src-tauri --severity error` 已执行完成；当前 rust-analyzer 版本在扫描过程中打印了若干内部 `ERROR` 日志，但命令退出码为 0，并完成 `diagnostic scan complete`
