@@ -1,0 +1,361 @@
+.settings-llm-toolbar {
+	align-items: flex-start;
+	gap: 10px 14px;
+	padding: 0 0 12px;
+	border-bottom: 1px solid var(--border-soft);
+}
+
+.settings-llm-toolbar-primary {
+	gap: 6px;
+}
+
+.settings-llm-toolbar-heading {
+	align-items: center;
+}
+
+.settings-llm-toolbar .settings-agent-name {
+	font-size: 18px;
+	overflow-wrap: anywhere;
+}
+
+.settings-llm-toolbar-actions {
+	align-items: stretch;
+	justify-content: flex-start;
+	gap: 8px;
+}
+
+.settings-llm-editor-main {
+	gap: 0;
+}
+
+.settings-llm-editor-main > .settings-llm-editor-panel {
+	border: 0;
+	border-radius: 0;
+	background: transparent;
+	box-shadow: none;
+	padding: 14px 0;
+	border-bottom: 1px solid var(--border-soft);
+}
+
+.settings-llm-editor-main > .settings-llm-editor-panel:first-child {
+	padding-top: 14px;
+}
+
+.settings-llm-editor-main > .settings-llm-editor-panel:last-child {
+	border-bottom: 0;
+	padding-bottom: 0;
+}
+
+.settings-llm-layout {
+	gap: 12px;
+	margin-top: 4px;
+}
+
+.settings-llm-sidebar,
+.settings-llm-detail {
+	gap: 12px;
+}
+
+.settings-llm-detail {
+	overflow: hidden;
+	padding: 12px 14px 14px;
+}
+
+.settings-llm-provider-grid {
+	grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+	gap: 6px;
+}
+
+@container settings-main (min-width: 820px) {
+	.settings-llm-layout {
+		grid-template-columns: minmax(220px, 248px) minmax(0, 1fr);
+		align-items: start;
+	}
+
+	.settings-llm-provider-grid {
+		grid-template-columns: minmax(0, 1fr);
+	}
+}
+
+.settings-llm-provider-card {
+	padding: 8px 10px;
+	border-radius: 14px;
+	background: var(--surface-raised);
+}
+
+.settings-llm-provider-card-main {
+	display: grid;
+	width: 100%;
+	gap: 6px;
+}
+
+.settings-llm-provider-card-main .settings-agent-name,
+.settings-llm-provider-card-summary .settings-agent-meta {
+	display: -webkit-box;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+}
+
+.settings-llm-provider-card-main .settings-agent-name {
+	-webkit-line-clamp: 2;
+}
+
+.settings-llm-provider-card-header {
+	align-items: flex-start;
+	gap: 6px;
+}
+
+.settings-llm-provider-card-badges {
+	justify-content: flex-start;
+	gap: 4px 6px;
+}
+
+.settings-llm-provider-card-summary {
+	display: grid;
+	gap: 2px;
+	min-width: 0;
+}
+
+.settings-llm-provider-card-summary .settings-agent-meta {
+	-webkit-line-clamp: 2;
+	overflow-wrap: anywhere;
+}
+
+.settings-llm-provider-card-issue-badge {
+	min-height: 24px;
+	padding: 4px 8px;
+}
+
+.settings-llm-editor-panel > .settings-editor-card-header {
+	padding-bottom: 12px;
+	gap: 6px;
+}
+
+.settings-llm-editor-panel .settings-help-text-tight,
+.settings-llm-editor-panel .settings-agent-meta {
+	max-width: none;
+}
+
+.settings-agent-fields.settings-llm-panel-fields {
+	grid-template-columns: minmax(0, 1fr);
+	gap: 14px;
+}
+
+.settings-agent-fields.settings-llm-panel-fields
+	> .settings-llm-form-row:has(> .settings-select, > .settings-input) {
+	grid-template-columns: clamp(5.75rem, 14%, 7.5rem) minmax(0, 1fr);
+	align-items: start;
+	gap: 8px 12px;
+}
+
+.settings-agent-fields.settings-llm-panel-fields
+	> .settings-llm-form-row:has(> .settings-select, > .settings-input)
+	> :first-child {
+	grid-column: 1;
+	padding-top: 11px;
+}
+
+.settings-agent-fields.settings-llm-panel-fields
+	> .settings-llm-form-row:has(> .settings-select, > .settings-input)
+	> :not(:first-child) {
+	grid-column: 2;
+}
+
+.settings-llm-panel-fields > .settings-llm-field-wide,
+.settings-llm-panel-fields > .settings-llm-model-source,
+.settings-llm-panel-fields > .settings-llm-model-field,
+.settings-llm-panel-fields > .settings-llm-capability-strip {
+	min-width: 0;
+}
+
+.settings-llm-model-source {
+	display: grid;
+	gap: 4px;
+	padding: 0 0 6px;
+	border-bottom: 1px solid var(--border-soft);
+}
+
+.settings-llm-model-switcher {
+	display: grid;
+	gap: 10px;
+	min-width: 0;
+	padding: 0 0 12px;
+	border-bottom: 1px solid var(--border-soft);
+}
+
+.settings-llm-model-switcher-copy {
+	display: grid;
+	gap: 4px;
+	min-width: 0;
+}
+
+.settings-llm-model-switcher-header {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 10px 14px;
+	min-width: 0;
+}
+
+.settings-llm-model-actions {
+	align-items: stretch;
+	flex-direction: row;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+
+.settings-llm-model-list {
+	display: grid;
+	gap: 6px;
+	max-height: min(240px, 34vh);
+	min-width: 0;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	padding-right: 2px;
+}
+
+.settings-llm-model-row {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	align-items: center;
+	gap: 8px 12px;
+	width: 100%;
+	min-height: 48px;
+	padding: 8px 10px;
+	border: 1px solid var(--border-soft);
+	border-radius: 8px;
+	background: var(--surface-raised);
+	color: var(--text-primary);
+	text-align: left;
+	cursor: pointer;
+}
+
+.settings-llm-model-row:hover {
+	background: var(--surface-raised-hover);
+}
+
+.settings-llm-model-row:focus-visible {
+	outline: 2px solid var(--focus-ring);
+	outline-offset: 2px;
+}
+
+.settings-llm-model-row-selected {
+	border-color: var(--border-selected);
+	background: var(--surface-card-selected);
+	color: var(--text-strong);
+}
+
+.settings-llm-model-row-main {
+	display: grid;
+	gap: 3px;
+	min-width: 0;
+}
+
+.settings-llm-model-row-name,
+.settings-llm-model-row-meta {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.settings-llm-model-row-name {
+	font-weight: 650;
+	overflow-wrap: anywhere;
+}
+
+.settings-llm-model-row-meta {
+	color: var(--text-muted);
+	font-size: 12px;
+}
+
+.settings-llm-model-row-badges {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	flex-wrap: wrap;
+	gap: 4px;
+	min-width: 0;
+}
+
+.settings-llm-model-field {
+	grid-template-columns: clamp(5.75rem, 14%, 7.5rem) minmax(0, 1fr);
+	align-items: start;
+	gap: 8px 12px;
+}
+
+.settings-llm-model-field > :first-child {
+	grid-column: 1;
+	padding-top: 11px;
+}
+
+.settings-llm-model-field > :not(:first-child) {
+	grid-column: 2;
+}
+
+.settings-llm-model-picker {
+	position: relative;
+	display: grid;
+	gap: 8px;
+	min-width: 0;
+}
+
+.settings-llm-model-input-row {
+	grid-template-columns: minmax(0, 1fr) auto;
+	gap: 8px;
+}
+
+.settings-llm-model-toggle,
+.settings-llm-model-refresh {
+	min-height: 44px;
+}
+
+.settings-llm-model-panel {
+	position: static;
+	inset: auto;
+	grid-template-rows: auto minmax(0, 1fr);
+	width: 100%;
+	max-height: min(280px, 42vh);
+	overflow: hidden;
+	box-sizing: border-box;
+}
+
+.settings-llm-model-options {
+	display: grid;
+	gap: 8px;
+	min-width: 0;
+	min-height: 0;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	padding-right: 2px;
+}
+
+.settings-llm-mode-links .settings-text-link-action {
+	min-height: 40px;
+}
+
+.settings-llm-mode-links {
+	align-items: flex-start;
+	gap: 6px;
+	margin-top: 2px;
+}
+
+.settings-llm-mode-link {
+	flex: 0 0 auto;
+}
+
+.settings-llm-capability-strip {
+	gap: 10px;
+}
+
+.settings-llm-capability-summary {
+	gap: 6px;
+}
+
+.settings-llm-capability-toggle {
+	padding-top: 10px;
+}
+
+.settings-shortcut-trigger {
+	background: var(--surface-input);
+}

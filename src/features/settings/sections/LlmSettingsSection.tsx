@@ -254,6 +254,52 @@ export function LlmSettingsSection({
 		options[nextIndex]?.focus();
 	}
 
+	function handleProviderModelKeyDown(
+		event: ReactKeyboardEvent<HTMLButtonElement>,
+		modelId: string,
+	) {
+		const navigationKeys = ["ArrowDown", "ArrowRight", "ArrowUp", "ArrowLeft", "Home", "End"];
+		if (!navigationKeys.includes(event.key) || !selectedLlmProvider) {
+			return;
+		}
+
+		const radioGroup = event.currentTarget.closest('[role="radiogroup"]');
+		if (!(radioGroup instanceof HTMLElement)) {
+			return;
+		}
+
+		const radioButtons = Array.from(
+			radioGroup.querySelectorAll<HTMLButtonElement>('[role="radio"]'),
+		);
+		const currentIndex = radioButtons.findIndex((button) => button.dataset.modelId === modelId);
+		if (currentIndex < 0) {
+			return;
+		}
+
+		event.preventDefault();
+		let nextIndex = currentIndex;
+		if (event.key === "Home") {
+			nextIndex = 0;
+		} else if (event.key === "End") {
+			nextIndex = radioButtons.length - 1;
+		} else if (event.key === "ArrowDown" || event.key === "ArrowRight") {
+			nextIndex = (currentIndex + 1) % radioButtons.length;
+		} else if (event.key === "ArrowUp" || event.key === "ArrowLeft") {
+			nextIndex = (currentIndex - 1 + radioButtons.length) % radioButtons.length;
+		}
+
+		const nextButton = radioButtons[nextIndex];
+		const nextModelId = nextButton?.dataset.modelId;
+		if (!nextButton || !nextModelId) {
+			return;
+		}
+
+		onSelectLlmProviderModel(selectedLlmProvider.id, nextModelId);
+		requestAnimationFrame(() => {
+			nextButton.focus();
+		});
+	}
+
 	const pendingModelFocusRef = useRef<{
 		providerId: string;
 		target: "selected" | "first" | "last";
@@ -298,7 +344,7 @@ export function LlmSettingsSection({
 			}
 
 			const selectedOption =
-				options.find((option) => option.getAttribute("aria-pressed") === "true") ?? options[0];
+				options.find((option) => option.getAttribute("aria-selected") === "true") ?? options[0];
 			selectedOption?.focus();
 			return true;
 		}
@@ -340,6 +386,14 @@ export function LlmSettingsSection({
 		);
 	}
 
+	function toDomIdPart(value: string) {
+		return value.replace(/[^a-zA-Z0-9_-]/g, "_");
+	}
+
+	function buildLlmModelOptionId(providerId: string, source: "remote" | "custom", modelId: string) {
+		return `llm-provider-model-option-${source}-${toDomIdPart(providerId)}-${toDomIdPart(modelId)}`;
+	}
+
 	const selectedProviderIssues = selectedLlmProvider
 		? (llmValidation.providerIssues[selectedLlmProvider.id] ?? [])
 		: [];
@@ -351,6 +405,12 @@ export function LlmSettingsSection({
 	const selectedModelPickerId = selectedLlmProvider
 		? buildLlmModelPickerId(selectedLlmProvider.id, "model")
 		: null;
+	const selectedModelMenuId = selectedLlmProvider
+		? `llm-provider-model-menu-${selectedLlmProvider.id}`
+		: undefined;
+	const selectedModelLabelId = selectedLlmProvider
+		? `llm-provider-model-label-${selectedLlmProvider.id}`
+		: undefined;
 	const isSelectedModelPickerOpen =
 		selectedModelPickerId !== null && openLlmModelPickerId === selectedModelPickerId;
 	const templateSupportsModelListing = selectedBuiltinLlmTemplate?.supportsModelListing ?? false;
@@ -411,49 +471,100 @@ export function LlmSettingsSection({
 			model.id.toLowerCase().includes(normalizedLlmModelFilter),
 		);
 	}, [normalizedLlmModelFilter, selectedLlmProviderModels]);
+	const hasVisibleLlmModelOptions = filteredLlmProviderModels.length > 0;
+	const selectedModelControlsId =
+		isSelectedModelPickerOpen && hasVisibleLlmModelOptions ? selectedModelMenuId : undefined;
 	const llmModelPanelSummary =
 		filteredLlmProviderModels.length === selectedLlmProviderModels.length
 			? `远端目录 · 已拉取 ${selectedLlmProviderModels.length} 个模型`
 			: `远端目录 · 显示 ${filteredLlmProviderModels.length} / ${selectedLlmProviderModels.length} 个模型`;
+	const llmModelPanelEmptyMessage = selectedLlmProviderIsBuiltin
+		? selectedLlmProviderModels.length > 0
+			? "没有匹配当前筛选词的模型。改个关键词再试。"
+			: templateSupportsModelListing
+				? "当前还没有远端目录。点上方按钮拉取，或直接手填模型名。"
+				: "当前模板不提供远端目录，请直接手填模型名。"
+		: selectedLlmProviderModels.length > 0
+			? "没有匹配当前筛选词的模型。改个关键词再试。"
+			: "当前服务没有返回可用模型目录。你仍可以手填模型名。";
 	const isLlmModel = selectedLlmProvider
 		? providerIsLlmModel(selectedLlmProvider, selectedProviderModelId)
 		: false;
 	const ocrAvailable = isLlmModel && selectedLlmProviderKind !== "llm_chat_completions";
 
-	function getAvailabilityTone(available: boolean): "success" | "info" | "warn" {
+	function getAvailabilityToneForModel(
+		hasModelName: boolean,
+		available: boolean,
+	): "success" | "info" | "warn" {
 		if (!available) {
 			return "warn";
 		}
 
-		return selectedProviderHasModel ? "success" : "info";
+		return hasModelName ? "success" : "info";
 	}
 
 	const selectedProviderAvailabilityItems = selectedLlmProvider
 		? [
-				{ key: "translation", label: "翻译", tone: getAvailabilityTone(isLlmModel) },
-				{ key: "question-answer", label: "文档问答", tone: getAvailabilityTone(isLlmModel) },
+				{
+					key: "translation",
+					label: "翻译",
+					tone: getAvailabilityToneForModel(selectedProviderHasModel, isLlmModel),
+				},
+				{
+					key: "question-answer",
+					label: "文档问答",
+					tone: getAvailabilityToneForModel(selectedProviderHasModel, isLlmModel),
+				},
 				{
 					key: "ocr",
 					label: "OCR",
-					tone: getAvailabilityTone(ocrAvailable && selectedProviderOcrReady),
+					tone: getAvailabilityToneForModel(
+						selectedProviderHasModel,
+						ocrAvailable && selectedProviderOcrReady,
+					),
 				},
 				{
 					key: "rag-embedding",
 					label: "RAG Embedding",
-					tone: getAvailabilityTone(!isLlmModel),
+					tone: getAvailabilityToneForModel(selectedProviderHasModel, !isLlmModel),
 				},
 			]
 		: [];
-	const modelPanelRef = useCallback((node: HTMLDivElement | null) => {
-		if (!node) {
-			return;
+
+	function getModelAvailabilityItems(modelId: string, hasModelName: boolean) {
+		if (!selectedLlmProvider) {
+			return [];
 		}
 
-		const rect = node.getBoundingClientRect();
-		const available = window.innerHeight - rect.top - 24;
-		node.style.maxHeight = `${Math.max(120, Math.min(260, available))}px`;
-	}, []);
-
+		const modelIsLlm = providerIsLlmModel(selectedLlmProvider, modelId);
+		const modelKind = getLlmProviderKind(selectedLlmProvider, modelId);
+		const modelCanHandleOcr =
+			modelIsLlm &&
+			modelKind !== "llm_chat_completions" &&
+			providerCanHandleOcr(selectedLlmProvider, modelId);
+		return [
+			{
+				key: "translation",
+				label: "翻译",
+				tone: getAvailabilityToneForModel(hasModelName, modelIsLlm),
+			},
+			{
+				key: "question-answer",
+				label: "问答",
+				tone: getAvailabilityToneForModel(hasModelName, modelIsLlm),
+			},
+			{
+				key: "ocr",
+				label: "OCR",
+				tone: getAvailabilityToneForModel(hasModelName, modelCanHandleOcr),
+			},
+			{
+				key: "rag-embedding",
+				label: "RAG",
+				tone: getAvailabilityToneForModel(hasModelName, !modelIsLlm),
+			},
+		];
+	}
 	useEffect(() => {
 		setLlmModelFilter("");
 		setConfirmingDeleteId(null);
@@ -693,21 +804,19 @@ export function LlmSettingsSection({
 										<div className="settings-rag-editor-panel settings-llm-editor-panel">
 											<div className="settings-editor-card-header settings-task-card-header">
 												<div className="settings-acp-detail-copy">
-													<span className="settings-section-kicker">接入模式</span>
 													<div className="settings-task-card-title-row">
-														<strong className="settings-agent-name">供应商预设与连接</strong>
+														<strong className="settings-agent-name">连接信息</strong>
 														<span className="settings-status-chip">
 															{selectedLlmProviderIsBuiltin ? "使用预设" : "手动接入"}
 														</span>
 													</div>
-													<span className="settings-help-text settings-help-text-tight">
-														先确认服务入口和密钥；模型在下一段维护。
-													</span>
 												</div>
 											</div>
 											<div className="settings-agent-fields settings-llm-panel-fields">
-												<label className="settings-label settings-label-stacked settings-llm-form-row settings-llm-field-wide">
-													<span>供应商预设</span>
+												<div className="settings-field-row settings-llm-form-row settings-llm-field-wide">
+													<label className="settings-field-label" htmlFor="llm-provider-template">
+														供应商预设
+													</label>
 													<select
 														className="settings-select"
 														disabled={savingLlm}
@@ -757,10 +866,12 @@ export function LlmSettingsSection({
 															</button>
 														</div>
 													) : null}
-												</label>
+												</div>
 
-												<label className="settings-label settings-label-stacked settings-llm-form-row">
-													<span>名称</span>
+												<div className="settings-field-row settings-llm-form-row">
+													<label className="settings-field-label" htmlFor="llm-provider-name">
+														名称
+													</label>
 													<input
 														aria-describedby={joinDescribedByIds(
 															selectedLlmFieldIssues.name
@@ -786,10 +897,12 @@ export function LlmSettingsSection({
 														buildFieldIssueId("llm", "name", selectedLlmProvider.id),
 														selectedLlmFieldIssues.name,
 													)}
-												</label>
+												</div>
 
-												<label className="settings-label settings-label-stacked settings-llm-form-row settings-llm-field-wide">
-													<span>API Base URL</span>
+												<div className="settings-field-row settings-llm-form-row settings-llm-field-wide">
+													<label className="settings-field-label" htmlFor="llm-provider-base-url">
+														API Base URL
+													</label>
 													<input
 														aria-describedby={joinDescribedByIds(
 															selectedLlmFieldIssues.baseUrl
@@ -856,10 +969,12 @@ export function LlmSettingsSection({
 														buildFieldIssueId("llm", "base-url", selectedLlmProvider.id),
 														selectedLlmFieldIssues.baseUrl,
 													)}
-												</label>
+												</div>
 
-												<label className="settings-label settings-label-stacked settings-llm-form-row">
-													<span>API Key</span>
+												<div className="settings-field-row settings-llm-form-row">
+													<label className="settings-field-label" htmlFor="llm-provider-api-key">
+														API Key
+													</label>
 													<input
 														aria-describedby="llm-provider-api-key-help"
 														autoComplete="off"
@@ -883,16 +998,15 @@ export function LlmSettingsSection({
 													>
 														只保存在本地配置；本地网关可以留空。
 													</span>
-												</label>
+												</div>
 											</div>
 										</div>
 
 										<div className="settings-rag-editor-panel settings-llm-editor-panel">
 											<div className="settings-editor-card-header settings-task-card-header">
 												<div className="settings-acp-detail-copy">
-													<span className="settings-section-kicker">当前模型</span>
 													<div className="settings-task-card-title-row">
-														<strong className="settings-agent-name">模型、调用方式与用途</strong>
+														<strong className="settings-agent-name">模型与用途</strong>
 														<span className="settings-status-chip">
 															{selectedLlmProvider.models.length} 个模型
 														</span>
@@ -901,80 +1015,123 @@ export function LlmSettingsSection({
 											</div>
 											<div className="settings-agent-fields settings-llm-panel-fields">
 												<div className="settings-llm-model-switcher">
-													<div className="settings-llm-model-switcher-copy">
-														<strong className="settings-agent-name">组内模型</strong>
-														<span className="settings-agent-meta">
-															翻译、问答、OCR 和 RAG 都引用具体模型 ID。
-														</span>
-													</div>
-													<div className="settings-inline-actions settings-llm-model-actions">
-														{selectedLlmProvider.models.map((model) => (
+													<div className="settings-llm-model-switcher-header">
+														<div className="settings-llm-model-switcher-copy">
+															<span className="settings-agent-meta">
+																组内模型会作为翻译、问答、OCR 或 RAG 的可选条目。
+															</span>
+														</div>
+														<div className="settings-inline-actions settings-llm-model-actions">
 															<button
-																className={`settings-button settings-llm-model-tab ${
-																	model.id === selectedProviderModelId
-																		? "settings-llm-model-tab-selected"
-																		: "settings-agent-secondary"
-																}`}
-																key={model.id}
-																onClick={() =>
-																	onSelectLlmProviderModel(selectedLlmProvider.id, model.id)
-																}
-																type="button"
-															>
-																{model.model.trim() || "未命名模型"}
-															</button>
-														))}
-														<button
-															className="settings-button settings-agent-secondary settings-llm-model-tab"
-															disabled={savingLlm}
-															onClick={() => onAddLlmProviderModel(selectedLlmProvider.id)}
-															type="button"
-														>
-															新增模型
-														</button>
-														{selectedLlmProvider.models.length > 1 && selectedProviderModelId ? (
-															<button
-																className="settings-text-link settings-text-link-action settings-text-link-action-quiet settings-text-link-danger"
+																className="settings-button settings-agent-secondary"
 																disabled={savingLlm}
-																onClick={() =>
-																	onRemoveLlmProviderModel(
-																		selectedLlmProvider.id,
-																		selectedProviderModelId,
-																	)
-																}
+																onClick={() => onAddLlmProviderModel(selectedLlmProvider.id)}
 																type="button"
 															>
-																删除当前模型
+																新增模型
 															</button>
-														) : null}
+															{selectedLlmProvider.models.length > 1 && selectedProviderModelId ? (
+																<button
+																	className="settings-text-link settings-text-link-action settings-text-link-action-quiet settings-text-link-danger"
+																	disabled={savingLlm}
+																	onClick={() =>
+																		onRemoveLlmProviderModel(
+																			selectedLlmProvider.id,
+																			selectedProviderModelId,
+																		)
+																	}
+																	type="button"
+																>
+																	删除当前模型
+																</button>
+															) : null}
+														</div>
+													</div>
+													<div
+														aria-label="Provider 组内模型"
+														className="settings-llm-model-list"
+														role="radiogroup"
+													>
+														{selectedLlmProvider.models.map((model) => {
+															const modelName = model.model.trim();
+															const modelKind = getLlmProviderKind(selectedLlmProvider, model.id);
+															const modelAvailabilityItems = getModelAvailabilityItems(
+																model.id,
+																Boolean(modelName),
+															);
+															return (
+																<button
+																	aria-checked={model.id === selectedProviderModelId}
+																	className={`settings-llm-model-row ${
+																		model.id === selectedProviderModelId
+																			? "settings-llm-model-row-selected"
+																			: ""
+																	}`}
+																	data-model-id={model.id}
+																	key={model.id}
+																	onClick={() =>
+																		onSelectLlmProviderModel(selectedLlmProvider.id, model.id)
+																	}
+																	onKeyDown={(event) => handleProviderModelKeyDown(event, model.id)}
+																	role="radio"
+																	tabIndex={model.id === selectedProviderModelId ? 0 : -1}
+																	type="button"
+																>
+																	<span className="settings-llm-model-row-main">
+																		<span className="settings-llm-model-row-name">
+																			{modelName || "未命名模型"}
+																		</span>
+																		<span className="settings-llm-model-row-meta">
+																			{modelName ? model.id : "模型名未填写"} ·{" "}
+																			{getLlmProviderKindLabel(modelKind)}
+																		</span>
+																	</span>
+																	<span className="settings-llm-model-row-badges">
+																		{model.id === selectedProviderModelId ? (
+																			<span className="settings-status-chip">当前</span>
+																		) : null}
+																		{modelAvailabilityItems
+																			.filter((item) => item.tone !== "warn")
+																			.map((item) => (
+																				<span
+																					className={`settings-status-chip settings-status-chip-${item.tone}`}
+																					key={item.key}
+																				>
+																					{item.label}
+																				</span>
+																			))}
+																	</span>
+																</button>
+															);
+														})}
 													</div>
 												</div>
 												<div className="settings-llm-model-source">
 													<strong className="settings-agent-name">{modelSourceTitle}</strong>
 													<span className="settings-agent-meta">{modelSourceDescription}</span>
 												</div>
-												<label
-													className="settings-label settings-label-stacked settings-llm-form-row settings-llm-model-field"
-													htmlFor="llm-provider-model"
-													id={`llm-provider-model-label-${selectedLlmProvider.id}`}
-												>
-													<span>模型名</span>
+												<div className="settings-field-row settings-llm-form-row settings-llm-model-field">
+													<label
+														className="settings-field-label"
+														htmlFor="llm-provider-model"
+														id={selectedModelLabelId}
+													>
+														模型名
+													</label>
 													<div className="settings-llm-model-picker" ref={llmModelMenuRef}>
 														<div className="settings-llm-model-input-row">
 															<input
-																aria-controls={
-																	isSelectedModelPickerOpen
-																		? `llm-provider-model-menu-${selectedLlmProvider.id}`
-																		: undefined
-																}
+																aria-autocomplete="list"
+																aria-controls={selectedModelControlsId}
 																aria-describedby={joinDescribedByIds(
 																	selectedLlmFieldIssues.model
 																		? buildFieldIssueId("llm", "model", selectedLlmProvider.id)
 																		: undefined,
 																	"llm-provider-model-help",
 																)}
+																aria-expanded={isSelectedModelPickerOpen}
 																aria-invalid={selectedLlmFieldIssues.model ? true : undefined}
-																aria-labelledby={`llm-provider-model-label-${selectedLlmProvider.id}`}
+																aria-labelledby={selectedModelLabelId}
 																className="settings-input settings-input-wide settings-input-mono"
 																disabled={savingLlm}
 																id="llm-provider-model"
@@ -993,12 +1150,14 @@ export function LlmSettingsSection({
 																	selectedProviderModelId,
 																)}
 																ref={bindLlmFieldRef(selectedLlmProvider.id, "model")}
+																role="combobox"
 																type="text"
 																value={selectedProviderModel?.model ?? ""}
 															/>
 															<button
-																aria-controls={`llm-provider-model-menu-${selectedLlmProvider.id}`}
+																aria-controls={selectedModelControlsId}
 																aria-expanded={isSelectedModelPickerOpen}
+																aria-haspopup="listbox"
 																aria-label={
 																	selectedLlmProviderIsBuiltin
 																		? selectedLlmProviderModels.length > 0
@@ -1049,12 +1208,8 @@ export function LlmSettingsSection({
 														)}
 														{isSelectedModelPickerOpen ? (
 															<div
-																aria-labelledby={`llm-provider-model-label-${selectedLlmProvider.id}`}
 																className="settings-combobox-panel settings-llm-model-panel"
 																data-llm-model-panel
-																id={`llm-provider-model-menu-${selectedLlmProvider.id}`}
-																ref={modelPanelRef}
-																role="region"
 															>
 																<div className="settings-llm-model-panel-header">
 																	<div className="settings-llm-model-panel-header-copy">
@@ -1088,103 +1243,72 @@ export function LlmSettingsSection({
 																		</button>
 																	)}
 																</div>
-																{selectedLlmProviderIsBuiltin ? (
-																	filteredLlmProviderModels.length > 0 ? (
-																		filteredLlmProviderModels.map((model) => (
-																			<button
-																				aria-pressed={selectedProviderModel?.model === model.id}
-																				className={`settings-combobox-option settings-llm-model-option ${
-																					selectedProviderModel?.model === model.id
-																						? "settings-combobox-option-active"
-																						: ""
-																				}`}
-																				data-llm-model-option
-																				id={`llm-provider-model-option-remote-${selectedLlmProvider.id}-${model.id}`}
-																				key={`remote-${model.id}`}
-																				onClick={() =>
-																					onLlmModelOptionClick(
+																{hasVisibleLlmModelOptions ? (
+																	<div
+																		aria-labelledby={selectedModelLabelId}
+																		className="settings-llm-model-options"
+																		id={selectedModelMenuId}
+																		role="listbox"
+																	>
+																		{filteredLlmProviderModels.map((model) => {
+																			const isCurrentModel =
+																				selectedProviderModel?.model === model.id;
+																			const modelOptionSource = selectedLlmProviderIsBuiltin
+																				? "remote"
+																				: "custom";
+																			return (
+																				<button
+																					aria-selected={isCurrentModel}
+																					className={`settings-combobox-option settings-llm-model-option ${
+																						isCurrentModel ? "settings-combobox-option-active" : ""
+																					}`}
+																					data-llm-model-option
+																					id={buildLlmModelOptionId(
 																						selectedLlmProvider.id,
-																						"model",
-																						model,
-																					)
-																				}
-																				onKeyDown={handleLlmModelOptionKeyDown}
-																				onMouseDown={(event) => event.preventDefault()}
-																				tabIndex={-1}
-																				type="button"
-																			>
-																				<span className="settings-combobox-option-label">
-																					{model.id}
-																				</span>
-																				<span className="settings-combobox-option-meta">
-																					{selectedProviderModel?.model === model.id
-																						? "当前已填入输入框"
-																						: "来自当前服务目录"}
-																				</span>
-																			</button>
-																		))
-																	) : selectedLlmProviderModels.length > 0 ? (
-																		<div className="settings-llm-model-panel-empty">
-																			没有匹配当前筛选词的模型。改个关键词再试。
-																		</div>
-																	) : templateSupportsModelListing ? (
-																		<div className="settings-llm-model-panel-empty">
-																			当前还没有远端目录。点上方按钮拉取，或直接手填模型名。
-																		</div>
-																	) : (
-																		<div className="settings-llm-model-panel-empty">
-																			当前模板不提供远端目录，请直接手填模型名。
-																		</div>
-																	)
-																) : filteredLlmProviderModels.length > 0 ? (
-																	filteredLlmProviderModels.map((model) => (
-																		<button
-																			aria-pressed={selectedProviderModel?.model === model.id}
-																			className={`settings-combobox-option settings-llm-model-option ${
-																				selectedProviderModel?.model === model.id
-																					? "settings-combobox-option-active"
-																					: ""
-																			}`}
-																			data-llm-model-option
-																			id={`llm-provider-model-option-${selectedLlmProvider.id}-${model.id}`}
-																			key={model.id}
-																			onClick={() =>
-																				onLlmModelOptionClick(
-																					selectedLlmProvider.id,
-																					"model",
-																					model,
-																				)
-																			}
-																			onKeyDown={handleLlmModelOptionKeyDown}
-																			onMouseDown={(event) => event.preventDefault()}
-																			tabIndex={-1}
-																			type="button"
-																		>
-																			<span className="settings-combobox-option-label">
-																				{model.id}
-																			</span>
-																			<span className="settings-combobox-option-meta">
-																				{selectedProviderModel?.model === model.id
-																					? "当前已填入输入框"
-																					: "点击填入输入框"}
-																			</span>
-																		</button>
-																	))
-																) : selectedLlmProviderModels.length > 0 ? (
-																	<div className="settings-llm-model-panel-empty">
-																		没有匹配当前筛选词的模型。改个关键词再试。
+																						modelOptionSource,
+																						model.id,
+																					)}
+																					key={`${modelOptionSource}-${model.id}`}
+																					onClick={() =>
+																						onLlmModelOptionClick(
+																							selectedLlmProvider.id,
+																							"model",
+																							model,
+																						)
+																					}
+																					onKeyDown={handleLlmModelOptionKeyDown}
+																					onMouseDown={(event) => event.preventDefault()}
+																					role="option"
+																					tabIndex={-1}
+																					type="button"
+																				>
+																					<span className="settings-combobox-option-label">
+																						{model.id}
+																					</span>
+																					<span className="settings-combobox-option-meta">
+																						{isCurrentModel
+																							? "当前已填入输入框"
+																							: selectedLlmProviderIsBuiltin
+																								? "来自当前服务目录"
+																								: "点击填入输入框"}
+																					</span>
+																				</button>
+																			);
+																		})}
 																	</div>
 																) : (
-																	<div className="settings-llm-model-panel-empty">
-																		当前服务没有返回可用模型目录。你仍可以手填模型名。
+																	<div className="settings-llm-model-panel-empty" role="status">
+																		{llmModelPanelEmptyMessage}
 																	</div>
 																)}
 															</div>
 														) : null}
 													</div>
-												</label>
-												<label className="settings-label settings-label-stacked settings-llm-form-row">
-													<span>调用方式</span>
+												</div>
+												<div className="settings-field-row settings-llm-form-row">
+													<label className="settings-field-label" htmlFor="llm-provider-kind">
+														调用方式
+													</label>
 													<select
 														className="settings-select"
 														disabled={savingLlm || Boolean(selectedBuiltinLlmTemplateModel)}
@@ -1207,7 +1331,7 @@ export function LlmSettingsSection({
 													<span className="settings-help-text settings-help-text-tight">
 														{providerKindSummary}
 													</span>
-												</label>
+												</div>
 												{providerIsLlmModel(selectedLlmProvider, selectedProviderModelId) &&
 												selectedLlmProviderKind !== "llm_chat_completions" ? (
 													<label className="settings-llm-capability-toggle">

@@ -94,11 +94,15 @@ export function RagSettingsSection({
 				>
 					<div className="settings-rag-summary-panel">
 						<div className="settings-rag-summary-header">
-							<span className="settings-section-kicker">当前配置</span>
-							<strong className="settings-agent-name">索引配置</strong>
-							<span className="settings-help-text settings-help-text-tight">
-								这里只配 Embedding、扫描目录和忽略规则。
-							</span>
+							<div className="settings-rag-summary-title-row">
+								<strong className="settings-agent-name">当前配置</strong>
+								<span
+									className={`settings-status-chip ${ragHasUnsavedChanges ? "settings-status-chip-strong" : ""}`}
+								>
+									{ragStatusTitle}
+								</span>
+							</div>
+							<span className="settings-rag-toolbar-note">{ragStatusDescription}</span>
 						</div>
 						<div className="settings-rag-summary-current">
 							<span className="settings-rag-summary-current-label">当前 Embedding</span>
@@ -195,16 +199,10 @@ export function RagSettingsSection({
 					id="rag-pipeline"
 					ref={bindSectionBlockRef("rag-pipeline")}
 				>
-					<div className="settings-rag-toolbar">
-						<div className="settings-rag-toolbar-heading">
-							<span className="settings-section-kicker">索引配置</span>
-							<span
-								className={`settings-status-chip ${ragHasUnsavedChanges ? "settings-status-chip-strong" : ""}`}
-							>
-								{ragStatusTitle}
-							</span>
-							<span className="settings-rag-toolbar-note">{ragStatusDescription}</span>
-						</div>
+					<div
+						aria-label="RAG 配置操作"
+						className="settings-rag-toolbar settings-rag-toolbar-compact"
+					>
 						<div className="settings-rag-toolbar-actions">
 							{ragValidation.totalIssues > 0 ? (
 								<button

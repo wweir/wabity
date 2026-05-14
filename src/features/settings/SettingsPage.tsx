@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { LauncherPinButton } from "../../app/LauncherPinButton";
 import {
 	chooseDirectory,
 	getAppSettings,
@@ -147,11 +148,18 @@ import { useSettingsSectionNavigation } from "./useSettingsSectionNavigation";
 import "./settings.css";
 
 interface SettingsPageProps {
+	launcherPinned?: boolean;
 	onBack: () => void;
 	onAppearanceChange?: (appearance: AppearanceSettings) => void;
+	onLauncherPinnedChange?: (pinned: boolean) => void | Promise<void>;
 }
 
-export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) {
+export function SettingsPage({
+	launcherPinned = false,
+	onBack,
+	onAppearanceChange,
+	onLauncherPinnedChange,
+}: SettingsPageProps) {
 	const [activeSection, setActiveSection] = useState<SettingsSectionId>("general");
 	const [translationPromptExpanded, setTranslationPromptExpanded] = useState(false);
 	const [questionAnswerPromptExpanded, setQuestionAnswerPromptExpanded] = useState(false);
@@ -406,7 +414,7 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 			}
 
 			const selectedOption =
-				options.find((option) => option.getAttribute("aria-pressed") === "true") ?? options[0];
+				options.find((option) => option.getAttribute("aria-selected") === "true") ?? options[0];
 			selectedOption?.focus();
 		});
 	}
@@ -652,39 +660,35 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 
 	// Load initial shortcut config
 	useEffect(() => {
-		void listBuiltinLlmProviderTemplates()
-			.then((templates) => {
+		void Promise.all([listBuiltinLlmProviderTemplates().catch(() => []), getAppSettings()]).then(
+			([templates, settings]) => {
 				setBuiltinLlmTemplates(templates);
-			})
-			.catch(() => {
-				setBuiltinLlmTemplates([]);
-			});
-		void getAppSettings().then((settings) => {
-			const nextLlmSettings = reconcileLlmSettings(settings.llm);
-			setGeneralSettings(settings.general);
-			setNotificationSettings(settings.notification);
-			syncAppearanceState(settings.appearance);
-			setPromptsSettings(settings.prompts);
-			setLlmSettings(nextLlmSettings);
-			setSelectedLlmProviderId(nextLlmSettings.providers[0]?.id ?? null);
-			setSavedLlmSnapshot(buildLlmDraftSnapshot(nextLlmSettings));
-			setSavedLlmState(buildSavedLlmDraftState(nextLlmSettings.providers));
-			setLlmModelOptions({});
-			setLlmModelErrors({});
-			setLoadingLlmModelProviderId(null);
-			setOpenLlmModelPickerId(null);
-			setOcrSettings(settings.ocr);
-			const nextRagSettings = reconcileRagSettings(settings.rag, nextLlmSettings.providers);
-			setRagSettings(nextRagSettings);
-			setSavedRagSnapshot(buildRagDraftSnapshot(nextRagSettings));
-			setSavedRagState(buildSavedRagDraftState(nextRagSettings));
-			setRagScanResult(null);
-			setPersistedAppSettings({
-				...settings,
-				llm: nextLlmSettings,
-				rag: nextRagSettings,
-			});
-		});
+				const nextLlmSettings = reconcileLlmSettings(settings.llm, templates);
+				setGeneralSettings(settings.general);
+				setNotificationSettings(settings.notification);
+				syncAppearanceState(settings.appearance);
+				setPromptsSettings(settings.prompts);
+				setLlmSettings(nextLlmSettings);
+				setSelectedLlmProviderId(nextLlmSettings.providers[0]?.id ?? null);
+				setSavedLlmSnapshot(buildLlmDraftSnapshot(nextLlmSettings));
+				setSavedLlmState(buildSavedLlmDraftState(nextLlmSettings.providers));
+				setLlmModelOptions({});
+				setLlmModelErrors({});
+				setLoadingLlmModelProviderId(null);
+				setOpenLlmModelPickerId(null);
+				setOcrSettings(settings.ocr);
+				const nextRagSettings = reconcileRagSettings(settings.rag, nextLlmSettings.providers);
+				setRagSettings(nextRagSettings);
+				setSavedRagSnapshot(buildRagDraftSnapshot(nextRagSettings));
+				setSavedRagState(buildSavedRagDraftState(nextRagSettings));
+				setRagScanResult(null);
+				setPersistedAppSettings({
+					...settings,
+					llm: nextLlmSettings,
+					rag: nextRagSettings,
+				});
+			},
+		);
 		void getShortcut().then((config) => {
 			setShortcutSettings(config);
 		});
@@ -1765,6 +1769,13 @@ export function SettingsPage({ onBack, onAppearanceChange }: SettingsPageProps) 
 						className="settings-header-drag-zone"
 						onMouseDown={handleHeaderDragStart}
 					/>
+					{onLauncherPinnedChange ? (
+						<LauncherPinButton
+							className="settings-pin-button"
+							pinned={launcherPinned}
+							onToggle={() => void onLauncherPinnedChange(!launcherPinned)}
+						/>
+					) : null}
 					<button
 						className="settings-close-button"
 						onClick={() => void hideLauncherWindow()}

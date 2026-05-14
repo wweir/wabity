@@ -2,7 +2,7 @@ import { currentMonitor } from "@tauri-apps/api/window";
 import { type RefObject, useEffect, useLayoutEffect, useState } from "react";
 import { isDesktopRuntimeAvailable, resizeLauncherWindow } from "../../lib/tauri/client";
 
-const preferredSettingsFrameWidth = 920;
+const preferredSettingsFrameWidth = 1080;
 const preferredSettingsFrameHeight = 720;
 const minimumSettingsFrameWidth = 360;
 const minimumSettingsFrameHeight = 320;

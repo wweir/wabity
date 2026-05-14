@@ -1,0 +1,294 @@
+@container settings-shortcuts (max-width: 760px) {
+	.settings-shortcut-field {
+		grid-template-columns: minmax(0, 1fr);
+		gap: 10px;
+		align-items: stretch;
+	}
+}
+
+@media (max-width: 720px) {
+	.settings-editor-card:has(> .settings-item),
+	.settings-llm-editor-panel,
+	.settings-rag-editor-panel,
+	.settings-agent-fields {
+		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.settings-item-stacked:has(> .settings-select),
+	.settings-item-stacked:has(> .settings-input),
+	.settings-item-stacked:has(> .settings-combobox),
+	.settings-label:has(> .settings-select),
+	.settings-label:has(> .settings-combobox),
+	.settings-label-stacked:has(> .settings-select),
+	.settings-label-stacked:has(> .settings-input),
+	.settings-label-stacked:has(> .settings-combobox) {
+		grid-template-columns: minmax(0, 1fr);
+		gap: 8px;
+	}
+
+	.settings-item-stacked:has(> .settings-select) > .settings-label-stacked,
+	.settings-item-stacked:has(> .settings-input) > .settings-label-stacked,
+	.settings-item-stacked:has(> .settings-combobox) > .settings-label-stacked,
+	.settings-item-stacked:has(> .settings-select) > :not(.settings-label-stacked),
+	.settings-item-stacked:has(> .settings-input) > :not(.settings-label-stacked),
+	.settings-item-stacked:has(> .settings-combobox) > :not(.settings-label-stacked),
+	.settings-label-stacked:has(> .settings-select) > :first-child,
+	.settings-label-stacked:has(> .settings-input) > :first-child,
+	.settings-label-stacked:has(> .settings-combobox) > :first-child,
+	.settings-label-stacked:has(> .settings-select) > :not(:first-child),
+	.settings-label-stacked:has(> .settings-input) > :not(:first-child),
+	.settings-label-stacked:has(> .settings-combobox) > :not(:first-child),
+	.settings-llm-model-field > :first-child,
+	.settings-llm-model-field > :not(:first-child) {
+		grid-column: 1;
+	}
+
+	.settings-jump-list {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.settings-main-header {
+		flex-direction: column;
+		align-items: stretch;
+	}
+
+	.settings-general-card-actions-end {
+		justify-content: stretch;
+	}
+
+	.settings-general-card-actions-end > .settings-button {
+		width: 100%;
+		justify-content: center;
+	}
+
+	.settings-main-header .settings-jump-list-compact {
+		margin-left: 0;
+	}
+
+	.settings-draft-action-actions {
+		flex-direction: column;
+		align-items: stretch;
+	}
+
+	.settings-draft-action-actions {
+		width: 100%;
+		justify-content: stretch;
+	}
+
+	.settings-nav {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.settings-shell {
+		min-width: 0;
+	}
+
+	.settings-frame {
+		--radius-frame: 22px;
+		min-width: 0;
+		max-width: 100%;
+	}
+
+	.settings-acp-preset-layout {
+		grid-template-columns: 1fr;
+	}
+
+	.settings-acp-sidebar,
+	.settings-acp-detail,
+	.settings-editor-card,
+	.settings-rag-sidebar,
+	.settings-rag-detail,
+	.settings-empty-panel,
+	.settings-editor-card-subtle {
+		scroll-margin-top: 132px;
+	}
+
+	.settings-main {
+		padding-right: 0;
+	}
+
+	.settings-mcp-layout,
+	.settings-ai-task-grid,
+	.settings-llm-layout,
+	.settings-llm-editor-grid,
+	.settings-llm-empty-steps,
+	.settings-rag-layout,
+	.settings-rag-editor-grid,
+	.settings-rag-scan-grid {
+		grid-template-columns: 1fr;
+	}
+
+	.settings-llm-provider-grid {
+		grid-template-columns: 1fr;
+	}
+
+	.settings-catalog-grid-3 {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.settings-mcp-builtin-toggle-row {
+		grid-template-columns: minmax(0, 1fr);
+		align-items: start;
+	}
+
+	.settings-mcp-builtin-modules {
+		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.settings-acp-sidebar-header,
+	.settings-acp-detail-header,
+	.settings-editor-card-header,
+	.settings-rag-toolbar {
+		flex-direction: column;
+	}
+
+	.settings-llm-toolbar-actions {
+		width: 100%;
+		margin-left: 0;
+		justify-content: flex-start;
+	}
+
+	.settings-mcp-toolbar-actions {
+		width: 100%;
+		margin-left: 0;
+		justify-content: flex-start;
+	}
+
+	.settings-llm-model-panel-header {
+		flex-direction: column;
+		align-items: stretch;
+	}
+
+	.settings-llm-model-switcher-header,
+	.settings-llm-model-row {
+		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.settings-llm-model-switcher-header {
+		display: grid;
+		align-items: stretch;
+	}
+
+	.settings-llm-model-row-badges {
+		justify-content: flex-start;
+	}
+
+	.settings-agent-fields.settings-mcp-panel-fields
+		> .settings-mcp-form-row:has(> .settings-select, > .settings-input),
+	.settings-mcp-static-row,
+	.settings-mcp-create-field:has(> .settings-select) {
+		grid-template-columns: minmax(0, 1fr);
+		gap: 8px;
+	}
+
+	.settings-agent-fields.settings-mcp-panel-fields
+		> .settings-mcp-form-row:has(> .settings-select, > .settings-input)
+		> :first-child,
+	.settings-agent-fields.settings-mcp-panel-fields
+		> .settings-mcp-form-row:has(> .settings-select, > .settings-input)
+		> :not(:first-child),
+	.settings-mcp-create-field:has(> .settings-select) > :first-child,
+	.settings-mcp-create-field:has(> .settings-select) > :not(:first-child) {
+		grid-column: 1;
+	}
+
+	.settings-agent-fields.settings-llm-panel-fields
+		> .settings-llm-form-row:has(> .settings-select, > .settings-input),
+	.settings-llm-model-field {
+		grid-template-columns: minmax(0, 1fr);
+		gap: 8px;
+	}
+
+	.settings-acp-preset-controls {
+		grid-template-columns: 1fr;
+	}
+
+	.settings-inline-actions {
+		width: 100%;
+	}
+
+	.settings-task-field-header {
+		flex-direction: column;
+		align-items: stretch;
+	}
+
+	.settings-task-card-actions {
+		align-items: stretch;
+	}
+
+	.settings-task-card-secondary-actions {
+		width: 100%;
+	}
+
+	.settings-task-card-save {
+		align-self: flex-start;
+	}
+
+	.settings-agent-secondary,
+	.settings-agent-remove,
+	.settings-button {
+		flex: 1 1 0;
+		justify-content: center;
+	}
+}
+
+@media (max-width: 640px) {
+	.settings-layout {
+		grid-template-columns: 1fr;
+		grid-template-rows: auto minmax(0, 1fr);
+	}
+
+	.settings-sidebar {
+		overflow: visible;
+	}
+
+	.settings-nav-rail {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.settings-mcp-catalog-actions > .settings-button {
+		width: 100%;
+	}
+}
+
+@media (max-width: 560px) {
+	.settings-header {
+		padding: 13px 14px 10px;
+	}
+
+	.settings-content {
+		padding: 10px 12px 12px;
+	}
+
+	.settings-nav-rail,
+	.settings-nav {
+		grid-template-columns: 1fr;
+	}
+
+	.settings-main-title {
+		font-size: clamp(22px, 20px + 0.4vw, 26px);
+	}
+
+	.settings-jump-button,
+	.settings-nav-button,
+	.settings-button,
+	.settings-agent-secondary,
+	.settings-agent-remove,
+	.settings-llm-model-toggle,
+	.settings-llm-model-refresh {
+		min-height: 44px;
+	}
+
+	.settings-catalog-grid-3 {
+		grid-template-columns: 1fr;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.settings-shell *,
+	.settings-shell *::before,
+	.settings-shell *::after {
+		animation: none !important;
+		transition: none !important;
+	}
+}

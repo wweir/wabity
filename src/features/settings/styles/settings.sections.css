@@ -1,0 +1,746 @@
+.settings-section {
+	display: grid;
+	gap: 16px;
+	padding: 0 0 8px;
+}
+
+.settings-draft-action-card {
+	gap: 10px;
+}
+
+.settings-draft-action-copy {
+	display: grid;
+	gap: 4px;
+	min-width: 0;
+}
+
+.settings-draft-action-title {
+	color: var(--text-strong);
+	font-size: var(--text-md);
+}
+
+.settings-draft-action-actions {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+	gap: 8px;
+	flex-shrink: 0;
+}
+
+.settings-draft-action-card.settings-draft-action-card-acp > .settings-editor-card-header {
+	flex-direction: column;
+	align-items: stretch;
+	gap: 12px;
+}
+
+.settings-draft-action-card.settings-draft-action-card-acp .settings-draft-action-actions {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+	width: 100%;
+	justify-content: stretch;
+}
+
+.settings-draft-action-card.settings-draft-action-card-acp .settings-draft-action-actions > * {
+	min-width: 0;
+}
+
+.settings-ai-task-grid {
+	display: grid;
+	gap: 16px;
+	grid-template-columns: minmax(0, 1fr);
+	align-items: start;
+}
+
+.settings-task-card {
+	gap: 0;
+	grid-template-columns: minmax(0, 1fr);
+}
+
+.settings-task-card-header {
+	display: grid;
+	gap: 8px;
+	padding-bottom: 16px;
+	border-bottom: 1px solid var(--border-soft);
+}
+
+.settings-task-card-title-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+}
+
+.settings-task-field-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+}
+
+.settings-task-field-header .settings-label {
+	width: auto;
+}
+
+.settings-task-toggle-button {
+	width: auto;
+	align-self: flex-start;
+}
+
+.settings-task-prompt-panel {
+	display: grid;
+	gap: 8px;
+}
+
+.settings-task-prompt-textarea {
+	min-height: 9rem;
+}
+
+.settings-task-card-actions {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px 12px;
+}
+
+.settings-task-card-secondary-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.settings-task-secondary-action {
+	flex: 0 0 auto;
+}
+
+.settings-task-card-save {
+	flex: 0 0 auto;
+	min-width: clamp(9.5rem, 8.8rem + 2vw, 12rem);
+}
+
+.settings-llm-empty-state {
+	gap: 16px;
+}
+
+.settings-llm-empty-steps {
+	display: grid;
+	gap: 10px;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.settings-llm-empty-step {
+	display: grid;
+	gap: 4px;
+	padding: 12px 14px;
+	border: 1px solid var(--border-soft);
+	border-radius: var(--radius-control);
+	background: color-mix(in srgb, var(--surface-card) 86%, var(--surface-panel));
+}
+
+.settings-llm-provider-card-main {
+	appearance: none;
+	display: grid;
+	gap: 14px;
+	width: 100%;
+	padding: 0;
+	border: 0;
+	background: transparent;
+	color: inherit;
+	font: inherit;
+	text-align: left;
+	cursor: pointer;
+}
+
+.settings-llm-provider-card-main:focus-visible {
+	outline: 2px solid var(--focus-ring);
+	outline-offset: 4px;
+}
+
+.settings-section-kicker {
+	color: var(--text-muted);
+	font-size: var(--text-2xs);
+}
+
+.settings-subsection-title {
+	color: var(--text-strong);
+	font-size: clamp(18px, 17px + 0.25vw, 22px);
+}
+
+.settings-item {
+	gap: 16px;
+	padding: 12px 0;
+	border-bottom: 1px solid var(--border-soft);
+}
+
+.settings-llm-editor-side > .settings-llm-usage-card,
+.settings-llm-editor-side > .settings-llm-capability-panel,
+.settings-acp-preset-layout .settings-acp-preset-panel,
+.settings-acp-preset-layout .settings-install-guide-card {
+	padding: 0;
+	border: 0;
+	border-radius: 0;
+	background: transparent;
+	box-shadow: none;
+}
+
+.settings-llm-editor-side > * + *,
+.settings-acp-preset-layout > * + * {
+	padding-top: 10px;
+	border-top: 1px solid var(--border-soft);
+}
+
+.settings-label,
+.settings-info-label {
+	color: var(--text-primary);
+}
+
+.settings-info-value,
+.settings-help-text,
+.settings-agent-meta,
+.settings-install-guide-summary {
+	color: var(--text-secondary);
+}
+
+.settings-agent-name,
+.settings-empty-title,
+.settings-rag-summary-current-value,
+.settings-rag-summary-fact-value,
+.settings-rag-scan-value {
+	color: var(--text-strong);
+}
+
+.settings-agent-command-preview,
+.settings-agent-mcp-title,
+.settings-rag-scan-label,
+.settings-rag-summary-current-label,
+.settings-rag-summary-fact-label,
+.settings-rag-summary-rule-label {
+	color: var(--text-secondary);
+}
+
+.settings-select,
+.settings-input,
+.settings-textarea {
+	border-color: var(--border-strong);
+	background: var(--surface-input);
+	color: var(--text-strong);
+}
+
+.settings-acp-sidebar,
+.settings-acp-detail,
+.settings-editor-card,
+.settings-empty-panel,
+.settings-editor-card-subtle {
+	scroll-margin-top: 84px;
+}
+
+.settings-acp-sidebar,
+.settings-acp-detail,
+.settings-editor-card,
+.settings-editor-card-subtle {
+	border-color: var(--border-regular);
+	background: var(--surface-card);
+	box-shadow: none;
+}
+
+.settings-editor-card-subtle,
+.settings-empty-panel {
+	border-color: var(--border-regular);
+	background: color-mix(in srgb, var(--surface-card) 82%, var(--surface-panel));
+	box-shadow: none;
+}
+
+.settings-select:focus,
+.settings-input:focus,
+.settings-textarea:focus {
+	border-color: var(--border-selected);
+	box-shadow: 0 0 0 4px var(--focus-ring);
+}
+
+.settings-input.recording {
+	border-color: var(--accent-border);
+	background: color-mix(in srgb, var(--accent-soft) 56%, white);
+}
+
+.settings-toggle {
+	width: 46px;
+	height: 28px;
+	background: var(--surface-control);
+}
+
+.settings-toggle::after {
+	top: 3px;
+	left: 3px;
+	width: 22px;
+	height: 22px;
+	background: var(--surface-card);
+	box-shadow: var(--shadow-floating);
+}
+
+.settings-toggle:checked {
+	background: var(--accent-strong);
+}
+
+.settings-toggle:checked::after {
+	transform: translateX(18px);
+}
+
+.settings-combobox-panel {
+	--floating-gap: 6px;
+	--floating-padding: 8px;
+	--floating-radius: 14px;
+	--floating-background: var(--surface-panel);
+	--floating-border: var(--border-strong);
+	--floating-shadow: var(--shadow-floating);
+}
+
+.settings-combobox-option {
+	border: 1px solid transparent;
+	background: var(--surface-control-soft);
+	color: var(--text-primary);
+}
+
+.settings-combobox-option:hover {
+	background: var(--surface-control-hover);
+}
+
+.settings-combobox-option-active {
+	border-color: var(--border-selected);
+	background: var(--surface-card-selected);
+}
+
+.settings-llm-provider-card,
+.settings-rag-scan-metric {
+	border-color: var(--border-regular);
+	background: var(--surface-card);
+	box-shadow: none;
+}
+
+.settings-llm-provider-card:hover {
+	border-color: var(--accent-border);
+}
+
+.settings-llm-provider-card,
+.settings-llm-editor-panel,
+.settings-llm-capability-panel,
+.settings-rag-editor-panel,
+.settings-agent-list-item,
+.settings-mcp-list-item,
+.settings-acp-preset-panel,
+.settings-install-guide-card {
+	border-color: var(--border-regular);
+	background: var(--surface-card);
+	box-shadow: none;
+}
+
+.settings-llm-usage-card {
+	background: var(--surface-card);
+}
+
+.settings-rag-scan-metric {
+	border-color: var(--border-regular);
+	background: color-mix(in srgb, var(--surface-card) 82%, var(--surface-panel));
+}
+
+.settings-llm-provider-card-selected,
+.settings-agent-list-item-selected,
+.settings-mcp-list-item-selected {
+	border-color: var(--accent-border);
+	background: var(--surface-card-selected);
+}
+
+.settings-llm-provider-card-invalid,
+.settings-agent-list-item-invalid,
+.settings-mcp-list-item-invalid {
+	border-color: color-mix(in srgb, var(--error-strong) 42%, var(--border-strong));
+	background: color-mix(in srgb, var(--status-error-bg) 62%, var(--surface-card));
+}
+
+.settings-status-chip {
+	background: var(--surface-panel-strong);
+	color: var(--text-secondary);
+}
+
+.settings-status-chip-strong {
+	background: var(--surface-control-strong);
+	color: var(--text-contrast);
+}
+
+.settings-acp-preset-kicker {
+	background: var(--surface-panel-strong);
+	color: var(--text-secondary);
+}
+
+.settings-acp-preset-label,
+.settings-install-guide-summary {
+	color: var(--text-secondary);
+}
+
+.settings-text-link {
+	color: var(--accent-strong);
+}
+
+.settings-text-link:hover,
+.settings-text-link:focus-visible {
+	color: var(--text-strong);
+}
+
+.settings-text-link-danger {
+	color: var(--status-error-fg);
+}
+
+.settings-text-link-danger:hover,
+.settings-text-link-danger:focus-visible {
+	color: var(--text-strong);
+}
+
+.settings-inline-code {
+	background: var(--surface-panel-strong);
+	color: var(--text-primary);
+}
+
+.settings-install-guide-command {
+	border-color: var(--border-strong);
+	background: var(--surface-input);
+	color: var(--text-primary);
+}
+
+.settings-jump-list-compact {
+	scrollbar-width: thin;
+	scrollbar-color: var(--border-selected) transparent;
+}
+
+.settings-jump-list-compact::-webkit-scrollbar {
+	display: block;
+	height: 8px;
+}
+
+.settings-jump-list-compact::-webkit-scrollbar-thumb {
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--border-selected) 72%, transparent);
+}
+
+.settings-jump-list-compact::-webkit-scrollbar-track {
+	background: transparent;
+}
+
+.settings-back-button,
+.settings-close-button,
+.settings-button,
+.settings-nav-button,
+.settings-jump-button,
+.settings-agent-list-item-main,
+.settings-mcp-list-item-main,
+.settings-llm-provider-card-main,
+.settings-llm-model-toggle,
+.settings-llm-model-refresh {
+	min-height: 44px;
+}
+
+.settings-button-compact {
+	min-height: 44px;
+}
+
+.settings-agent-list-item-main,
+.settings-mcp-list-item-main {
+	width: 100%;
+}
+
+.settings-button {
+	--button-background: var(--surface-control-soft);
+	--button-background-hover: var(--surface-control-hover);
+	--button-color: var(--text-primary);
+	border-color: var(--border-strong);
+}
+
+.settings-agent-secondary,
+.settings-llm-model-toggle,
+.settings-llm-model-refresh {
+	--button-background: var(--surface-control-soft);
+	--button-background-hover: var(--surface-control-hover);
+	--button-color: var(--text-primary);
+}
+
+.settings-nav-rail {
+	padding: 6px;
+	border: 1px solid var(--border-soft);
+	border-radius: 18px;
+	background: color-mix(in srgb, var(--surface-card) 78%, transparent);
+}
+
+.settings-nav-button {
+	border-radius: 14px;
+}
+
+.settings-nav-button-active {
+	box-shadow: none;
+}
+
+.settings-acp-sidebar,
+.settings-acp-detail,
+.settings-editor-card,
+.settings-editor-card-subtle,
+.settings-empty-panel,
+.settings-install-guide-card,
+.settings-acp-preset-panel,
+.settings-llm-provider-card,
+.settings-llm-editor-panel,
+.settings-llm-capability-panel,
+.settings-rag-editor-panel,
+.settings-agent-list-item,
+.settings-mcp-list-item,
+.settings-rag-scan-metric,
+.settings-llm-usage-card {
+	border-color: var(--border-regular);
+	background: var(--surface-raised);
+	box-shadow: none;
+}
+
+.settings-editor-card-subtle,
+.settings-empty-panel,
+.settings-rag-scan-metric {
+	background: color-mix(in srgb, var(--surface-card) 82%, var(--surface-panel));
+}
+
+.settings-llm-usage-card {
+	background: var(--surface-raised);
+}
+
+.settings-status-chip,
+.settings-acp-preset-kicker,
+.settings-inline-code {
+	background: color-mix(in srgb, var(--surface-panel-strong) 84%, transparent);
+	color: var(--text-primary);
+}
+
+.settings-status-chip-strong {
+	background: var(--surface-control-strong);
+	color: var(--text-contrast);
+}
+
+.settings-status-chip-success {
+	background: var(--status-success-bg);
+	color: var(--status-success-fg);
+}
+
+.settings-status-chip-info {
+	background: var(--status-info-bg);
+	color: var(--status-info-fg);
+}
+
+.settings-status-chip-warn {
+	background: var(--status-warn-bg);
+	color: var(--status-warn-fg);
+}
+
+.settings-llm-availability-badges {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+	padding: 10px 0 0;
+	border-top: 1px solid var(--border-soft);
+}
+
+.settings-help-text,
+.settings-agent-meta,
+.settings-install-guide-summary,
+.settings-issue-list,
+.settings-combobox-option-meta {
+	color: var(--text-secondary);
+}
+
+.settings-jump-button-meta,
+.settings-nav-button-meta,
+.settings-section-kicker {
+	color: var(--text-secondary);
+}
+
+.settings-select,
+.settings-input,
+.settings-textarea,
+.settings-install-guide-command {
+	border-color: var(--border-strong);
+	background: var(--surface-input);
+	color: var(--text-strong);
+}
+
+.settings-select:focus,
+.settings-input:focus,
+.settings-textarea:focus {
+	border-color: var(--border-selected);
+	box-shadow: 0 0 0 4px var(--focus-ring);
+}
+
+.settings-input.recording {
+	animation: settings-recording-pulse 1s infinite;
+	border-color: var(--accent-border);
+	background: color-mix(in srgb, var(--accent-soft) 56%, var(--surface-card));
+}
+
+@keyframes settings-recording-pulse {
+	0% {
+		box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent-border) 36%, transparent);
+	}
+	70% {
+		box-shadow: 0 0 0 6px transparent;
+	}
+	100% {
+		box-shadow: 0 0 0 0 transparent;
+	}
+}
+
+.settings-toggle {
+	width: 48px;
+	height: 28px;
+	background: var(--surface-control);
+}
+
+.settings-toggle::after {
+	top: 3px;
+	left: 3px;
+	width: 22px;
+	height: 22px;
+	background: var(--surface-card);
+	box-shadow: var(--shadow-floating);
+}
+
+.settings-toggle:checked {
+	background: var(--surface-control-strong);
+}
+
+.settings-combobox-panel {
+	--floating-background: var(--surface-panel);
+	--floating-border: var(--border-strong);
+	--floating-shadow: var(--shadow-floating);
+}
+
+.settings-llm-model-panel {
+	background: color-mix(in srgb, var(--surface-panel) 92%, var(--surface-frame));
+}
+
+.settings-llm-model-panel-header {
+	margin-bottom: 6px;
+	padding-bottom: 10px;
+	border-bottom: 1px solid var(--border-soft);
+}
+
+.settings-combobox-option {
+	border: 1px solid transparent;
+	background: var(--surface-raised);
+	color: var(--text-primary);
+}
+
+.settings-combobox-option:hover {
+	background: var(--surface-raised-hover);
+}
+
+.settings-combobox-option-active {
+	border-color: var(--border-selected);
+	background: var(--surface-card-selected);
+}
+
+.settings-button,
+.settings-agent-secondary,
+.settings-llm-model-toggle,
+.settings-llm-model-refresh {
+	--button-background: var(--surface-raised);
+	--button-background-hover: var(--surface-raised-hover);
+	--button-color: var(--text-primary);
+}
+
+.settings-llm-model-toggle,
+.settings-llm-model-refresh {
+	border: 1px solid var(--border-strong);
+}
+
+.settings-agent-remove {
+	--button-background: color-mix(in srgb, var(--status-error-bg) 78%, var(--surface-card));
+	--button-background-hover: color-mix(in srgb, var(--status-error-bg) 90%, var(--surface-card));
+	--button-color: var(--status-error-fg);
+}
+
+.settings-text-link {
+	color: var(--accent-strong);
+}
+
+.settings-text-link:hover,
+.settings-text-link:focus-visible {
+	color: var(--text-strong);
+}
+
+.settings-text-link-action {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	min-height: 44px;
+	padding: 8px 12px;
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-control);
+	background: var(--surface-raised);
+	color: var(--text-primary);
+	text-decoration: none;
+	transition:
+		background var(--transition-fast),
+		border-color var(--transition-fast),
+		color var(--transition-fast);
+}
+
+.settings-text-link-action:hover,
+.settings-text-link-action:focus-visible {
+	border-color: var(--border-selected);
+	background: var(--surface-raised-hover);
+	color: var(--text-strong);
+}
+
+.settings-text-link-action:focus-visible {
+	box-shadow: 0 0 0 4px var(--focus-ring);
+}
+
+.settings-text-link-action:disabled {
+	cursor: default;
+	border-color: var(--border-soft);
+	background: color-mix(in srgb, var(--surface-raised) 72%, var(--surface-panel));
+	color: var(--text-muted);
+}
+
+.settings-text-link-action.settings-text-link-danger {
+	color: var(--status-error-fg);
+}
+
+.settings-text-link-action.settings-text-link-danger:hover,
+.settings-text-link-action.settings-text-link-danger:focus-visible {
+	color: var(--status-error-fg);
+}
+
+.settings-text-link-action-quiet {
+	min-height: 44px;
+	padding: 6px 10px;
+	border-color: var(--border-soft);
+	background: transparent;
+	color: var(--text-secondary);
+	font-size: 12px;
+}
+
+.settings-text-link-action-quiet:hover,
+.settings-text-link-action-quiet:focus-visible {
+	border-color: var(--border-regular);
+	background: color-mix(in srgb, var(--surface-raised) 55%, transparent);
+	color: var(--text-primary);
+}
+
+.settings-button-subtle {
+	--button-background: color-mix(in srgb, var(--surface-raised) 52%, transparent);
+	--button-background-hover: color-mix(in srgb, var(--surface-raised-hover) 68%, transparent);
+	--button-color: var(--text-secondary);
+	min-height: 40px;
+	padding: 6px 10px;
+	border-color: var(--border-soft);
+	font-size: 12px;
+}
+
+.settings-button-subtle:hover,
+.settings-button-subtle:focus-visible {
+	border-color: var(--border-regular);
+}
+

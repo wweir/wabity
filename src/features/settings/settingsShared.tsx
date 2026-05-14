@@ -28,10 +28,7 @@ export const settingsQuickLinks: Readonly<Record<SettingsSectionId, readonly Set
 			{ id: "prompts-translation", label: "翻译配置", hint: "模型与提示词" },
 			{ id: "prompts-rag-answer", label: "文档问答", hint: "模型与提示词" },
 		],
-		llm: [
-			{ id: "llm-catalog", label: "条目列表", hint: "已配置条目" },
-			{ id: "llm-editor", label: "编辑区", hint: "连接信息与能力" },
-		],
+		llm: [],
 		rag: [],
 		acp: [
 			{ id: "acp-catalog", label: "Agent 列表", hint: "已配置条目" },

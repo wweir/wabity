@@ -759,7 +759,29 @@ export function providerCanHandleRagEmbedding(
 		.canHandleRagEmbedding;
 }
 
-function sanitizeLlmProviderDraft(provider: LlmProviderConfig) {
+function resolveBuiltinPresetModelId(
+	provider: LlmProviderConfig,
+	model: LlmModelConfig,
+	builtinTemplates?: BuiltinLlmProviderTemplate[],
+) {
+	if (!provider.builtinPresetId || !model.builtinPresetModelId) {
+		return null;
+	}
+
+	if (!builtinTemplates) {
+		return model.builtinPresetModelId;
+	}
+
+	const template = findBuiltinTemplate(builtinTemplates, provider.builtinPresetId);
+	return findBuiltinTemplateModel(template, model.builtinPresetModelId)
+		? model.builtinPresetModelId
+		: null;
+}
+
+function sanitizeLlmProviderDraft(
+	provider: LlmProviderConfig,
+	builtinTemplates?: BuiltinLlmProviderTemplate[],
+) {
 	const models = provider.models.map((model) => {
 		const sanitizedModel = { ...model };
 		const profile = resolveLlmProviderProfile(provider, sanitizedModel);
@@ -776,9 +798,11 @@ function sanitizeLlmProviderDraft(provider: LlmProviderConfig) {
 		if (!sanitizedModel.model.trim()) {
 			sanitizedModel.modelIdentityHint = null;
 		}
-		if (!provider.builtinPresetId) {
-			sanitizedModel.builtinPresetModelId = null;
-		}
+		sanitizedModel.builtinPresetModelId = resolveBuiltinPresetModelId(
+			provider,
+			sanitizedModel,
+			builtinTemplates,
+		);
 		return sanitizedModel;
 	});
 	return {
@@ -799,8 +823,13 @@ function resolveLlmRouteModelId(providers: LlmProviderConfig[], modelId: string 
 	return null;
 }
 
-export function reconcileLlmSettings(settings: LlmSettings): LlmSettings {
-	const providers = settings.providers.map(sanitizeLlmProviderDraft);
+export function reconcileLlmSettings(
+	settings: LlmSettings,
+	builtinTemplates?: BuiltinLlmProviderTemplate[],
+): LlmSettings {
+	const providers = settings.providers.map((provider) =>
+		sanitizeLlmProviderDraft(provider, builtinTemplates),
+	);
 	return {
 		providers,
 		translationModelId: resolveLlmRouteModelId(providers, settings.translationModelId),
