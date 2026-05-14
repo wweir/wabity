@@ -55,7 +55,7 @@ pub struct AppConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct ShortcutConfig {
     /// Format: "modifiers+key", e.g., "Alt+Space" or "Ctrl+Shift+Space"
     pub toggle_launcher: String,
@@ -1603,6 +1603,25 @@ agent_launch_mode = "direct"
     }
 
     #[test]
+    fn parse_config_content_rejects_unknown_shortcut_fields() {
+        let content = r#"
+[shortcuts]
+toggle_launcher = "Alt+Space"
+ocr_capture = "Alt+R"
+ocr_translate = "Alt+D"
+"#;
+
+        let error = parse_config_content(content)
+            .expect_err("unknown shortcut fields should not be accepted");
+
+        let error_chain = format!("{error:#}");
+        assert!(
+            error_chain.contains("unknown field `ocr_capture`"),
+            "unexpected error: {error_chain}"
+        );
+    }
+
+    #[test]
     fn parse_config_content_migrates_legacy_builtin_rag_mcp_entry() {
         let content = r#"
 [acp]
@@ -1622,23 +1641,6 @@ url = "http://127.0.0.1:43189/internal/mcp/rag"
             parsed.acp.builtin_mcp.enabled_modules,
             vec![BuiltinMcpModuleKey::Rag]
         );
-    }
-
-    #[test]
-    fn parse_config_content_ignores_legacy_ocr_capture_shortcut() {
-        let content = r#"
-[shortcuts]
-toggle_launcher = "Alt+Space"
-ocr_capture = "Alt+R"
-ocr_translate = "Alt+D"
-"#;
-
-        let parsed =
-            parse_config_content(content).expect("legacy OCR capture shortcut should parse");
-
-        assert_eq!(parsed.shortcuts.toggle_launcher, "Alt+Space");
-        assert_eq!(parsed.shortcuts.ocr_translate, "Alt+D");
-        assert_eq!(parsed.shortcuts.open_clipboard_history, "Alt+V");
     }
 
     #[test]

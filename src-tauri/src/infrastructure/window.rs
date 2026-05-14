@@ -15,14 +15,17 @@ use objc2_app_kit::{
 
 use crate::{
     domain::{execution::ExecutionResult, rag::RagRuntimeStatus},
-    services::application::APPLICATION_CACHE_STALE_AFTER,
+    services::{
+        application::APPLICATION_CACHE_STALE_AFTER, screenshot_review::ScreenshotReviewPayload,
+    },
     state::{AppState, LauncherWindowSize, LauncherWindowViewMode, ShortcutRuntimeState},
 };
 
-const OCR_ERROR_EVENT: &str = "ocr-error";
 const OCR_TRANSLATION_STARTED_EVENT: &str = "ocr-translation-started";
 const OCR_TRANSLATION_STREAM_EVENT: &str = "ocr-translation-stream";
 const OCR_TRANSLATION_RESULT_EVENT: &str = "ocr-translation-result";
+const SCREENSHOT_REVIEW_STARTED_EVENT: &str = "screenshot-review-started";
+const LAUNCHER_FAILURE_EVENT: &str = "launcher-failure";
 const RAG_RUNTIME_STATUS_EVENT: &str = "rag-runtime-status";
 const OPEN_CLIPBOARD_HISTORY_PANEL_EVENT: &str = "open-clipboard-history-panel";
 const REVEAL_LAUNCHER_MAIN_PANEL_EVENT: &str = "reveal-launcher-main-panel";
@@ -146,6 +149,12 @@ struct OcrTranslationStreamPayload {
     source_mode: ShortcutTranslationSourceMode,
     source_text: String,
     partial_text: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LauncherFailurePayload {
+    message: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -860,40 +869,6 @@ pub fn launcher_is_effectively_foreground(
     }
 }
 
-pub fn show_main_window_with_error(app: &AppHandle, error_message: &str) -> Result<()> {
-    if app
-        .state::<ShortcutRuntimeState>()
-        .is_clipboard_history_visible()
-    {
-        hide_clipboard_window_by_label(app, "show_error", false)?;
-    }
-
-    let window = main_window(app)?;
-    let shortcut_state = app.state::<ShortcutRuntimeState>();
-    emit_ocr_error_event(&window, error_message)?;
-    prepare_main_window_for_show(&window)?;
-    shortcut_state.cancel_launcher_blur_auto_hide_confirmation();
-    shortcut_state.set_launcher_blur_auto_hide_enabled(true);
-    shortcut_state.arm_launcher_resize_reposition(LAUNCHER_SHOW_RESIZE_REPOSITION_GRACE_PERIOD);
-    shortcut_state
-        .arm_launcher_blur_auto_hide_suppression(LAUNCHER_SHOW_BLUR_AUTO_HIDE_SUPPRESSION_PERIOD);
-    apply_window_size_for_view_mode(
-        &window,
-        shortcut_state.inner(),
-        LauncherWindowViewMode::Main,
-        true,
-    )?;
-    show_window(&window)?;
-    order_main_window_front(&window)?;
-    shortcut_state.set_launcher_visible(true);
-    Ok(())
-}
-
-pub fn emit_clipboard_history_panel_error(app: &AppHandle, error_message: &str) -> Result<()> {
-    let window = clipboard_window(app)?;
-    emit_ocr_error_event(&window, error_message)
-}
-
 pub fn show_main_window_with_shortcut_translation_started(
     app: &AppHandle,
     source_mode: ShortcutTranslationSourceMode,
@@ -972,6 +947,76 @@ pub fn emit_shortcut_translation_stream(
             },
         )
         .context("failed to emit OCR translation stream event")?;
+    Ok(())
+}
+
+pub fn show_main_window_with_screenshot_review(
+    app: &AppHandle,
+    payload: ScreenshotReviewPayload,
+) -> Result<()> {
+    if app
+        .state::<ShortcutRuntimeState>()
+        .is_clipboard_history_visible()
+    {
+        hide_clipboard_window_by_label(app, "show_screenshot_review", false)?;
+    }
+
+    let window = main_window(app)?;
+    let shortcut_state = app.state::<ShortcutRuntimeState>();
+    window
+        .emit(SCREENSHOT_REVIEW_STARTED_EVENT, payload)
+        .context("failed to emit screenshot review started event")?;
+    prepare_main_window_for_show(&window)?;
+    shortcut_state.cancel_launcher_blur_auto_hide_confirmation();
+    shortcut_state.set_launcher_blur_auto_hide_enabled(true);
+    shortcut_state.arm_launcher_resize_reposition(LAUNCHER_SHOW_RESIZE_REPOSITION_GRACE_PERIOD);
+    shortcut_state
+        .arm_launcher_blur_auto_hide_suppression(LAUNCHER_SHOW_BLUR_AUTO_HIDE_SUPPRESSION_PERIOD);
+    apply_window_size_for_view_mode(
+        &window,
+        shortcut_state.inner(),
+        LauncherWindowViewMode::Main,
+        true,
+    )?;
+    show_window(&window)?;
+    order_main_window_front(&window)?;
+    shortcut_state.set_launcher_visible(true);
+    Ok(())
+}
+
+pub fn show_main_window_with_launcher_failure(app: &AppHandle, message: &str) -> Result<()> {
+    if app
+        .state::<ShortcutRuntimeState>()
+        .is_clipboard_history_visible()
+    {
+        hide_clipboard_window_by_label(app, "show_launcher_failure", false)?;
+    }
+
+    let window = main_window(app)?;
+    let shortcut_state = app.state::<ShortcutRuntimeState>();
+    window
+        .emit(
+            LAUNCHER_FAILURE_EVENT,
+            LauncherFailurePayload {
+                message: message.to_string(),
+            },
+        )
+        .context("failed to emit launcher failure event")?;
+    prepare_main_window_for_show(&window)?;
+    shortcut_state.cancel_launcher_blur_auto_hide_confirmation();
+    shortcut_state.set_launcher_blur_auto_hide_enabled(true);
+    shortcut_state.arm_launcher_resize_reposition(LAUNCHER_SHOW_RESIZE_REPOSITION_GRACE_PERIOD);
+    shortcut_state
+        .arm_launcher_blur_auto_hide_suppression(LAUNCHER_SHOW_BLUR_AUTO_HIDE_SUPPRESSION_PERIOD);
+    apply_window_size_for_view_mode(
+        &window,
+        shortcut_state.inner(),
+        LauncherWindowViewMode::Main,
+        true,
+    )?;
+    show_window(&window)?;
+    order_main_window_front(&window)?;
+    shortcut_state.set_launcher_visible(true);
     Ok(())
 }
 
@@ -1644,12 +1689,6 @@ fn hide_clipboard_window_by_label(
     let window = clipboard_window(app)?;
     let shortcut_state = app.state::<ShortcutRuntimeState>();
     hide_clipboard_window_statefully(&window, shortcut_state.inner(), reason, restore_main_focus)
-}
-
-fn emit_ocr_error_event(window: &WebviewWindow, error_message: &str) -> Result<()> {
-    window
-        .emit(OCR_ERROR_EVENT, error_message)
-        .context("failed to emit OCR error event")
 }
 
 pub fn insert_clipboard_history_text_into_launcher(app: &AppHandle, text: String) -> Result<()> {
