@@ -15,5 +15,6 @@ pub mod question_answer_backend;
 pub mod rag;
 pub mod rag_answer;
 pub mod rag_query;
+pub mod screenshot_review;
 pub mod selection;
 pub mod translate;

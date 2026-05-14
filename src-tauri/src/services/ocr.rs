@@ -2,13 +2,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::{
-    path::{Path, PathBuf},
-    sync::OnceLock,
-    time::Instant,
-};
+use std::{path::Path, sync::OnceLock, time::Instant};
 
 use crate::domain::settings::ResolvedLlmModelBinding;
 use crate::infrastructure::openai_compatible::{
@@ -192,66 +186,6 @@ fn validate_openai_compatible_ocr_config(binding: ResolvedLlmModelBinding<'_>) -
     }
 
     Ok(())
-}
-
-pub fn capture_interactive_screenshot() -> Result<Option<PathBuf>> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        bail!("interactive screenshot OCR is only implemented on macOS")
-    }
-
-    let output_path = next_screenshot_path();
-    let output = Command::new("screencapture")
-        .arg("-i")
-        .arg("-x")
-        .arg(&output_path)
-        .output()
-        .context("failed to launch macOS screencapture command")?;
-
-    let screenshot_exists = output_path.is_file()
-        && output_path
-            .metadata()
-            .map(|metadata| metadata.len() > 0)
-            .unwrap_or(false);
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-
-    if output.status.success() {
-        if screenshot_exists {
-            return Ok(Some(output_path));
-        }
-
-        if is_interactive_screenshot_cancelled(&stderr) {
-            return Ok(None);
-        }
-
-        bail!("screencapture exited successfully but did not write an image");
-    }
-
-    if screenshot_exists {
-        return Ok(Some(output_path));
-    }
-
-    if is_interactive_screenshot_cancelled(&stderr) {
-        return Ok(None);
-    }
-
-    Err(anyhow!("interactive screenshot failed: {stderr}"))
-}
-
-fn next_screenshot_path() -> PathBuf {
-    let timestamp_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or(0);
-
-    std::env::temp_dir().join(format!("wabity-ocr-{timestamp_ms}.png"))
-}
-
-fn is_interactive_screenshot_cancelled(stderr: &str) -> bool {
-    let normalized = stderr.trim().to_ascii_lowercase();
-    normalized.is_empty()
-        || normalized.contains("cancel")
-        || normalized.contains("selection is empty")
 }
 
 fn aggregate_text(blocks: &[OcrTextBlock]) -> String {
@@ -556,20 +490,14 @@ fn collect_text_blocks(
     Ok(blocks)
 }
 
-pub fn remove_screenshot_file(path: &Path) {
-    if let Err(error) = std::fs::remove_file(path) {
-        tracing::debug!(?error, path = %path.display(), "failed to delete temporary OCR screenshot");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         aggregate_text, average_confidence, block_for_focus_point,
         build_openai_compatible_ocr_request_body, encode_image_path_as_data_url,
-        is_interactive_screenshot_cancelled, map_openai_compatible_response_to_result,
-        validate_openai_compatible_ocr_config, OcrBoundingBox, OcrPoint, OcrProvider, OcrRequest,
-        OcrTextBlock, OpenAiCompatibleOcrProvider, OPENAI_COMPATIBLE_OCR_PROMPT,
+        map_openai_compatible_response_to_result, validate_openai_compatible_ocr_config,
+        OcrBoundingBox, OcrPoint, OcrProvider, OcrRequest, OcrTextBlock,
+        OpenAiCompatibleOcrProvider, OPENAI_COMPATIBLE_OCR_PROMPT,
     };
     use crate::domain::settings::{LlmModelType, LlmProviderConfig, LlmProviderProtocol};
     use crate::infrastructure::openai_compatible::{
@@ -656,20 +584,6 @@ mod tests {
                 .unwrap_err();
 
         assert_eq!(error.to_string(), "OCR 选择的 LLM 配置未启用多模态能力");
-    }
-
-    #[test]
-    fn interactive_screenshot_does_not_treat_rect_failure_as_cancelled() {
-        assert!(!is_interactive_screenshot_cancelled(
-            "could not create image from rect"
-        ));
-    }
-
-    #[test]
-    fn interactive_screenshot_cancel_detection_is_case_insensitive() {
-        assert!(is_interactive_screenshot_cancelled(
-            "User CANCELED screenshot"
-        ));
     }
 
     #[test]
