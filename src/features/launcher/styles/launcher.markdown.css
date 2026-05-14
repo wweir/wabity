@@ -1,0 +1,276 @@
+/* --- Markdown body (assistant messages) --- */
+
+.markdown-body {
+	white-space: normal;
+}
+
+.markdown-body p {
+	margin: 0 0 0.72em;
+}
+
+.markdown-body p:last-child {
+	margin-bottom: 0;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4 {
+	margin: 0.6em 0 0.3em;
+	font-weight: 600;
+	line-height: 1.3;
+}
+
+.markdown-body h1 {
+	font-size: 1.34em;
+}
+.markdown-body h2 {
+	font-size: 1.2em;
+}
+.markdown-body h3 {
+	font-size: 1.08em;
+}
+.markdown-body h4 {
+	font-size: 1em;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+	margin: 0.5em 0 0.72em;
+	padding-left: 1.6em;
+}
+
+.markdown-body li {
+	margin: 0.15em 0;
+}
+
+.markdown-body blockquote {
+	margin: 0.6em 0 0.8em;
+	padding: 0.55em 0.9em;
+	border-left: 3px solid var(--accent-border);
+	background: color-mix(in srgb, var(--surface-control-soft) 58%, transparent);
+	color: var(--text-secondary);
+}
+
+.markdown-body hr {
+	border: none;
+	border-top: 1px solid var(--border-soft);
+	margin: 0.9em 0;
+}
+
+.markdown-body a {
+	color: var(--accent-strong);
+	text-decoration: underline;
+	text-underline-offset: 2px;
+}
+
+.markdown-body .markdown-link-local {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 0.08em 0.38em;
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--accent-soft) 62%, var(--surface-card));
+	color: var(--accent-strong);
+	font-size: 0.94em;
+	font-weight: 600;
+}
+
+.markdown-body code {
+	padding: 0.15em 0.35em;
+	border-radius: 4px;
+	background: color-mix(in srgb, var(--surface-card-selected) 54%, transparent);
+	color: var(--code-text);
+	font-family: var(--font-mono);
+	font-size: 0.92em;
+}
+
+.markdown-body pre {
+	margin: 0.4em 0;
+	padding: 0.6em 0.8em;
+	border-radius: 8px;
+	border: 1px solid var(--border-strong);
+	background: var(--surface-code);
+	color: var(--code-text);
+	overflow-x: auto;
+	line-height: 1.45;
+}
+
+.markdown-body pre code {
+	padding: 0;
+	border-radius: 0;
+	background: transparent;
+	color: inherit;
+	font-size: 0.95em;
+}
+
+.markdown-body table {
+	border-collapse: collapse;
+	margin: 0.4em 0;
+	font-size: 0.95em;
+}
+
+.markdown-body th,
+.markdown-body td {
+	padding: 0.3em 0.6em;
+	border: 1px solid var(--border-regular);
+}
+
+.markdown-body th {
+	background: color-mix(in srgb, var(--surface-card-subtle) 80%, transparent);
+	color: var(--text-primary);
+	font-weight: 600;
+}
+
+.markdown-body mark {
+	padding: 0.08em 0.24em;
+	border-radius: 4px;
+	background: color-mix(in srgb, var(--status-warn-bg) 86%, transparent);
+	color: var(--status-warn-fg);
+}
+
+.markdown-body .callout {
+	margin: 0.55em 0;
+	padding: 0.72em 0.86em;
+	border: 1px solid var(--border-regular);
+	border-left-width: 4px;
+	border-radius: 12px;
+	background: color-mix(in srgb, var(--surface-card-subtle) 88%, var(--surface-card));
+	box-shadow: none;
+}
+
+.markdown-body .callout > p:first-child {
+	margin-top: 0;
+}
+
+.markdown-body .callout > p:first-child strong:first-child {
+	display: inline-flex;
+	align-items: center;
+	margin-right: 0.45em;
+	font-size: 0.96em;
+	letter-spacing: 0.01em;
+}
+
+.markdown-body .callout-note,
+.markdown-body .callout-info {
+	border-left-color: var(--accent-border);
+}
+
+.markdown-body .callout-tip,
+.markdown-body .callout-success {
+	border-left-color: color-mix(in srgb, var(--success-strong) 72%, var(--border-selected));
+}
+
+.markdown-body .callout-warning,
+.markdown-body .callout-caution {
+	border-left-color: color-mix(in srgb, var(--warn-strong) 76%, var(--border-selected));
+}
+
+.markdown-body .callout-danger,
+.markdown-body .callout-error,
+.markdown-body .callout-failure {
+	border-left-color: color-mix(in srgb, var(--error-strong) 74%, var(--border-selected));
+}
+
+.markdown-body .callout-quote {
+	border-left-color: var(--border-strong);
+}
+
+.markdown-body .contains-task-list {
+	padding-left: 1.1em;
+}
+
+.markdown-body .task-list-item {
+	list-style: none;
+}
+
+.markdown-body .task-list-item input {
+	margin-right: 0.5em;
+}
+
+.mermaid-block {
+	margin: 0.45em 0;
+	padding: 0.8em 0.9em;
+	border: 1px solid var(--border-strong);
+	border-radius: 12px;
+	background: var(--surface-code);
+	overflow: auto hidden;
+}
+
+.mermaid-block svg {
+	display: block;
+	width: max-content;
+	min-width: 100%;
+	height: auto;
+	margin: 0 auto;
+}
+
+.mermaid-block pre {
+	margin-bottom: 0;
+}
+
+.mermaid-status,
+.mermaid-error-detail {
+	margin: 0 0 0.6em;
+	color: var(--code-meta);
+	font-size: 0.92em;
+}
+
+.mermaid-error-detail {
+	margin-top: 0.6em;
+	margin-bottom: 0;
+	color: var(--code-danger);
+}
+
+/* --- highlight.js syntax colors (warm dark) --- */
+
+.hljs {
+	color: var(--code-text);
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-built_in {
+	color: var(--code-accent);
+}
+.hljs-string,
+.hljs-attr {
+	color: var(--code-string);
+}
+.hljs-number,
+.hljs-literal {
+	color: var(--code-accent);
+}
+.hljs-comment,
+.hljs-quote {
+	color: var(--code-comment);
+	font-style: italic;
+}
+.hljs-function .hljs-title,
+.hljs-title.function_,
+.hljs-title {
+	color: var(--code-entity);
+}
+.hljs-type,
+.hljs-class .hljs-title {
+	color: var(--code-accent);
+}
+.hljs-variable,
+.hljs-template-variable {
+	color: var(--code-text);
+}
+.hljs-meta {
+	color: var(--code-meta);
+}
+.hljs-punctuation {
+	color: var(--code-meta);
+}
+.hljs-regexp {
+	color: var(--code-accent);
+}
+.hljs-addition {
+	color: var(--code-string);
+}
+.hljs-deletion {
+	color: var(--code-danger);
+}
+

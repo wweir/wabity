@@ -1,0 +1,464 @@
+.clipboard-history-panel {
+	--floating-gap: 8px;
+	--floating-padding: 10px;
+	--floating-radius: var(--radius-card);
+	--floating-border: var(--border-strong);
+	--floating-background: var(--surface-panel);
+	--floating-shadow: 0 18px 40px rgba(4, 7, 10, 0.28);
+	--floating-backdrop: none;
+	--floating-z: 95;
+	gap: 10px;
+}
+
+.launcher-shell-clipboard-only {
+	padding: 0;
+}
+
+.clipboard-history-panel-standalone {
+	position: relative;
+	width: 428px;
+	max-width: 428px;
+}
+
+.launcher-input-anchor {
+	display: grid;
+}
+
+.launcher-input {
+	width: calc(100% + 40px);
+	margin-inline: -20px;
+	padding: 18px 24px 20px;
+	border-bottom: 1px solid var(--border-soft);
+	background: linear-gradient(
+		180deg,
+		color-mix(in srgb, var(--surface-panel-strong) 88%, transparent),
+		transparent
+	);
+	color: var(--text-strong);
+	font-size: clamp(24px, 20px + 0.8vw, 32px);
+	line-height: 1.28;
+}
+
+.launcher-input::placeholder {
+	color: var(--text-muted);
+}
+
+.launcher-input:focus {
+	border-bottom-color: var(--border-selected);
+	background:
+		linear-gradient(
+			180deg,
+			color-mix(in srgb, var(--accent-soft) 24%, transparent),
+			color-mix(in srgb, var(--surface-panel) 92%, transparent)
+		),
+		var(--surface-frame);
+	box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--accent-strong) 26%, transparent);
+}
+
+.launcher-input.multiline {
+	min-height: 132px;
+	font-size: clamp(18px, 16px + 0.4vw, 22px);
+}
+
+.control-row {
+	margin-top: 14px;
+	gap: 12px;
+}
+
+.launcher-inline-banner {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	margin-top: 12px;
+	padding: 10px 12px;
+	border-radius: 14px;
+	font-size: var(--text-xs);
+	line-height: 1.45;
+}
+
+.launcher-inline-banner-error {
+	border: 1px solid color-mix(in srgb, var(--error-strong) 24%, var(--border-soft));
+	background: color-mix(in srgb, var(--error-soft) 30%, var(--surface-card));
+	color: var(--error-strong);
+}
+
+.launcher-inline-banner-action {
+	appearance: none;
+	flex-shrink: 0;
+	color: inherit;
+	font-size: var(--text-xs);
+	font-weight: 700;
+}
+
+.action-buttons {
+	gap: 8px;
+	padding: 0;
+	border: 0;
+	background: transparent;
+	box-shadow: none;
+	backdrop-filter: none;
+	-webkit-backdrop-filter: none;
+}
+
+.control-button {
+	min-height: 44px;
+	padding: 8px 14px;
+	border: 1px solid var(--border-strong);
+	border-radius: 14px;
+	font-size: var(--text-xs);
+	box-shadow: none;
+}
+
+.control-button-shortcut {
+	background: color-mix(in srgb, var(--surface-card) 76%, transparent);
+	color: var(--text-muted);
+}
+
+.control-button.active {
+	--button-background: var(--button-primary-bg);
+	--button-background-hover: var(--button-primary-hover);
+	--button-color: var(--button-primary-fg);
+	border-color: var(--button-primary-border);
+	box-shadow: 0 10px 24px rgba(4, 7, 10, 0.22);
+}
+
+.control-button.active .control-button-shortcut {
+	background: color-mix(in srgb, var(--button-primary-fg) 14%, transparent);
+	color: var(--button-primary-fg);
+}
+
+.primary-action-button-execute {
+	--button-background: var(--button-execute-bg);
+	--button-background-hover: var(--button-execute-hover);
+	--button-color: var(--button-execute-fg);
+	border-color: var(--button-execute-border);
+}
+
+.primary-action-button-execute .control-button-shortcut {
+	background: color-mix(in srgb, var(--button-execute-fg) 16%, transparent);
+	color: var(--button-execute-fg);
+}
+
+.primary-action-button-translate {
+	--button-background: color-mix(in srgb, var(--status-warn-bg) 86%, var(--surface-card));
+	--button-background-hover: color-mix(in srgb, var(--status-warn-bg) 96%, var(--surface-card));
+	--button-color: var(--status-warn-fg);
+	border-color: color-mix(in srgb, var(--warn-strong) 42%, var(--border-strong));
+}
+
+.primary-action-button-translate .control-button-shortcut {
+	background: color-mix(in srgb, var(--status-warn-fg) 16%, transparent);
+	color: var(--status-warn-fg);
+}
+
+.control-button.agent-execute-button {
+	--button-background: color-mix(in srgb, var(--accent-soft) 70%, var(--surface-card));
+	--button-background-hover: color-mix(in srgb, var(--accent-soft) 84%, var(--surface-card));
+	--button-color: var(--accent-strong);
+	border-color: var(--accent-border);
+}
+
+.completion-button {
+	--button-background: var(--surface-raised);
+	--button-background-hover: var(--surface-raised-hover);
+	--button-color: var(--text-secondary);
+	border-style: solid;
+}
+
+.completion-popup {
+	--floating-gap: 6px;
+	--floating-padding: 8px;
+	--floating-radius: 14px;
+	--floating-border: var(--border-strong);
+	--floating-background: var(--surface-panel);
+	--floating-shadow: 0 16px 32px rgba(4, 7, 10, 0.24);
+	--floating-backdrop: none;
+}
+
+.suggestion-item {
+	min-height: 44px;
+	padding: 10px 12px;
+	border-radius: 12px;
+	border: 1px solid transparent;
+	background: var(--surface-raised);
+}
+
+.suggestion-item strong {
+	color: var(--text-primary);
+	font-size: var(--text-sm);
+}
+
+.suggestion-meta {
+	color: var(--text-muted);
+	font-size: var(--text-xs);
+}
+
+.suggestion-item.selected {
+	border-color: var(--border-selected);
+	background: var(--surface-card-selected);
+}
+
+.thought-toggle {
+	border: none;
+	background: transparent;
+	color: var(--text-muted);
+}
+
+.thought-toggle:hover,
+.thought-toggle:focus-visible {
+	background: transparent;
+	color: var(--text-secondary);
+}
+
+.thought-content {
+	background: transparent;
+	color: color-mix(in srgb, var(--text-secondary) 88%, var(--text-muted));
+	border-inline-start-color: color-mix(in srgb, var(--border-strong) 58%, transparent);
+}
+
+.workspace-picker-panel,
+.agent-picker-panel {
+	--floating-border: var(--border-strong);
+	--floating-background: var(--surface-panel);
+	--floating-shadow: 0 16px 34px rgba(4, 7, 10, 0.24);
+}
+
+.workspace-picker-item,
+.agent-picker-item {
+	background: var(--surface-raised);
+	color: var(--text-primary);
+}
+
+.workspace-picker-item:hover,
+.agent-picker-item:hover,
+.workspace-picker-item:focus-visible,
+.agent-picker-item:focus-visible,
+.workspace-crumb:hover {
+	background: var(--surface-raised-hover);
+}
+
+.workspace-picker-action {
+	background: var(--surface-control-strong);
+	color: var(--text-contrast);
+}
+
+.workspace-picker-action:hover,
+.workspace-picker-action:focus-visible {
+	background: color-mix(in srgb, var(--surface-control-strong) 90%, black);
+}
+
+.session-panel-heading-title,
+.session-panel-title,
+.result-line,
+.result-card-markdown,
+.result-card-text,
+.session-message-content {
+	color: var(--text-strong);
+}
+
+.session-panel-heading-summary,
+.session-panel-empty,
+.session-message-role,
+.session-message-role-badge,
+.result-card-label,
+.rag-citation-title,
+.rag-citation-summary,
+.action-entry-disclosure,
+.action-entry-kind {
+	color: var(--text-secondary);
+}
+
+.session-panel-agent {
+	color: var(--text-secondary);
+}
+
+.result-card-text {
+	border-color: var(--border-regular);
+	background: color-mix(in srgb, var(--surface-card-subtle) 80%, var(--surface-raised));
+}
+
+.rag-citation-tooltip-label {
+	color: var(--text-muted);
+}
+
+.rag-citation-tooltip-value,
+.rag-citation-tooltip-snippet {
+	color: var(--text-primary);
+}
+
+.session-message-role-badge {
+	border: 1px solid var(--border-soft);
+	background: color-mix(in srgb, var(--surface-card-subtle) 76%, transparent);
+}
+
+.translate-button {
+	--button-background: color-mix(in srgb, var(--status-warn-bg) 76%, var(--surface-card));
+	--button-background-hover: color-mix(in srgb, var(--status-warn-bg) 88%, var(--surface-card));
+	--button-color: var(--status-warn-fg);
+	border-color: color-mix(in srgb, var(--warn-strong) 38%, var(--border-strong));
+}
+
+.translate-button .control-button-icon {
+	color: var(--status-warn-fg);
+}
+
+.settings-button {
+	--button-background: var(--surface-raised);
+	--button-background-hover: var(--surface-raised-hover);
+	--button-color: var(--text-secondary);
+}
+
+.action-buttons
+	> .control-button:is(
+		.settings-button,
+		.translate-button,
+		.agent-execute-button,
+		.primary-action-button
+	) {
+	min-height: 44px;
+	padding: 8px 12px;
+}
+
+.action-buttons > .settings-button {
+	--button-background: var(--surface-raised);
+	--button-background-hover: var(--surface-raised-hover);
+	--button-color: var(--text-secondary);
+	min-width: 44px;
+	border-color: var(--border-strong);
+}
+
+.action-buttons > .translate-button {
+	--button-background: color-mix(in srgb, var(--status-warn-bg) 76%, var(--surface-card));
+	--button-background-hover: color-mix(in srgb, var(--status-warn-bg) 88%, var(--surface-card));
+	--button-color: var(--status-warn-fg);
+	border-color: color-mix(in srgb, var(--warn-strong) 38%, var(--border-strong));
+}
+
+.result-card,
+.rag-citation-list,
+.session-message,
+.action-trail,
+.rag-citation-item,
+.rag-citation-tooltip,
+.thought-content {
+	border-color: var(--border-regular);
+	box-shadow: none;
+}
+
+.result-card,
+.rag-citation-list,
+.session-message,
+.rag-citation-item,
+.rag-citation-tooltip {
+	background: var(--surface-raised);
+}
+
+.action-trail {
+	background: color-mix(in srgb, var(--surface-card-subtle) 82%, transparent);
+	border-color: var(--border-soft);
+}
+
+.action-entry-detail {
+	border: 1px solid var(--border-strong);
+	background: color-mix(in srgb, var(--surface-panel) 92%, var(--surface-card));
+	color: var(--text-primary);
+	box-shadow: none;
+}
+
+.action-entry-detail pre {
+	padding: 10px 12px;
+	border: 1px solid var(--border-soft);
+	border-radius: 10px;
+	background: color-mix(in srgb, var(--surface-control-soft) 82%, var(--surface-panel));
+	color: var(--text-strong);
+}
+
+.markdown-body a,
+.markdown-body .markdown-link-local {
+	color: var(--accent-strong);
+}
+
+.markdown-body blockquote {
+	border-left-color: var(--accent-border);
+	background: color-mix(in srgb, var(--surface-control-soft) 58%, transparent);
+	color: var(--text-secondary);
+}
+
+.markdown-body hr {
+	border-top-color: var(--border-soft);
+}
+
+.markdown-body .markdown-link-local {
+	background: color-mix(in srgb, var(--accent-soft) 62%, var(--surface-card));
+}
+
+.markdown-body code {
+	background: color-mix(in srgb, var(--surface-card-selected) 54%, transparent);
+}
+
+.markdown-body pre,
+.result-card-code,
+.mermaid-block {
+	border: 1px solid var(--border-strong);
+	background: var(--surface-code);
+	color: var(--code-text);
+	box-shadow: none;
+}
+
+.markdown-body th,
+.markdown-body td {
+	border-color: var(--border-regular);
+}
+
+.markdown-body th {
+	background: color-mix(in srgb, var(--surface-card-subtle) 80%, transparent);
+	color: var(--text-primary);
+}
+
+.markdown-body mark {
+	background: color-mix(in srgb, var(--status-warn-bg) 86%, transparent);
+	color: var(--status-warn-fg);
+}
+
+.markdown-body .callout {
+	border-color: var(--border-regular);
+	background: color-mix(in srgb, var(--surface-card-subtle) 88%, var(--surface-card));
+	box-shadow: none;
+}
+
+.markdown-body .callout-note,
+.markdown-body .callout-info {
+	border-left-color: var(--accent-border);
+}
+
+.markdown-body .callout-tip,
+.markdown-body .callout-success {
+	border-left-color: color-mix(in srgb, var(--success-strong) 72%, var(--border-selected));
+}
+
+.markdown-body .callout-warning,
+.markdown-body .callout-caution {
+	border-left-color: color-mix(in srgb, var(--warn-strong) 76%, var(--border-selected));
+}
+
+.markdown-body .callout-danger,
+.markdown-body .callout-error,
+.markdown-body .callout-failure {
+	border-left-color: color-mix(in srgb, var(--error-strong) 74%, var(--border-selected));
+}
+
+.markdown-body .callout-quote {
+	border-left-color: var(--border-strong);
+}
+
+.restore-notice-item {
+	background: color-mix(in srgb, var(--status-error-bg) 74%, var(--surface-card));
+	border-color: color-mix(in srgb, var(--error-strong) 38%, var(--border-strong));
+}
+
+.restore-notice-title,
+.restore-notice-message {
+	color: var(--status-error-fg);
+}
+

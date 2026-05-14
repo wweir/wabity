@@ -18,6 +18,7 @@ import type {
 	AcpSessionDetail,
 	AcpSessionMessage,
 } from "../../../lib/tauri/types";
+import { LauncherPinButton } from "../../../app/LauncherPinButton";
 import type {
 	ExecutionResult,
 	RagAnswerStructuredPayload,
@@ -139,6 +140,7 @@ const MemoizedResultCard = memo(ResultCard);
 
 interface LauncherFeedbackProps {
 	activeSession: AcpSessionDetail | null;
+	launcherPinned: boolean;
 	runtimeControlPendingKey: string | null;
 	qaCitations: RagCitation[];
 	qaMessages: AcpSessionMessage[];
@@ -150,6 +152,7 @@ interface LauncherFeedbackProps {
 	markdownPreview: string | null;
 	onSetAcpSessionConfigOption: (configId: string, valueId: string) => void | Promise<void>;
 	onSetAcpSessionMode: (modeId: string) => void | Promise<void>;
+	onLauncherPinnedChange?: (pinned: boolean) => void | Promise<void>;
 	onOpenRagCitation: (citation: RagCitation) => void | Promise<void>;
 }
 
@@ -213,6 +216,7 @@ function scrollPendingMessageIntoView(container: HTMLDivElement) {
 
 export function LauncherFeedback({
 	activeSession,
+	launcherPinned,
 	runtimeControlPendingKey,
 	qaCitations,
 	qaMessages,
@@ -224,6 +228,7 @@ export function LauncherFeedback({
 	markdownPreview,
 	onSetAcpSessionConfigOption,
 	onSetAcpSessionMode,
+	onLauncherPinnedChange,
 	onOpenRagCitation,
 }: LauncherFeedbackProps) {
 	const ragPayload = resolveRagPayload(result);
@@ -274,7 +279,24 @@ export function LauncherFeedback({
 		);
 	}
 
-	return <>{content}</>;
+	if (!content) {
+		return null;
+	}
+
+	return (
+		<section className="launcher-feedback-region" aria-label="交互内容">
+			{onLauncherPinnedChange ? (
+				<div className="launcher-feedback-toolbar">
+					<LauncherPinButton
+						className="launcher-feedback-pin-button"
+						pinned={launcherPinned}
+						onToggle={() => void onLauncherPinnedChange(!launcherPinned)}
+					/>
+				</div>
+			) : null}
+			{content}
+		</section>
+	);
 }
 
 const SessionFeedback = memo(function SessionFeedback({

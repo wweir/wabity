@@ -1,0 +1,126 @@
+@media (max-width: 720px) {
+	.launcher-frame {
+		--radius-frame: 22px;
+		min-width: 0;
+		width: min(100vw - 20px, 720px);
+		padding: 14px;
+	}
+
+	.workspace-row {
+		flex-direction: column;
+		align-items: stretch;
+	}
+
+	.workspace-bar {
+		flex-wrap: wrap;
+	}
+
+	.workspace-picker {
+		flex: 1 1 180px;
+		width: auto;
+	}
+
+	.workspace-picker-input,
+	.workspace-picker-panel {
+		width: 100%;
+		max-width: none;
+	}
+
+	.workspace-breadcrumbs {
+		order: 3;
+		width: 100%;
+		padding-bottom: 2px;
+	}
+
+	.session-strip {
+		flex-wrap: wrap;
+		justify-content: flex-start;
+	}
+
+	.session-panel-toggle {
+		flex: 1 1 220px;
+	}
+
+	.control-row {
+		justify-content: flex-start;
+		flex-wrap: wrap;
+	}
+
+	.launcher-status-bar {
+		flex: 1 1 100%;
+	}
+
+	.action-buttons {
+		width: 100%;
+		flex-wrap: wrap;
+	}
+
+	.action-buttons > .control-button {
+		flex: 1 1 calc(50% - 4px);
+	}
+
+	.launcher-input {
+		font-size: 22px;
+	}
+
+	.launcher-input.multiline {
+		font-size: 18px;
+	}
+
+	.session-panel {
+		width: min(100vw - 20px, 420px) !important;
+	}
+
+	.thought-toggle {
+		width: 100%;
+	}
+}
+
+@media (max-width: 560px) {
+	.launcher-frame {
+		padding: 12px;
+	}
+
+	.launcher-input {
+		width: calc(100% + 24px);
+		margin-inline: -12px;
+		padding: 16px 16px 18px;
+		font-size: clamp(20px, 18px + 1vw, 24px);
+	}
+
+	.workspace-picker,
+	.agent-picker-trigger,
+	.session-panel-toggle {
+		width: 100%;
+		max-width: none;
+	}
+
+	.action-buttons > .control-button {
+		flex-basis: 100%;
+	}
+
+	.thought-toggle-copy {
+		gap: 2px 6px;
+	}
+
+	.thought-preview {
+		max-width: 100%;
+		white-space: normal;
+	}
+
+	.thought-content {
+		padding-left: 10px;
+	}
+}
+
+@media (pointer: coarse) {
+	.thought-toggle,
+	.action-entry-toggle,
+	.action-trail-step {
+		min-height: 44px;
+	}
+
+	.action-entry-toggle {
+		padding-block: 1px;
+	}
+}

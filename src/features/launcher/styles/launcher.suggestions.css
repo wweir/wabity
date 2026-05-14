@@ -1,0 +1,263 @@
+.suggestion-list {
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.completion-list {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	max-height: 176px;
+	overflow-y: auto;
+	padding-right: 2px;
+}
+
+.suggestion-item {
+	display: flex;
+	align-items: center;
+	min-height: 38px;
+	padding: 8px 10px;
+	border-radius: 10px;
+	background: var(--surface-raised);
+	border: 1px solid transparent;
+	overflow: hidden;
+}
+
+.suggestion-line {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+	width: 100%;
+}
+
+.suggestion-item strong {
+	display: block;
+	flex: 0 1 68%;
+	min-width: 0;
+	color: var(--text-primary);
+	font-size: 12px;
+	font-weight: 600;
+	line-height: 16px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.suggestion-meta {
+	display: block;
+	flex: 1 1 auto;
+	min-width: 0;
+	font-size: 11px;
+	line-height: 14px;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	text-align: right;
+}
+
+.suggestion-item.selected {
+	border-color: var(--border-selected);
+	background: var(--surface-card-selected);
+}
+
+.launcher-frame {
+	--frame-background:
+		linear-gradient(
+			180deg,
+			color-mix(in srgb, var(--surface-card) 82%, var(--surface-frame)),
+			color-mix(in srgb, var(--surface-panel-strong) 76%, var(--surface-frame))
+		),
+		var(--surface-frame);
+	--frame-overlay:
+		radial-gradient(
+			circle at top left,
+			color-mix(in srgb, var(--accent-soft) 52%, transparent),
+			transparent 32%
+		),
+		radial-gradient(
+			circle at bottom right,
+			color-mix(in srgb, var(--surface-card-selected) 28%, transparent),
+			transparent 42%
+		);
+	--frame-highlight-border: color-mix(in srgb, var(--border-frame) 64%, white 12%);
+	padding: 16px clamp(14px, 1.8vw, 20px) 16px;
+	box-shadow:
+		0 8px 18px rgba(26, 37, 44, 0.08),
+		0 1px 4px rgba(26, 37, 44, 0.04);
+}
+
+.workspace-row {
+	gap: 14px;
+	padding-bottom: 12px;
+	border-bottom: 1px solid var(--border-soft);
+}
+
+.workspace-picker-input,
+.agent-picker-trigger,
+.session-panel-toggle {
+	appearance: none;
+	-webkit-appearance: none;
+	min-height: 44px;
+	border: 1px solid var(--border-soft);
+	border-color: var(--border-soft);
+	background: var(--surface-raised);
+	color: var(--text-primary);
+	box-shadow: none;
+}
+
+.workspace-picker-input,
+.agent-picker-trigger {
+	--outlined-background-hover: var(--surface-raised-hover);
+}
+
+.workspace-picker-input.active,
+.agent-picker-trigger.active,
+.session-panel-toggle.active {
+	border-color: var(--launcher-toggle-active-border);
+	background: var(--launcher-toggle-active-bg);
+	color: var(--launcher-toggle-active-fg);
+}
+
+.workspace-picker-input.active,
+.agent-picker-trigger.active,
+.session-panel-toggle.active {
+	--outlined-background-hover: var(--launcher-toggle-active-hover);
+}
+
+.workspace-picker-input.active .workspace-picker-label,
+.workspace-picker-input.active .workspace-picker-caret,
+.agent-picker-trigger.active .agent-picker-trigger-label,
+.agent-picker-trigger.active .agent-picker-trigger-value,
+.agent-picker-trigger.active .agent-picker-trigger-caret,
+.session-panel-toggle.active .session-panel-toggle-label,
+.session-panel-toggle.active .session-panel-toggle-summary,
+.session-panel-toggle.active .session-panel-toggle-count {
+	color: var(--launcher-toggle-active-fg);
+}
+
+.workspace-picker-label,
+.agent-picker-trigger-label {
+	color: var(--text-secondary);
+	font-size: var(--text-2xs);
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+}
+
+.workspace-picker-caret,
+.agent-picker-trigger-caret {
+	color: var(--text-muted);
+}
+
+.workspace-picker-label,
+.agent-picker-trigger-value,
+.session-panel-toggle-summary,
+.workspace-crumb,
+.suggestion-meta {
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+.workspace-picker-item,
+.agent-picker-item,
+.session-panel-item,
+.clipboard-history-panel-item {
+	border: 1px solid var(--border-soft);
+	background: var(--surface-raised);
+	color: var(--text-primary);
+	box-shadow: none;
+}
+
+.workspace-picker-item:hover,
+.agent-picker-item:hover,
+.session-panel-item:hover,
+.clipboard-history-panel-item:hover {
+	background: var(--surface-raised-hover);
+}
+
+.agent-picker-item.active,
+.session-panel-item.active,
+.clipboard-history-panel-item.active {
+	border-color: var(--border-selected);
+	background: var(--surface-card-selected);
+	color: var(--text-strong);
+}
+
+.workspace-picker-section-title,
+.agent-picker-item-meta,
+.session-panel-heading-summary,
+.clipboard-history-panel-heading-summary,
+.session-panel-path {
+	color: var(--text-muted);
+}
+
+.workspace-crumb {
+	padding: 7px 11px;
+	border: 1px solid var(--border-soft);
+	background: color-mix(in srgb, var(--surface-control-soft) 72%, transparent);
+	color: var(--text-secondary);
+	font-size: var(--text-xs);
+}
+
+.workspace-crumb:hover {
+	background: var(--surface-control-hover);
+}
+
+.session-create-button,
+.session-overflow-button {
+	min-width: 44px;
+	min-height: 44px;
+	padding: 0 10px;
+	border: 1px solid var(--border-soft);
+	background: var(--surface-raised);
+	color: var(--text-primary);
+	font-size: var(--text-sm);
+}
+
+.session-panel-toggle {
+	padding: 9px 12px 9px 14px;
+	background: var(--surface-raised);
+}
+
+.session-panel-toggle.active {
+	background: var(--launcher-toggle-active-bg);
+	border-color: var(--launcher-toggle-active-border);
+	color: var(--launcher-toggle-active-fg);
+}
+
+.session-panel-toggle.active .session-panel-toggle-summary {
+	color: var(--launcher-toggle-active-muted);
+}
+
+.session-panel-toggle.active .session-panel-toggle-count {
+	background: var(--launcher-toggle-active-count-bg);
+	color: var(--launcher-toggle-active-fg);
+}
+
+.session-dot {
+	width: 14px;
+	height: 14px;
+	box-shadow: 0 0 0 2px var(--surface-frame);
+}
+
+.session-dot.active::after {
+	border-color: color-mix(in srgb, var(--accent-strong) 45%, transparent);
+}
+
+.session-overflow-button {
+	--button-background: var(--surface-control-soft);
+	--button-background-hover: var(--surface-control-hover);
+	--button-color: var(--text-secondary);
+}
+
+.session-panel {
+	--floating-gap: 10px;
+	--floating-padding: 12px;
+	--floating-radius: var(--radius-card);
+	--floating-border: var(--border-strong);
+	--floating-background: var(--surface-panel);
+	--floating-shadow: 0 18px 40px rgba(4, 7, 10, 0.28);
+	--floating-backdrop: none;
+}
+
