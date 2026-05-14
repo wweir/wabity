@@ -3,10 +3,12 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LauncherPage } from "../features/launcher/LauncherPage";
 import {
 	getAppSettings,
+	getLauncherPinned,
 	getShortcutRuntimeStatus,
 	onOcrTranslationStarted,
 	onRevealLauncherMainPanel,
 	onShortcutRuntimeStatusChanged,
+	setLauncherPinned,
 } from "../lib/tauri/client";
 import type { ShortcutRuntimeStatus } from "../lib/tauri/types";
 import { defaultAppearanceSettings, syncAppearanceSettings } from "./appearance";
@@ -32,6 +34,7 @@ export function App() {
 	const [currentView, setCurrentView] = useState<AppView>("launcher");
 	const [windowKind] = useState<AppWindowKind>(resolveInitialWindowKind);
 	const [appearanceSettings, setAppearanceSettings] = useState(defaultAppearanceSettings);
+	const [launcherPinned, setLauncherPinnedState] = useState(false);
 	const [shortcutRuntimeStatus, setShortcutRuntimeStatus] = useState<ShortcutRuntimeStatus>({
 		toggle_launcher: { configuredShortcut: "Alt+Space", registered: true, message: null },
 		ocr_translate: { configuredShortcut: "Alt+D", registered: true, message: null },
@@ -42,6 +45,38 @@ export function App() {
 	useEffect(() => {
 		return syncAppearanceSettings(appearanceSettings);
 	}, [appearanceSettings]);
+
+	useEffect(() => {
+		let cancelled = false;
+
+		void getLauncherPinned()
+			.then((pinned) => {
+				if (!cancelled) {
+					setLauncherPinnedState(pinned);
+				}
+			})
+			.catch(() => {
+				if (!cancelled) {
+					setLauncherPinnedState(false);
+				}
+			});
+
+		return () => {
+			cancelled = true;
+		};
+	}, []);
+
+	async function handleLauncherPinnedChange(pinned: boolean) {
+		const previousPinned = launcherPinned;
+		setLauncherPinnedState(pinned);
+		try {
+			const savedPinned = await setLauncherPinned(pinned);
+			setLauncherPinnedState(savedPinned);
+		} catch (error) {
+			setLauncherPinnedState(previousPinned);
+			console.warn("failed to update launcher pinned state", error);
+		}
+	}
 
 	useEffect(() => {
 		let cancelled = false;
@@ -155,7 +190,14 @@ export function App() {
 	}, [windowKind]);
 
 	if (windowKind === "clipboard_history") {
-		return <LauncherPage shortcutRuntimeStatus={shortcutRuntimeStatus} windowKind={windowKind} />;
+		return (
+			<LauncherPage
+				launcherPinned={launcherPinned}
+				shortcutRuntimeStatus={shortcutRuntimeStatus}
+				windowKind={windowKind}
+				onLauncherPinnedChange={handleLauncherPinnedChange}
+			/>
+		);
 	}
 
 	return (
@@ -163,16 +205,20 @@ export function App() {
 			<div hidden={!launcherVisible}>
 				<LauncherPage
 					active={launcherVisible}
+					launcherPinned={launcherPinned}
 					shortcutRuntimeStatus={shortcutRuntimeStatus}
 					windowKind={windowKind}
+					onLauncherPinnedChange={handleLauncherPinnedChange}
 					onOpenSettings={() => setCurrentView("settings")}
 				/>
 			</div>
 			{currentView === "settings" ? (
 				<Suspense fallback={<div className="app-loading-state">加载设置中...</div>}>
 					<SettingsPage
+						launcherPinned={launcherPinned}
 						onAppearanceChange={setAppearanceSettings}
 						onBack={() => setCurrentView("launcher")}
+						onLauncherPinnedChange={handleLauncherPinnedChange}
 					/>
 				</Suspense>
 			) : null}

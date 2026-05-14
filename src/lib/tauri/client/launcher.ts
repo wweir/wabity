@@ -93,6 +93,14 @@ export async function setLauncherBlurAutoHideEnabled(enabled: boolean): Promise<
 	return invokeIfDesktop("set_launcher_blur_auto_hide_enabled", { enabled });
 }
 
+export async function getLauncherPinned(): Promise<boolean> {
+	return invokeOrDefault("get_launcher_pinned", false);
+}
+
+export async function setLauncherPinned(pinned: boolean): Promise<boolean> {
+	return invokeOrDefault("set_launcher_pinned", pinned, { pinned });
+}
+
 export async function onOcrError(callback: (message: string) => void) {
 	return listenIfDesktop("ocr-error", callback);
 }
