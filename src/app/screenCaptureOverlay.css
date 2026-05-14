@@ -1,0 +1,57 @@
+html,
+body,
+#root {
+	width: 100%;
+	height: 100%;
+	margin: 0;
+	background: transparent;
+}
+
+.screen-capture-overlay {
+	position: fixed;
+	inset: 0;
+	cursor: crosshair;
+	user-select: none;
+	background: rgba(8, 12, 20, 0.18);
+}
+
+.screen-capture-overlay-hint {
+	position: fixed;
+	top: 18px;
+	left: 50%;
+	transform: translateX(-50%);
+	padding: 7px 10px;
+	border: 1px solid rgba(255, 255, 255, 0.18);
+	border-radius: 999px;
+	background: rgba(10, 15, 24, 0.72);
+	box-shadow: 0 12px 36px rgba(0, 0, 0, 0.24);
+	color: rgba(255, 255, 255, 0.92);
+	font-size: 12px;
+	font-weight: 500;
+	letter-spacing: 0.01em;
+	backdrop-filter: blur(14px);
+}
+
+.screen-capture-selection {
+	position: fixed;
+	box-sizing: border-box;
+	border: 1px solid rgba(125, 211, 252, 0.96);
+	background: rgba(56, 189, 248, 0.12);
+	box-shadow:
+		0 0 0 9999px rgba(0, 0, 0, 0.2),
+		0 0 0 1px rgba(2, 132, 199, 0.45) inset;
+	pointer-events: none;
+}
+
+.screen-capture-selection span {
+	position: absolute;
+	right: -1px;
+	bottom: -28px;
+	padding: 4px 7px;
+	border-radius: 7px;
+	background: rgba(8, 12, 20, 0.82);
+	color: rgba(255, 255, 255, 0.92);
+	font-size: 11px;
+	line-height: 1;
+	white-space: nowrap;
+}
