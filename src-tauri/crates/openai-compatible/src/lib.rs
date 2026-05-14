@@ -91,6 +91,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_json_or_sse_payload_preserves_responses_delta_boundary_spaces() {
+        let payload = parse_json_or_sse_payload(
+            concat!(
+                "event: response.output_item.added\n",
+                "data: {\"type\":\"response.output_item.added\",\"response_id\":\"resp_123\",\"output_index\":0,\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+                "event: response.output_text.delta\n",
+                "data: {\"type\":\"response.output_text.delta\",\"response_id\":\"resp_123\",\"output_index\":0,\"content_index\":0,\"delta\":\"The\"}\n\n",
+                "event: response.output_text.delta\n",
+                "data: {\"type\":\"response.output_text.delta\",\"response_id\":\"resp_123\",\"output_index\":0,\"content_index\":0,\"delta\":\" advantage\"}\n\n",
+                "event: response.output_text.delta\n",
+                "data: {\"type\":\"response.output_text.delta\",\"response_id\":\"resp_123\",\"output_index\":0,\"content_index\":0,\"delta\":\" of doing this\"}\n\n",
+                "data: [DONE]\n",
+            ),
+            "responses payload",
+        )
+        .expect("responses delta stream should reconstruct");
+
+        assert_eq!(
+            extract_responses_text(&payload).as_deref(),
+            Some("The advantage of doing this")
+        );
+    }
+
+    #[test]
     fn streaming_payload_collector_emits_responses_text_deltas() {
         let mut collector = StreamingPayloadCollector::default();
         let mut deltas = Vec::new();
@@ -119,6 +143,30 @@ mod tests {
     }
 
     #[test]
+    fn streaming_payload_collector_emits_responses_delta_boundary_spaces() {
+        let mut collector = StreamingPayloadCollector::default();
+        let mut deltas = Vec::new();
+
+        collector
+            .push_bytes_with_text_stream(
+                concat!(
+                    "event: response.output_item.added\n",
+                    "data: {\"type\":\"response.output_item.added\",\"response_id\":\"resp_123\",\"output_index\":0,\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+                    "event: response.output_text.delta\n",
+                    "data: {\"type\":\"response.output_text.delta\",\"response_id\":\"resp_123\",\"output_index\":0,\"content_index\":0,\"delta\":\"The\"}\n\n",
+                    "event: response.output_text.delta\n",
+                    "data: {\"type\":\"response.output_text.delta\",\"response_id\":\"resp_123\",\"output_index\":0,\"content_index\":0,\"delta\":\" advantage\"}\n\n",
+                    "data: [DONE]\n",
+                )
+                .as_bytes(),
+                &mut |delta| deltas.push(delta.to_string()),
+            )
+            .expect("stream chunk should parse");
+
+        assert_eq!(deltas, vec!["The".to_string(), " advantage".to_string()]);
+    }
+
+    #[test]
     fn parse_json_or_sse_payload_reconstructs_chat_completion_chunk_stream() {
         let payload = parse_json_or_sse_payload(
             concat!(
@@ -134,6 +182,25 @@ mod tests {
         assert_eq!(
             extract_chat_completions_text(&payload).as_deref(),
             Some("hello")
+        );
+    }
+
+    #[test]
+    fn parse_json_or_sse_payload_preserves_chat_delta_boundary_spaces() {
+        let payload = parse_json_or_sse_payload(
+            concat!(
+                "data: {\"id\":\"chatcmpl_123\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"The\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_123\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" advantage\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_123\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" of doing this\"},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n",
+            ),
+            "chat/completions payload",
+        )
+        .expect("chat completion chunk stream should reconstruct");
+
+        assert_eq!(
+            extract_chat_completions_text(&payload).as_deref(),
+            Some("The advantage of doing this")
         );
     }
 
@@ -161,6 +228,33 @@ mod tests {
         assert_eq!(
             extract_chat_completions_text(&payload).as_deref(),
             Some("hello")
+        );
+    }
+
+    #[test]
+    fn streaming_payload_collector_emits_chat_delta_boundary_spaces() {
+        let mut collector = StreamingPayloadCollector::default();
+        let mut deltas = Vec::new();
+
+        collector
+            .push_bytes_with_text_stream(
+                concat!(
+                    "data: {\"id\":\"chatcmpl_123\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"The\"}}]}\n\n",
+                    "data: {\"id\":\"chatcmpl_123\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" advantage\"},\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: [DONE]\n",
+                )
+                .as_bytes(),
+                &mut |delta| deltas.push(delta.to_string()),
+            )
+            .expect("stream chunk should parse");
+
+        let payload = collector
+            .finish("chat payload")
+            .expect("stream should finish");
+        assert_eq!(deltas, vec!["The".to_string(), " advantage".to_string()]);
+        assert_eq!(
+            extract_chat_completions_text(&payload).as_deref(),
+            Some("The advantage")
         );
     }
 
@@ -293,6 +387,27 @@ mod tests {
                         "content": [
                             { "type": "text", "text": "hello" },
                             { "type": "text", "text": { "value": "world" } }
+                        ]
+                    }
+                }
+            ]
+        });
+
+        assert_eq!(
+            extract_chat_completions_text(&payload).as_deref(),
+            Some("hello\nworld")
+        );
+    }
+
+    #[test]
+    fn extract_chat_completions_text_keeps_array_content_part_boundaries() {
+        let payload = json!({
+            "choices": [
+                {
+                    "message": {
+                        "content": [
+                            { "type": "text", "text": "hello" },
+                            { "type": "text", "text": "world" }
                         ]
                     }
                 }

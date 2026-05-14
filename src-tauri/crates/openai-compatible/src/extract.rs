@@ -19,6 +19,12 @@ enum ChatContentKind {
     Reasoning,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextExtractionMode {
+    PreserveWhitespace,
+    TrimBoundary,
+}
+
 pub fn extract_responses_text(payload: &Value) -> Option<String> {
     if let Some(output_text) = payload
         .get("output_text")
@@ -80,6 +86,10 @@ fn trim_to_owned(value: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
+fn preserve_non_empty_to_owned(value: &str) -> Option<String> {
+    (!value.trim().is_empty()).then(|| value.to_string())
+}
+
 fn strip_reasoning_tag_markers(value: &str) -> Option<String> {
     let markers = [
         "<think>",
@@ -103,7 +113,10 @@ fn strip_reasoning_tag_markers(value: &str) -> Option<String> {
     trim_to_owned(&normalized)
 }
 
-fn split_tagged_reasoning_text(value: &str) -> Option<ChatCompletionsMessageParts> {
+fn split_tagged_reasoning_text(
+    value: &str,
+    mode: TextExtractionMode,
+) -> Option<ChatCompletionsMessageParts> {
     let lower = value.to_ascii_lowercase();
     let tag_pairs = [
         ("<think>", "</think>"),
@@ -125,21 +138,21 @@ fn split_tagged_reasoning_text(value: &str) -> Option<ChatCompletionsMessagePart
             })
             .min_by_key(|(offset, _, _)| *offset);
         let Some((offset, open, close)) = next_tag else {
-            if let Some(segment) = trim_to_owned(&value[cursor..]) {
+            if let Some(segment) = string_value_to_owned(&value[cursor..], mode) {
                 content.push(segment);
             }
             break;
         };
 
         let open_start = cursor + offset;
-        if let Some(segment) = trim_to_owned(&value[cursor..open_start]) {
+        if let Some(segment) = string_value_to_owned(&value[cursor..open_start], mode) {
             content.push(segment);
         }
 
         let reasoning_start = open_start + open.len();
         let close_offset = lower[reasoning_start..].find(close)?;
         let reasoning_end = reasoning_start + close_offset;
-        if let Some(segment) = trim_to_owned(&value[reasoning_start..reasoning_end]) {
+        if let Some(segment) = string_value_to_owned(&value[reasoning_start..reasoning_end], mode) {
             reasoning.push(segment);
             saw_reasoning_tag = true;
         }
@@ -158,8 +171,8 @@ fn split_tagged_reasoning_text(value: &str) -> Option<ChatCompletionsMessagePart
 }
 
 impl ChatContentAccumulator {
-    fn push(&mut self, kind: ChatContentKind, value: &str) {
-        let Some(segment) = trim_to_owned(value) else {
+    fn push(&mut self, kind: ChatContentKind, value: &str, mode: TextExtractionMode) {
+        let Some(segment) = string_value_to_owned(value, mode) else {
             return;
         };
 
@@ -167,7 +180,7 @@ impl ChatContentAccumulator {
             ChatContentKind::Reasoning => self.reasoning.push(segment),
             ChatContentKind::Auto | ChatContentKind::Content => {
                 if kind == ChatContentKind::Auto {
-                    if let Some(parts) = split_tagged_reasoning_text(&segment) {
+                    if let Some(parts) = split_tagged_reasoning_text(&segment, mode) {
                         if let Some(content) = parts.content {
                             self.content.push(content);
                         }
@@ -182,13 +195,13 @@ impl ChatContentAccumulator {
         }
     }
 
-    fn extend_value(&mut self, payload: &Value, kind: ChatContentKind) {
+    fn extend_value(&mut self, payload: &Value, kind: ChatContentKind, mode: TextExtractionMode) {
         match payload {
             Value::Null => {}
-            Value::String(text) => self.push(kind, text),
+            Value::String(text) => self.push(kind, text, mode),
             Value::Array(items) => {
                 for item in items {
-                    self.extend_value(item, kind);
+                    self.extend_value(item, kind, mode);
                 }
             }
             Value::Object(object) => {
@@ -214,19 +227,19 @@ impl ChatContentAccumulator {
                     "thought",
                 ] {
                     if let Some(value) = object.get(key) {
-                        self.extend_value(value, ChatContentKind::Reasoning);
+                        self.extend_value(value, ChatContentKind::Reasoning, mode);
                     }
                 }
 
                 for key in ["value", "text", "output_text", "input_text"] {
                     if let Some(value) = object.get(key) {
-                        self.extend_value(value, inferred_kind);
+                        self.extend_value(value, inferred_kind, mode);
                     }
                 }
 
                 for key in ["content", "parts", "items"] {
                     if let Some(value) = object.get(key) {
-                        self.extend_value(value, inferred_kind);
+                        self.extend_value(value, inferred_kind, mode);
                     }
                 }
             }
@@ -234,18 +247,31 @@ impl ChatContentAccumulator {
         }
     }
 
-    fn into_message_parts(self) -> Option<ChatCompletionsMessageParts> {
-        let content = join_non_empty_segments(&self.content);
-        let reasoning = join_non_empty_segments(&self.reasoning);
+    fn into_message_parts(self, mode: TextExtractionMode) -> Option<ChatCompletionsMessageParts> {
+        let content = join_non_empty_segments_for_mode(&self.content, mode);
+        let reasoning = join_non_empty_segments_for_mode(&self.reasoning, mode);
         (content.is_some() || reasoning.is_some())
             .then_some(ChatCompletionsMessageParts { content, reasoning })
     }
 }
 
 pub(crate) fn extract_chat_content_parts(payload: &Value) -> Option<ChatCompletionsMessageParts> {
+    extract_chat_content_parts_with_mode(payload, TextExtractionMode::TrimBoundary)
+}
+
+pub(crate) fn extract_chat_content_parts_preserving_whitespace(
+    payload: &Value,
+) -> Option<ChatCompletionsMessageParts> {
+    extract_chat_content_parts_with_mode(payload, TextExtractionMode::PreserveWhitespace)
+}
+
+fn extract_chat_content_parts_with_mode(
+    payload: &Value,
+    mode: TextExtractionMode,
+) -> Option<ChatCompletionsMessageParts> {
     let mut accumulator = ChatContentAccumulator::default();
-    accumulator.extend_value(payload, ChatContentKind::Auto);
-    accumulator.into_message_parts()
+    accumulator.extend_value(payload, ChatContentKind::Auto, mode);
+    accumulator.into_message_parts(mode)
 }
 
 pub fn extract_chat_completions_message_parts(
@@ -321,38 +347,43 @@ pub fn describe_chat_completions_response_issue(payload: &Value) -> String {
 }
 
 pub fn extract_text_content(payload: &Value) -> Option<String> {
+    extract_text_content_with_mode(payload, TextExtractionMode::TrimBoundary)
+}
+
+pub(crate) fn extract_text_content_preserving_whitespace(payload: &Value) -> Option<String> {
+    extract_text_content_with_mode(payload, TextExtractionMode::PreserveWhitespace)
+}
+
+fn extract_text_content_with_mode(payload: &Value, mode: TextExtractionMode) -> Option<String> {
     if let Some(text) = payload
         .as_str()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(|value| string_value_to_owned(value, mode))
     {
-        return Some(text.to_string());
+        return Some(text);
     }
 
     for key in ["value", "text", "output_text", "input_text", "refusal"] {
         if let Some(text) = payload
             .get(key)
             .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+            .and_then(|value| string_value_to_owned(value, mode))
         {
-            return Some(text.to_string());
+            return Some(text);
         }
 
         if let Some(text) = payload
             .get(key)
             .and_then(|value| value.get("value"))
             .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+            .and_then(|value| string_value_to_owned(value, mode))
         {
-            return Some(text.to_string());
+            return Some(text);
         }
     }
 
     for key in ["content", "parts", "items"] {
         if let Some(value) = payload.get(key).filter(|value| !value.is_null()) {
-            if let Some(text) = extract_text_content(value) {
+            if let Some(text) = extract_text_content_with_mode(value, mode) {
                 return Some(text);
             }
         }
@@ -361,12 +392,19 @@ pub fn extract_text_content(payload: &Value) -> Option<String> {
     if let Some(items) = payload.as_array() {
         let segments = items
             .iter()
-            .filter_map(extract_text_content)
+            .filter_map(|item| extract_text_content_with_mode(item, mode))
             .collect::<Vec<_>>();
-        return join_non_empty_segments(&segments);
+        return join_non_empty_segments_for_mode(&segments, mode);
     }
 
     None
+}
+
+fn string_value_to_owned(value: &str, mode: TextExtractionMode) -> Option<String> {
+    match mode {
+        TextExtractionMode::PreserveWhitespace => preserve_non_empty_to_owned(value),
+        TextExtractionMode::TrimBoundary => trim_to_owned(value),
+    }
 }
 
 fn extract_message_refusal(message: &Value) -> Option<String> {
@@ -462,6 +500,29 @@ fn describe_object_keys(map: &Map<String, Value>) -> String {
 
 pub(crate) fn join_non_empty_segments(segments: &[String]) -> Option<String> {
     join_non_empty_segments_with_delimiter(segments, "\n")
+}
+
+fn join_non_empty_segments_for_mode(
+    segments: &[String],
+    mode: TextExtractionMode,
+) -> Option<String> {
+    match mode {
+        TextExtractionMode::PreserveWhitespace => {
+            join_non_empty_segments_preserving_whitespace(segments)
+        }
+        TextExtractionMode::TrimBoundary => join_non_empty_segments(segments),
+    }
+}
+
+fn join_non_empty_segments_preserving_whitespace(segments: &[String]) -> Option<String> {
+    let mut joined = String::new();
+    for segment in segments {
+        if !segment.trim().is_empty() {
+            joined.push_str(segment);
+        }
+    }
+
+    (!joined.trim().is_empty()).then_some(joined)
 }
 
 pub(crate) fn join_non_empty_segments_with_delimiter(

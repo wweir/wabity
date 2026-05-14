@@ -3,7 +3,9 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use serde_json::{json, Map, Value};
 
-use crate::extract::{extract_chat_content_parts, extract_text_content};
+use crate::extract::{
+    extract_chat_content_parts_preserving_whitespace, extract_text_content_preserving_whitespace,
+};
 
 #[derive(Debug, Default)]
 pub(super) struct ChatCompletionsSseState {
@@ -52,7 +54,9 @@ impl ChatCompletionsSseState {
                     }
 
                     if let Some(content) = delta.get("content") {
-                        if let Some(parts) = extract_chat_content_parts(content) {
+                        if let Some(parts) =
+                            extract_chat_content_parts_preserving_whitespace(content)
+                        {
                             if let Some(text) = parts.content {
                                 if let Some(callback) = on_text_delta.as_deref_mut() {
                                     callback(&text);
@@ -186,7 +190,7 @@ fn append_chat_content(target: &mut String, payload: &Value) {
         return;
     }
 
-    if let Some(text) = extract_text_content(payload) {
+    if let Some(text) = extract_text_content_preserving_whitespace(payload) {
         target.push_str(&text);
     }
 }
