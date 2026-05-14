@@ -1,4 +1,4 @@
-mod app;
+pub(crate) mod app;
 mod commands;
 mod domain;
 mod infrastructure;

@@ -1,11 +1,9 @@
 use anyhow::{Context, Result};
-use std::path::PathBuf;
 use tauri::{Manager, Wry};
 #[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_global_shortcut::{Builder as GlobalShortcutBuilder, ShortcutState};
 use time::{format_description::well_known::Rfc3339, UtcOffset};
-use tokio::task;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::fmt::time::OffsetTime;
 use tracing_subscriber::EnvFilter;
@@ -15,9 +13,11 @@ use crate::{
     infrastructure::{
         autostart,
         config::{ShortcutConfig, ShortcutKey},
-        hotkey, window,
+        hotkey, screen_capture, window,
     },
-    services::{executor::ExecutorService, matcher::MatcherService, ocr, selection, translate},
+    services::{
+        executor::ExecutorService, matcher::MatcherService, screenshot_review, selection, translate,
+    },
     state::{AppState, ShortcutAction, ShortcutRuntimeState},
 };
 
@@ -169,7 +169,7 @@ pub fn run() -> Result<()> {
                                     }
                                 }
                                 ShortcutAction::OcrTranslate => {
-                                    if !shortcut_for_handler.begin_ocr_capture() {
+                                    if !shortcut_for_handler.begin_ocr_translate_flow() {
                                         return;
                                     }
 
@@ -185,6 +185,9 @@ pub fn run() -> Result<()> {
                                         })
                                         .ok()
                                         .flatten();
+                                    let selected_text_was_present = selected_text
+                                        .as_ref()
+                                        .is_some_and(|text| !text.trim().is_empty());
                                     let app_handle = _app.clone();
                                     let shortcut_state = shortcut_for_handler.clone();
                                     tauri::async_runtime::spawn(async move {
@@ -193,28 +196,41 @@ pub fn run() -> Result<()> {
                                             selected_text,
                                         )
                                         .await;
-                                        shortcut_state.end_ocr_capture();
+                                        shortcut_state.end_ocr_translate_flow();
 
                                         if let Err(error) = flow_result {
                                             tracing::error!(
                                                 error = format_args!("{:#}", error),
                                                 "failed to complete translate shortcut"
                                             );
-                                            if shortcut_state.is_clipboard_history_visible() {
-                                                tracing::debug!(
-                                                    "restored clipboard history after OCR shortcut failure; skipping launcher error window"
-                                                );
-                                                return;
-                                            }
-                                            if let Err(show_error) =
-                                                window::show_main_window_with_error(
+                                            if selected_text_was_present {
+                                                if shortcut_state.is_clipboard_history_visible() {
+                                                    tracing::debug!(
+                                                        "skipping translate failure window while clipboard history is visible"
+                                                    );
+                                                    return;
+                                                }
+
+                                                let show_result =
+                                                    window::show_main_window_with_launcher_failure(
+                                                        &app_handle,
+                                                        &format!("翻译失败：{error}"),
+                                                    );
+                                                if let Err(show_error) = show_result {
+                                                    tracing::error!(
+                                                        ?show_error,
+                                                        "failed to show launcher after translate shortcut error"
+                                                    );
+                                                }
+                                            } else if let Err(show_error) =
+                                                window::show_main_window_with_launcher_failure(
                                                     &app_handle,
-                                                    &format!("翻译失败：{error}"),
+                                                    &format!("截图 Review 失败：{error}"),
                                                 )
                                             {
                                                 tracing::error!(
                                                     ?show_error,
-                                                    "failed to show launcher after translate shortcut error"
+                                                    "failed to show launcher after screenshot review error"
                                                 );
                                             }
                                         }
@@ -547,17 +563,28 @@ async fn handle_ocr_translate_shortcut(
     app: tauri::AppHandle,
     selected_text: Option<String>,
 ) -> Result<()> {
-    let translation_source =
-        if let Some(source) = resolve_shortcut_translation_source(selected_text, None) {
-            source
-        } else {
-            let ocr_text = capture_ocr_text(app.clone()).await?;
-            let Some(source) = resolve_shortcut_translation_source(None, ocr_text) else {
-                return Ok(());
-            };
-            source
-        };
+    if let Some(source) = resolve_shortcut_translation_source(selected_text, None) {
+        execute_shortcut_translation(app, source).await?;
+        return Ok(());
+    }
 
+    start_screenshot_review(app).await
+}
+
+pub(crate) async fn execute_confirmed_screenshot_review_translation(
+    app: tauri::AppHandle,
+    text: String,
+) -> Result<()> {
+    let Some(source) = resolve_shortcut_translation_source(None, Some(text)) else {
+        anyhow::bail!("没有可翻译的 OCR 文本");
+    };
+    execute_shortcut_translation(app, source).await
+}
+
+async fn execute_shortcut_translation(
+    app: tauri::AppHandle,
+    translation_source: ShortcutTranslationSource,
+) -> Result<()> {
     window::show_main_window_with_shortcut_translation_started(
         &app,
         translation_source.mode,
@@ -595,6 +622,66 @@ async fn handle_ocr_translate_shortcut(
     Ok(())
 }
 
+pub(crate) async fn start_screenshot_review(app: tauri::AppHandle) -> Result<()> {
+    let settings = app.state::<AppState>().app_settings().await?;
+    if settings.ocr.provider == crate::domain::settings::OcrProviderKind::Disabled {
+        window::show_main_window_with_launcher_failure(
+            &app,
+            "OCR 未启用：请先在设置中启用系统 OCR 或 LLM OCR",
+        )?;
+        return Ok(());
+    }
+
+    let hidden_windows = hide_visible_shortcut_windows(&app)?;
+    let capture = match screen_capture::capture_user_selected_region(&app).await {
+        Ok(capture) => capture,
+        Err(error) => {
+            restore_hidden_shortcut_windows_after_error(
+                &app,
+                hidden_windows,
+                "screen capture failure",
+            );
+            return Err(error);
+        }
+    };
+    let Some(capture) = capture else {
+        restore_hidden_shortcut_windows(&app, hidden_windows)?;
+        return Ok(());
+    };
+
+    let state = app.state::<AppState>();
+    let payload =
+        match screenshot_review::create_session_from_capture(state.inner(), &settings, capture)
+            .await
+        {
+            Ok(payload) => payload,
+            Err(error) => {
+                restore_hidden_shortcut_windows_after_error(
+                    &app,
+                    hidden_windows,
+                    "screenshot review session creation failure",
+                );
+                return Err(error);
+            }
+        };
+    if let Err(error) = window::show_main_window_with_screenshot_review(&app, payload.clone()) {
+        restore_hidden_shortcut_windows_after_error(
+            &app,
+            hidden_windows,
+            "screenshot review window show failure",
+        );
+        if let Err(cleanup_error) = screenshot_review::remove_session(payload.session_id()).await {
+            tracing::warn!(
+                cleanup_error = format_args!("{:#}", cleanup_error),
+                session_id = payload.session_id(),
+                "failed to clean up screenshot review session after window show failure"
+            );
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 fn resolve_shortcut_translation_source(
     selected_text: Option<String>,
     ocr_text: Option<String>,
@@ -613,50 +700,6 @@ fn resolve_shortcut_translation_source(
                     text,
                 })
         })
-}
-
-async fn capture_ocr_text(app: tauri::AppHandle) -> Result<Option<String>> {
-    let settings = app.state::<AppState>().app_settings().await?;
-    let hidden_windows = hide_visible_shortcut_windows(&app)?;
-
-    let screenshot_path = capture_ocr_screenshot_path().await?;
-    let Some(screenshot_path) = screenshot_path else {
-        restore_hidden_shortcut_windows(&app, hidden_windows)?;
-        return Ok(None);
-    };
-
-    let request = ocr::OcrRequest {
-        image_path: screenshot_path.to_string_lossy().into_owned(),
-        focus_point: None,
-    };
-    let ocr_result = match perform_shortcut_ocr(&app, &settings, request, screenshot_path).await {
-        Ok(result) => result,
-        Err(error) => {
-            if should_restore_shortcut_windows_after_ocr_error(hidden_windows) {
-                restore_hidden_shortcut_windows(&app, hidden_windows)?;
-                window::emit_clipboard_history_panel_error(&app, &format!("翻译失败：{error}"))?;
-                return Ok(None);
-            }
-            return Err(error);
-        }
-    };
-
-    let Some(ocr_result) = ocr_result else {
-        restore_hidden_shortcut_windows(&app, hidden_windows)?;
-        return Ok(None);
-    };
-
-    if ocr_result.text.trim().is_empty() {
-        if should_show_shortcut_ocr_empty_text_error_in_main_window(hidden_windows) {
-            window::show_main_window_with_error(&app, "OCR 未识别到可用文本")?;
-        } else {
-            restore_hidden_shortcut_windows(&app, hidden_windows)?;
-            window::emit_clipboard_history_panel_error(&app, "OCR 未识别到可用文本")?;
-        }
-        return Ok(None);
-    }
-
-    Ok(Some(ocr_result.text))
 }
 
 fn hide_visible_shortcut_windows(app: &tauri::AppHandle) -> Result<ShortcutWindowVisibility> {
@@ -692,59 +735,17 @@ fn restore_hidden_shortcut_windows(
     }
 }
 
-fn should_restore_shortcut_windows_after_ocr_error(visibility: ShortcutWindowVisibility) -> bool {
-    visibility.restore_target() == Some(ShortcutWindowRestoreTarget::ClipboardHistory)
-}
-
-fn should_show_shortcut_ocr_empty_text_error_in_main_window(
-    visibility: ShortcutWindowVisibility,
-) -> bool {
-    visibility.restore_target() != Some(ShortcutWindowRestoreTarget::ClipboardHistory)
-}
-
-async fn capture_ocr_screenshot_path() -> Result<Option<PathBuf>> {
-    task::spawn_blocking(ocr::capture_interactive_screenshot)
-        .await
-        .context("failed to join OCR screenshot task")?
-}
-
-async fn perform_shortcut_ocr(
+fn restore_hidden_shortcut_windows_after_error(
     app: &tauri::AppHandle,
-    settings: &crate::domain::settings::AppSettings,
-    request: ocr::OcrRequest,
-    screenshot_path: PathBuf,
-) -> Result<Option<ocr::OcrResult>> {
-    match settings.ocr.provider {
-        crate::domain::settings::OcrProviderKind::LlmOcr => {
-            let result = async {
-                let model_id = settings
-                    .ocr
-                    .llm_model_id
-                    .as_deref()
-                    .context("没有配置 OCR LLM，请先在 AI 功能页选择一个条目")?;
-                let binding = settings
-                    .llm
-                    .find_model_binding(model_id)
-                    .with_context(|| format!("OCR LLM 模型不存在: {model_id}"))?;
-                ocr::recognize_with_openai_compatible_config(binding, &request).await
-            }
-            .await;
-            ocr::remove_screenshot_file(&screenshot_path);
-            result.map(Some)
-        }
-        _ => {
-            let ocr_provider = {
-                let state = app.state::<AppState>();
-                state.ocr_provider()
-            };
-            task::spawn_blocking(move || {
-                let result = ocr_provider.recognize(&request);
-                ocr::remove_screenshot_file(&screenshot_path);
-                result.map(Some)
-            })
-            .await
-            .context("failed to join OCR capture task")?
-        }
+    visibility: ShortcutWindowVisibility,
+    reason: &'static str,
+) {
+    if let Err(error) = restore_hidden_shortcut_windows(app, visibility) {
+        tracing::warn!(
+            error = format_args!("{:#}", error),
+            reason,
+            "failed to restore shortcut windows after screenshot review error"
+        );
     }
 }
 
@@ -762,9 +763,7 @@ fn prewarm_application_cache(application: crate::services::application::Applicat
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_shortcut_translation_source, should_restore_shortcut_windows_after_ocr_error,
-        should_show_shortcut_ocr_empty_text_error_in_main_window, ShortcutWindowRestoreTarget,
-        ShortcutWindowVisibility,
+        resolve_shortcut_translation_source, ShortcutWindowRestoreTarget, ShortcutWindowVisibility,
     };
     use crate::infrastructure::window::{
         ClipboardHistorySelectionMode, ShortcutTranslationSourceMode,
@@ -840,54 +839,6 @@ mod tests {
         };
 
         assert_eq!(visibility.restore_target(), None);
-    }
-
-    #[test]
-    fn shortcut_ocr_error_restores_clipboard_history_panel() {
-        let visibility = ShortcutWindowVisibility {
-            launcher_visible: true,
-            clipboard_history_visible: true,
-            clipboard_selection_mode: Some(ClipboardHistorySelectionMode::InsertIntoLauncher),
-        };
-
-        assert!(should_restore_shortcut_windows_after_ocr_error(visibility));
-    }
-
-    #[test]
-    fn shortcut_ocr_error_keeps_launcher_error_path_when_clipboard_was_not_visible() {
-        let visibility = ShortcutWindowVisibility {
-            launcher_visible: true,
-            clipboard_history_visible: false,
-            clipboard_selection_mode: None,
-        };
-
-        assert!(!should_restore_shortcut_windows_after_ocr_error(visibility));
-    }
-
-    #[test]
-    fn blank_ocr_result_restores_clipboard_history_instead_of_switching_to_main_window() {
-        let visibility = ShortcutWindowVisibility {
-            launcher_visible: true,
-            clipboard_history_visible: true,
-            clipboard_selection_mode: Some(ClipboardHistorySelectionMode::PasteExternally),
-        };
-
-        assert!(!should_show_shortcut_ocr_empty_text_error_in_main_window(
-            visibility
-        ));
-    }
-
-    #[test]
-    fn blank_ocr_result_uses_main_window_error_without_clipboard_history() {
-        let visibility = ShortcutWindowVisibility {
-            launcher_visible: true,
-            clipboard_history_visible: false,
-            clipboard_selection_mode: None,
-        };
-
-        assert!(should_show_shortcut_ocr_empty_text_error_in_main_window(
-            visibility
-        ));
     }
 
     #[test]

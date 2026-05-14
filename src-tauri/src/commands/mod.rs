@@ -36,7 +36,13 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
         | "set_launcher_pinned"
         | "get_shortcut"
         | "get_shortcut_runtime_status"
-        | "set_shortcut" => launcher::handle_invoke(invoke),
+        | "set_shortcut"
+        | "get_screenshot_review_preview"
+        | "confirm_screenshot_review"
+        | "cancel_screenshot_review"
+        | "retry_screenshot_review"
+        | "complete_screen_capture_region"
+        | "cancel_screen_capture_region" => launcher::handle_invoke(invoke),
         "get_clipboard_history"
         | "toggle_clipboard_history_entry_pin"
         | "delete_clipboard_history_entry"

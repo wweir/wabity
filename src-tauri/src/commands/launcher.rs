@@ -8,6 +8,7 @@ use tauri::{
 };
 
 use crate::{
+    app,
     domain::{
         actions::ActionMatch, application::InstalledAppMatch, execution::ExecutionProgressEvent,
         execution::ExecutionRequest, execution::ExecutionResult, file_search::FileSearchMatch,
@@ -15,9 +16,10 @@ use crate::{
     },
     infrastructure::{
         config::{normalize_workspace_root, ShortcutKey},
+        screen_capture::{self, ScreenCaptureRectPayload},
         window,
     },
-    services::rag,
+    services::{rag, screenshot_review},
     state::{AppState, ShortcutRuntimeState, ShortcutRuntimeStatusSnapshot},
 };
 
@@ -238,6 +240,71 @@ pub fn set_launcher_pinned(
         "set launcher pinned state via IPC"
     );
     Ok(pinned)
+}
+
+pub async fn complete_screen_capture_region(
+    token: String,
+    rect: ScreenCaptureRectPayload,
+) -> Result<(), String> {
+    screen_capture::complete_region_selection(token, rect)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn cancel_screen_capture_region(token: String) -> Result<(), String> {
+    screen_capture::cancel_region_selection(token)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn get_screenshot_review_preview(session_id: String) -> Result<String, String> {
+    screenshot_review::get_preview_data_url(&session_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn confirm_screenshot_review(
+    app: AppHandle,
+    session_id: String,
+    action: screenshot_review::ScreenshotReviewAction,
+    edited_text: Option<String>,
+) -> Result<(), String> {
+    let text = screenshot_review::resolve_confirmed_text(&session_id, edited_text)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    match action {
+        screenshot_review::ScreenshotReviewAction::CopySelectedText => {
+            crate::infrastructure::clipboard::write_clipboard_text(&text)
+                .map_err(|error| error.to_string())
+        }
+        screenshot_review::ScreenshotReviewAction::TranslateSelectedText => {
+            screenshot_review::remove_session(&session_id)
+                .await
+                .map_err(|error| error.to_string())?;
+            app::execute_confirmed_screenshot_review_translation(app, text)
+                .await
+                .map_err(|error| error.to_string())
+        }
+    }
+}
+
+pub async fn cancel_screenshot_review(session_id: String) -> Result<(), String> {
+    screenshot_review::remove_session(&session_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub async fn retry_screenshot_review(app: AppHandle, session_id: String) -> Result<(), String> {
+    if screenshot_review::session_exists(&session_id).await {
+        screenshot_review::remove_session(&session_id)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+
+    app::start_screenshot_review(app)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 pub async fn get_shortcut(
@@ -689,6 +756,60 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
                 .await
                 .map_err(InvokeError::from)
         }),
+        "get_screenshot_review_preview" => {
+            super::respond_async(invoke.resolver.clone(), async move {
+                let session_id =
+                    super::parse_arg(&invoke, "get_screenshot_review_preview", "sessionId")?;
+
+                get_screenshot_review_preview(session_id)
+                    .await
+                    .map_err(InvokeError::from)
+            })
+        }
+        "confirm_screenshot_review" => super::respond_async(invoke.resolver.clone(), async move {
+            let app = super::parse_arg(&invoke, "confirm_screenshot_review", "app")?;
+            let session_id = super::parse_arg(&invoke, "confirm_screenshot_review", "sessionId")?;
+            let action = super::parse_arg(&invoke, "confirm_screenshot_review", "action")?;
+            let edited_text = super::parse_arg(&invoke, "confirm_screenshot_review", "editedText")?;
+
+            confirm_screenshot_review(app, session_id, action, edited_text)
+                .await
+                .map_err(InvokeError::from)
+        }),
+        "cancel_screenshot_review" => super::respond_async(invoke.resolver.clone(), async move {
+            let session_id = super::parse_arg(&invoke, "cancel_screenshot_review", "sessionId")?;
+
+            cancel_screenshot_review(session_id)
+                .await
+                .map_err(InvokeError::from)
+        }),
+        "retry_screenshot_review" => super::respond_async(invoke.resolver.clone(), async move {
+            let app = super::parse_arg(&invoke, "retry_screenshot_review", "app")?;
+            let session_id = super::parse_arg(&invoke, "retry_screenshot_review", "sessionId")?;
+
+            retry_screenshot_review(app, session_id)
+                .await
+                .map_err(InvokeError::from)
+        }),
+        "complete_screen_capture_region" => {
+            super::respond_async(invoke.resolver.clone(), async move {
+                let token = super::parse_arg(&invoke, "complete_screen_capture_region", "token")?;
+                let rect = super::parse_arg(&invoke, "complete_screen_capture_region", "rect")?;
+
+                complete_screen_capture_region(token, rect)
+                    .await
+                    .map_err(InvokeError::from)
+            })
+        }
+        "cancel_screen_capture_region" => {
+            super::respond_async(invoke.resolver.clone(), async move {
+                let token = super::parse_arg(&invoke, "cancel_screen_capture_region", "token")?;
+
+                cancel_screen_capture_region(token)
+                    .await
+                    .map_err(InvokeError::from)
+            })
+        }
         _ => false,
     }
 }

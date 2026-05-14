@@ -769,7 +769,7 @@ pub struct ShortcutRuntimeState {
     launcher_shortcut_pressed: Arc<StdRwLock<ShortcutPressGate>>,
     ocr_translate_shortcut_pressed: Arc<StdRwLock<ShortcutPressGate>>,
     open_clipboard_history_shortcut_pressed: Arc<StdRwLock<ShortcutPressGate>>,
-    ocr_capture_active: Arc<AtomicBool>,
+    ocr_translate_active: Arc<AtomicBool>,
     transient_window_interactions: Arc<AtomicUsize>,
     #[cfg(target_os = "macos")]
     clipboard_external_paste_target_pid: Arc<StdRwLock<Option<i32>>>,
@@ -806,7 +806,7 @@ impl Default for ShortcutRuntimeState {
             open_clipboard_history_shortcut_pressed: Arc::new(StdRwLock::new(
                 ShortcutPressGate::default(),
             )),
-            ocr_capture_active: Arc::new(AtomicBool::new(false)),
+            ocr_translate_active: Arc::new(AtomicBool::new(false)),
             transient_window_interactions: Arc::new(AtomicUsize::new(0)),
             #[cfg(target_os = "macos")]
             clipboard_external_paste_target_pid: Arc::new(StdRwLock::new(None)),
@@ -1134,12 +1134,12 @@ impl ShortcutRuntimeState {
         });
     }
 
-    pub fn begin_ocr_capture(&self) -> bool {
-        !self.ocr_capture_active.swap(true, Ordering::SeqCst)
+    pub fn begin_ocr_translate_flow(&self) -> bool {
+        !self.ocr_translate_active.swap(true, Ordering::SeqCst)
     }
 
-    pub fn end_ocr_capture(&self) {
-        self.ocr_capture_active.store(false, Ordering::SeqCst);
+    pub fn end_ocr_translate_flow(&self) {
+        self.ocr_translate_active.store(false, Ordering::SeqCst);
     }
 
     pub fn begin_transient_window_interaction(&self) {
@@ -1421,15 +1421,15 @@ mod tests {
     }
 
     #[test]
-    fn ocr_capture_only_allows_one_active_flow() {
+    fn ocr_translate_only_allows_one_active_flow() {
         let state = ShortcutRuntimeState::default();
 
-        assert!(state.begin_ocr_capture());
-        assert!(!state.begin_ocr_capture());
+        assert!(state.begin_ocr_translate_flow());
+        assert!(!state.begin_ocr_translate_flow());
 
-        state.end_ocr_capture();
+        state.end_ocr_translate_flow();
 
-        assert!(state.begin_ocr_capture());
+        assert!(state.begin_ocr_translate_flow());
     }
 
     #[test]
