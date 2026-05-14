@@ -102,7 +102,7 @@
 - LLM 模型名优先是可手填的 `combobox` 输入框；远端目录作为辅助 `listbox` 候选面板，候选项暴露 `option` 语义并支持键盘遍历和点击填入。候选面板必须在当前字段内占位并让列表自身滚动，不能依赖越出编辑卡片的绝对定位；无论从输入框方向键还是右侧按钮打开，焦点都必须进入当前候选或首项，关闭或选中后再回到输入控件或触发按钮；筛选框和刷新按钮不能被放进 `listbox` 选项语义内部
 - `supportsMultimodal` 当前只对 `responses` 页面有意义；切到 `chat/completions` 或 Embedding 页面时会固定关闭
 - `supportsStateful` 不再通过独立开关暴露，而是直接折叠进“调用方式”选择器；它仍只控制 launcher 文档问答继续追问时是否复用上一轮 `response_id`
-- OCR provider 当前支持 `system`、`llm_ocr` 和 `disabled`；`llm_ocr` 不再直接保存 URL/API key，而是引用某个已配置的 LLM 模型
+- OCR provider 当前支持 `system`、`llm_ocr` 和 `disabled`；`llm_ocr` 不再直接保存 URL/API key，而是引用某个已配置的 LLM 模型。无选中文本的 `Alt+D` 翻译路径在 OCR disabled 时应给出明确不可用提示。截图采集 backend 是 macOS ScreenCaptureKit，不在 OCR provider 下混入高级 OCR、vision prompt 或屏幕解析开关
 - OCR 配置放在通用页内的 editor card；只有 provider 选中 `llm_ocr` 时才显示模型选择器，切走其他 provider 时仅隐藏，不主动清空草稿；显式保存动作放在字段列表之后的独立 action row，不再和卡片标题横向抢空间
 - 通知配置同样放在通用页内的 editor card；当前只真正落地 macOS 系统通知，但数据模型与设置项已经为 Windows / Linux 预留扩展口。通知正文支持“只显示完成状态 / 显示简短响应摘要”两档；权限由系统设置托管，不再提供未验证的应用内请求按钮
 - AI 功能页按“翻译配置 / 文档问答配置”两个独立任务卡组织，但默认仍按单列顺排，避免在当前 settings 宽度里把两张卡压成狭窄工作台
@@ -113,7 +113,7 @@
 - RAG 问答的回答阶段会读取 AI 功能页里的系统提示词和问答 LLM 模型；检索阶段仍然由 RAG 页面配置 Embedding 模型
 - OCR 保存时要求所选 LLM 条目存在、类型是普通 LLM、协议是 `responses`，且 `supportsMultimodal = true`；否则后端拒绝落盘
 - 翻译只使用 AI 功能页中显式选择的翻译 LLM；当前同时支持 `responses` 和 `chat/completions` 两种协议。内置默认提示词把英文和简体中文视为核心语言对；未显式指定目标语言时按“简中->英文、英文->简中、其他语言->简中”处理，并要求保留原文语气、风格和格式，只返回译文
-- 远程 OCR 当前调用所选条目的 OpenAI 兼容 `responses` 接口，把截图编码成 data URL 作为多模态输入；截图采集链路仍然只在 macOS 下可用
+- 远程 OCR 当前调用所选条目的 OpenAI 兼容 `responses` 接口，把截图编码成 data URL 作为多模态输入；这次外发发生在 Review 之前，因为 Review 依赖 OCR 结果。截图采集链路仍然只在 macOS 下可用，backend 是 ScreenCaptureKit。设置页只说明远程 OCR 会外发截图，不提供尚未实现的高级 OCR、vision prompt 或屏幕解析配置
 - RAG 只接受 Embedding 类型条目；没有选 provider 时允许保存空白配置，但只要配置了扫描目录就必须同时配置 Embedding 条目
 - RAG 扫描目录使用“每行一个目录”的 textarea，并提供“选择目录追加”按钮；保存后 watcher 只监听这些显式选中的目录
 - RAG 当前支持 `.md`、`.mdx`、`.txt`、`.markdown`、`.rst`、`.adoc`、`.docx`、`.pdf`；扫描边界只受“显式选择的目录 + 生效中的 ignore glob + 50 MB 大小上限”控制。`.gitignore` / `.ignore` / 全局 git ignore 不会被当成额外隐式过滤条件

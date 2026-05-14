@@ -15,6 +15,7 @@
 
 ### Launcher / 交互
 
+- [screencapturekit-ocr-workflow-design-2026-05-14.md](/Users/wweir/Sites/Mine/wabity/docs/screencapturekit-ocr-workflow-design-2026-05-14.md): 截图 OCR review、ScreenCaptureKit 迁移和未来图片 + prompt 多模态入口边界设计
 - [clipboard-history-design-2026-04-01.md](/Users/wweir/Sites/Mine/wabity/docs/clipboard-history-design-2026-04-01.md): 历史剪贴板范围、数据模型和回贴链路
 - [desktop-notification-design-2026-03-27.md](/Users/wweir/Sites/Mine/wabity/docs/desktop-notification-design-2026-03-27.md): 桌面通知完成语义与平台边界
 - [kill-command-design-2026-04-03.md](/Users/wweir/Sites/Mine/wabity/docs/kill-command-design-2026-04-03.md): `/kill` 的补全与执行语义

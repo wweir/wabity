@@ -66,6 +66,7 @@
 - `Alt+V` 会直接打开历史剪贴板面板；如果 launcher 已在前台，则进入“插入输入框”模式；否则进入“外部回贴”模式并只展示剪贴板面板
 - 历史剪贴板面板保持紧凑浮层布局：常用项显示 `Alt+A...`，最近项显示 `Alt+1...0`；这些条目热键只在面板已打开且处于活跃显示时注册，面板关闭后立即失效，不能污染 launcher 其余输入态或系统全局快捷键
 - 纯 OCR 回填会通过独立事件把识别文本写回主输入框，并把输入模式显式标成 `ocr`；外部选中文本仍保留 `selection` 模式，不能再统一退化成 `multiline`
+- 截图 OCR review 是独立 launcher 交互态：展示截图预览、OCR blocks、可编辑文本和确认动作；review 打开时暂停普通 suggestions / slash action 候选，用户确认后才进入翻译或复制。OCR blocks 默认填充可编辑文本，用户手动编辑后 blocks 仅作为参考，只有点击“填入选中”才会用当前选择覆盖 textarea；重新截图先退出旧 review，若用户取消系统截图则回到普通 launcher。未来 vision prompt 走独立显式入口，不能混入 `Alt+D` 自动翻译路径
 - `Alt+D` 快捷翻译在拿到原文后会先立即弹出 launcher，并把原文注入输入框；前端进入独立 pending 状态、临时抑制应用/动作建议；若后台翻译链路收到 SSE 增量文本，结果卡会边流式更新边保持 pending，直到最终完成事件落地
 - 轻量问答不能只把“运行状态”当成流式体验；只要 `responses` 或 `chat/completions` provider 返回正文 delta，前端就必须把累计答案实时渲染出来。若同一轮随后转入工具调用，则要显式清掉这段临时正文，避免把工具前的半截草稿伪装成最终回答
 - RAG 运行态不再由前端固定 `setInterval` 轮询；页面只在挂载时拉一次当前状态，后续全靠 `rag-runtime-status` 事件更新，避免空闲时持续 IPC 抖动
@@ -135,7 +136,7 @@
 - ACP 流式输出的自动滚动目标是“当前 turn 的最新文本尾部”，不是简单地把消息列表永远锁在顶部；否则数据虽在增量更新，用户仍看不到最新 token
 - session 更新合并以 `lastUpdatedAtMs` 和消息权重单调收敛，避免旧快照覆盖异步事件流
 - session 恢复完全依赖 agent 自身能力；agent 不支持 `session/load` 时，只提示，不伪装恢复成功
-- 全局快捷键默认使用 `Alt+Space` 唤起 launcher；`Alt+D` 会优先翻译当前应用选中文本，未选中时再回退到截图 OCR 并翻译；`Alt+V` 会直接打开历史剪贴板浮层
+- 全局快捷键默认使用 `Alt+Space` 唤起 launcher；`Alt+D` 会优先翻译当前应用选中文本，未选中时进入截图 OCR review，确认后才翻译或复制；截图 backend 使用 Wabity overlay + ScreenCaptureKit region capture；`Alt+V` 会直接打开历史剪贴板浮层
 
 约束：
 

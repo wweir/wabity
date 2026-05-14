@@ -9,6 +9,7 @@
 - `hotkey`：解析、注册、注销全局快捷键
 - `config`：集中处理本地配置、workspace 历史读写与缓存
 - `openai_compatible`：集中封装 OpenAI-compatible 的薄 client 和公共传输细节，包括 base URL 归一化、鉴权注入、请求发送、错误体提取、`responses`/`chat` 文本提取、SSE 流式消费与归并、`/models` 列表提取；具体实现位于 workspace 内部 crate `wabity-openai-compatible`，当前模块只保留宿主侧兼容导出和本地域类型转换
+- `screen_capture`：封装平台截图采集能力；macOS 主路径使用 Wabity 透明 overlay 收集 region，再通过 ScreenCaptureKit region capture 并由本地编码层落盘 取得图像，再编码并写入截图临时文件，并返回 backend、模式和 capture area。它只表达系统截图能力，不执行 OCR，不决定翻译或 vision prompt。
 
 关键约束：
 
@@ -24,6 +25,8 @@
 - 快捷键配置值和快捷键运行时注册状态是两回事；启动阶段和设置保存后都必须把当前注册结果投影回前端，供设置页总览和入口故障提示消费，不能让前端只看 `config.toml` 猜是否可用
 - `config` 负责 TOML 序列化、原子 `safe_write`、磁盘读写和内存缓存；启动时由 `AppState::new` 先读取，再把配置投影到运行时状态
 - `openai_compatible` 只负责公共协议兼容、薄传输 client 和响应解析，不承载业务级 prompt、工具编排或 provider 选择；问答、翻译、OCR、RAG embedding 仍各自保留自己的请求体和重试策略，但只要 provider 返回 SSE，就必须由这里按流读取并归并成统一 payload，而不是让上层先把整段 body 读完再猜协议
+- `screen_capture` 必须返回结构化的取消和 capture 失败状态；ScreenCaptureKit backend 禁止静默 fallback 到 shell `screencapture`。
+- 规划中的 `screen_capture` 不能依赖 `ocr` 或 LLM 配置；OCR provider 只消费它产出的图片路径和坐标元数据。
 - 独立 crate 不得依赖宿主的领域模型；像 `/models` 响应转 `LlmProviderModelEntry` 这类宿主特定投影必须留在当前 shim，而不是反向把 `domain` 拉进基础设施包
 - 配置模型新增字段时必须保持向后兼容；旧版 `config.toml` 缺字段时应通过 `serde(default)` 回填，而不是在启动阶段直接解析失败
 - macOS 下 launcher 启动时会把主窗口转换成 borderless `NSPanel`；为了覆盖全屏 Space，它必须继续叠加 `nonactivating_panel + can_join_all_spaces + full_screen_auxiliary + stationary`，并提升到 `Status` 层级。这里不能只靠普通可激活 panel 去压全屏应用，因为原生 fullscreen 行为本身就要求 auxiliary nonactivating panel
@@ -45,7 +48,7 @@
 - 运行时平台特性配置必须在主线程执行，避免直接从普通线程调用 AppKit
 - macOS 下命中 `NSPanel` 的显隐、置前和尺寸调整统一通过 Tauri `run_on_main_thread` 调度；后台 OCR 任务结束后也只能经这条通道回到窗口层
 - launcher 显隐不依赖底层 `is_visible()` 查询，而是维护独立运行时状态；全局快捷键切换仍按“按下一次只触发一次”的门闩处理来避免同一轮组合键重复 toggle，但运行时必须容忍 macOS 丢失 `Released` 事件：若 release 长时间未到，门闩要自动恢复，不能把 launcher / 翻译快捷键永久锁死
-- 当前全局快捷键分成两类：launcher 唤起，以及“优先翻译当前选中文本；没有选中内容时再截图 OCR 并翻译”。涉及截图的这条翻译回退链路继续和其它 OCR 调用共享同一个“只允许单次截图流程在跑”的运行时锁，避免并发截图互相踩状态。macOS 下读取选中文本必须留在快捷键处理线程，不能先 `spawn` 到 Tokio worker 再调用输入模拟
+- 当前全局快捷键分成两类：launcher 唤起，以及“优先翻译当前选中文本；没有选中内容时走截图 OCR 回退”。Alt+D 流程仍必须经过同一个运行时门闩，避免连续快捷键并发触发翻译或截图；有选中文本路径不创建 review session。macOS 下读取选中文本必须留在快捷键处理线程，不能先 `spawn` 到 Tokio worker 再调用输入模拟
 - 前端驱动的内部窗口尺寸同步也必须显式包进 `begin/end_transient_window_interaction`；否则问答结果或长文本回填触发的 resize 抖动会被错误识别成真实离焦
 - 但这条自动尺寸同步在 QA 结果展示期不能继续自由 shrink；前端会把 `useAutoResizeWindow` 切到“只增不减”的受限模式，让后续 Markdown / 高亮 / Mermaid 等异步内容仍能把窗口撑开，同时避免短时测量回退把 `NSPanel.set_content_size` 又缩回去截断内容
 - `resize_main_window(...)` 的调用时间必须保持可观测；排查 macOS 失焦问题时，日志里应该能直接看到每次原生 resize 的请求尺寸与实际尺寸，不能把关键窗口事件只埋在 `debug` 级别

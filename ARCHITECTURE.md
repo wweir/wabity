@@ -53,6 +53,7 @@
 - 本地配置文件、workspace 历史与文件系统
 - 应用索引、目录监听、运行中进程枚举
 - OpenAI 兼容 LLM / OCR / Embedding 服务
+- macOS 截图采集、ScreenCaptureKit backend 与 Screen Recording 权限
 - ACP agent 进程
 - USearch 索引文件与 SQLite
 
@@ -211,7 +212,28 @@ ACP 链路是独立运行时：
 - transcript 顺序由运行时事件决定，前端不重排成摘要模板
 - session 级 mode / model / runtime option 只属于当前 session，不回写全局 AI 设置
 
-### 6.4 设置保存
+### 6.4 截图 OCR 与 Review
+
+`Alt+D` 的稳定入口语义保持为“优先翻译当前应用选中文本；没有选中文本时再进入截图 OCR”。无选中文本时当前进入 Screenshot Review 确认边界；截图 backend 主路径是 Wabity 自己的透明 overlay 收集 region，再交给 macOS `ScreenCaptureKit` 保存截图，不再调用 shell `screencapture`。
+
+无选中文本时的数据流为：
+
+1. 隐藏当前 Wabity 快捷窗口，避免把 launcher / clipboard panel 截进图片。
+2. 通过 `infrastructure/screen_capture` 打开透明 overlay 采集用户确认的 region；Rust 用 ScreenCaptureKit 拿到截图图像，再用本地 ImageIO 写入 Wabity 专用临时目录。取消选择会结束本次流程并恢复此前隐藏的快捷窗口。
+3. 通过当前 OCR provider 识别文本和 blocks；本地 provider 仍是 macOS Vision，远程 provider 仍是 OpenAI-compatible `responses` 多模态 OCR。若 provider 是 `llm_ocr`，截图会在 Review 出现前发送给远程 OCR provider，设置页和 Review UI 必须明确提示。
+4. 前端展示 Screenshot Review UI，显示截图预览、OCR blocks、可编辑文本和确认动作。OCR blocks 用来快速生成可编辑文本：默认全选并填入 textarea；用户切换 blocks 时同步覆盖 textarea；一旦用户手动编辑 textarea，blocks 退化为参考，不再隐式覆盖，除非用户显式点击“填入选中”。
+5. 用户确认后才进入翻译或复制；取消、重试和空 OCR 都不能被当成空文本翻译。重新截图会先结束旧 review state，新的截图成功后再打开新 session；用户取消系统截图时回到普通 launcher。未来 vision prompt 必须走独立显式入口。
+
+职责边界：
+
+- `infrastructure/screen_capture` 只封装平台截图能力、权限错误和 capture metadata，不执行 OCR，不决定翻译。
+- `services/ocr` 只识别给定图片中的文字，不再长期拥有截图交互逻辑。
+- `services/screenshot_review` 属于用例编排层：它负责 screenshot -> review session -> OCR -> review -> 用户确认动作，并拥有临时文件生命周期；当前只处理翻译和复制。OCR 失败不是 fatal event，必须保留截图预览并允许重试。
+- 前端 review state 是独立交互态；普通 launcher suggestions、动作匹配和问答状态不能在 review 打开时继续抢输入。
+
+当前明确不做高级 OCR、屏幕解析和 vision prompt：不引入 RapidOCR、PaddleOCR、OmniParser、UI-TARS 或自动桌面 agent；OCR blocks 和 confidence 只能辅助用户确认，不能让程序自动猜测应该点哪里或发送什么。未来 `/img` / `/vision` 这类“图片 + prompt”能力必须走显式用户动作，不能和 `Alt+D` 自动翻译路径混在一起，也不能因为 OCR 为空自动发送整图。
+
+### 6.5 设置保存
 
 设置页只维护草稿、字段级错误展示和用户操作。
 
@@ -233,6 +255,7 @@ ACP 链路是独立运行时：
 - macOS Dock 展示策略更新
 - 自启动状态与系统登录项对账
 - OCR / LLM / RAG / ACP / MCP 运行时配置更新
+- 截图 backend 与 Screen Recording 权限状态变化后的运行时反馈
 
 其中 LLM 配置明确拆成两层：
 
@@ -248,7 +271,7 @@ ACP 链路是独立运行时：
 - 模型接入页的前端结构必须保留 provider 目录与当前编辑表单的边界；宽窗口可用双栏 master-detail，窄窗口回退单列；有条目时不显示顶部 quick jump，页头之后直接进入双栏工作区。右侧编辑区外层卡片必须保留稳定内边距，状态条和分段标题不能贴到或越过外框。组内模型列表使用纵向单选目录展示模型名、调用方式和可用功能，并支持方向键切换；新增和删除动作不能混进模型目录项。模型名远端候选使用可手填 combobox + listbox 语义，候选面板在字段内占位并由列表自身滚动，筛选/刷新动作不能混进 option 列表语义。设置页初始化 LLM 草稿时必须结合内置模板目录清理无效 `builtin_preset_model_id`，Rust 保存链路也必须在校验前做同样归一化
 - 配置读取只接受当前两层结构和 `*ModelId` 引用；旧版平铺模型字段、`*ProviderId` 路由字段和 `responsesModel + embeddingModel` 拆分逻辑已移除
 
-### 6.5 Launcher 固定窗口
+### 6.6 Launcher 固定窗口
 
 Launcher 固定状态是会话级运行态，只保存在 `ShortcutRuntimeState`，不写入 `config.toml`。它只改变失焦自动隐藏判断：`launcher_pinned = true` 时窗口层跳过 blur auto-hide，并保留 macOS panel 可见性补偿；`Esc`、`Alt+Space`、关闭按钮、执行结果要求关闭窗口等显式隐藏路径仍然生效。
 
@@ -259,7 +282,7 @@ Launcher 固定状态是会话级运行态，只保存在 `ShortcutRuntimeState`
 - 设置页 header 在关闭按钮旁展示同一个固定按钮
 - 所有入口控制同一个 `launcherPinned` 状态，不区分 launcher 和设置页
 
-### 6.6 RAG 文档摄取与状态反馈
+### 6.7 RAG 文档摄取与状态反馈
 
 RAG 建索引固定分两层：
 
@@ -309,11 +332,13 @@ RAG 建索引固定分两层：
 7. 内置 MCP server 是统一 loopback endpoint + 模块注册，不伪装成多条普通外部 server
 8. 常驻索引和缓存默认优先收紧内存占用，再考虑额外吞吐；预热轮询、重复字符串和大批次中间态都不是默认选项
 9. PDF 摄取优先保留可验证的可读文本，再决定是否索引；“抽到了非空字符串”不等于“可用于 embedding 的文本”
+10. 截图 OCR 主路径是 ScreenCaptureKit region capture 并由本地编码层落盘 + 用户确认边界；截图落盘由本地 ImageIO 完成，高级 OCR、vision prompt 或屏幕解析仍必须作为后续显式入口处理；没有 review UI 的自动推断不是可接受的主路径
 
 ## 9. 文档地图
 
 - 根目录 [README.md](/Users/wweir/Sites/Mine/wabity/README.md): 项目简介、开发命令、打包与发布说明
 - [docs/README.md](/Users/wweir/Sites/Mine/wabity/docs/README.md): `docs/` 文档索引与保留规则
+- [docs/screencapturekit-ocr-workflow-design-2026-05-14.md](/Users/wweir/Sites/Mine/wabity/docs/screencapturekit-ocr-workflow-design-2026-05-14.md): Screenshot Review、ScreenCaptureKit 截图 backend 与后续 vision prompt 边界设计
 - [src/features/settings/README.md](/Users/wweir/Sites/Mine/wabity/src/features/settings/README.md): 设置页局部约束与模块职责
 - [src/features/launcher/README.md](/Users/wweir/Sites/Mine/wabity/src/features/launcher/README.md): launcher feature 约束
 - [src-tauri/src/services/README.md](/Users/wweir/Sites/Mine/wabity/src-tauri/src/services/README.md): Rust service 层职责

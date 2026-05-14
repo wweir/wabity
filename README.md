@@ -7,7 +7,7 @@
 - `Tauri v2` 桌面壳与 `React` 前端集成
 - 同一用户登录会话内只允许一个 launcher 原生实例；重复启动会直接唤醒已有窗口
 - 全局快捷键支持切换主窗口、翻译选中文本/OCR，以及直接打开历史剪贴板；默认分别为 `Alt+Space`、`Alt+D`、`Alt+V`
-- macOS 下支持全局快捷键触发交互式截图 OCR；`Alt+D` 会先尝试翻译当前应用的选中文本，只有没有选中文本时才回退到截图 OCR 并翻译
+- macOS 下支持全局快捷键触发交互式截图 OCR；`Alt+D` 会先尝试翻译当前应用的选中文本，未选中时进入 Screenshot Review，用户确认/编辑后才翻译或复制。截图 backend 使用 Wabity 透明 overlay 收集区域，并通过 ScreenCaptureKit 保存截图，不再调用 shell `screencapture`
 - OCR provider 现已支持本地 macOS Vision 和远程 OpenAI 兼容多模态模型
 - 设置页已把快捷键、外观和 OCR 配置并入“通用”；“AI 功能”页按“翻译配置 / 文档问答配置”两个任务卡片维护各自的模型和系统提示词；LLM 页面按 provider 组维护 OpenAI 风格接入点和组内多个模型，编辑流收敛为“供应商预设与连接 / 模型、调用方式与用途”两段：配置类型直接区分 `LLM · responses stateless`、`LLM · responses stateful`、`LLM · chat/completions` 和 `Embedding`，其中 `responses` 页面仍可额外声明多模态，并提供 `OpenAI / DeepSeek / Ollama / 智谱 / SiliconFlow / 阿里云百炼 / 火山方舟 / 腾讯混元` 等内置模板；RAG 配置页支持用这些 embedding 模型为选中目录中的 `.md`、`.mdx`、`.txt`、`.markdown`、`.rst`、`.adoc`、`.docx`、`.pdf` 文件构建并持续维护本地文档索引，底层采用 SQLite 元数据与 chunk 真相源配合 USearch 派生向量索引，支持 watcher 增量维护、`staged/active` 版本切换，以及基于 `原文文本 + embedding fingerprint` 的全局向量复用以减少重复 embedding；当前按文档类型限制单文件大小：纯文本/Markdown 20 MB、`docx` 16 MB、`pdf` 8 MB
 - 透明窗口 + 圆角 launcher 外观
@@ -19,7 +19,7 @@
 - `/base64` 会对载荷自动判别：合法 Base64 文本优先解码，否则按普通文本编码为 Base64
 - 光标所在 `@token` 会触发当前 workspace 的模糊文件搜索；查询满足 2 个英文字符或 1 个非英文字符后，在输入后 50ms 发起查询
 - 文本类动作执行与结果反馈
-- OCR provider 抽象、macOS Vision 实现，以及远程 LLMOCR 实现
+- OCR provider 抽象、macOS Vision 实现、远程 LLMOCR 实现、截图 OCR review，以及 ScreenCaptureKit 截图 backend 设计
 - 当前 workspace 写入 `config.toml`，最近目录历史单独写入 `workspace-history.toml`
 - 设置页已把 `ACP Agent` 和 `MCP` 拆成两个一级菜单：ACP Agent 页以编辑表单为主，预设改成下拉填表入口；MCP server 改成全局共享清单，并在建会话时通过 ACP `mcp_servers` 统一透传给选中的 agent
 

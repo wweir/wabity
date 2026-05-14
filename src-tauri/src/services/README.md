@@ -10,7 +10,8 @@
 - `executor`：执行动作并返回结构化结果
 - `open_target`：解析 launcher `/open` 输入，并把 URL、文件或目录交给系统默认 opener
 - `file_search`：基于当前 workspace 做模糊文件搜索；运行时维护多 workspace LRU 缓存，并为已命中的 workspace 安装目录 watcher，尽量用增量更新替代反复全量重建；本地快照只保留路径字符串，展示字段按需投影
-- `ocr`：定义 OCR provider 抽象、macOS Vision provider、OpenAI 兼容多模态 provider，以及交互式截图 OCR 所需的临时文件与命中点模型；远程 OCR 请求复用常驻 async HTTP client，但系统截图与本地 Vision 仍保留阻塞系统调用边界
+- `ocr`：定义 OCR provider 抽象、macOS Vision provider、OpenAI 兼容多模态 provider，以及命中点 / 文本块模型；它只识别给定图片，不长期拥有截图交互。远程 OCR 请求复用常驻 async HTTP client，本地 Vision 仍保留阻塞系统调用边界
+- `screenshot_review`：目标用例层，编排 ScreenCaptureKit 截图结果、review session、OCR、用户确认动作和临时文件生命周期；`Alt+D` 无选中文本路径必须确认后再翻译，并把 OCR 失败作为可交互 review 状态而不是 fatal event。它不是高级屏幕解析服务
 - `question_answer_backend`：对外暴露稳定问答后端函数接口，负责把 `AppState` 或集成测试传入的运行时上下文收口到统一入口；具体实现继续委托 `rag_answer`，但调用方不再依赖其内部模块布局
 - `rag_backend`：通过库导出 `RagIndexService` 和检索入口，供集成测试直接覆盖“建库 + 混合检索”链路；它不是新的业务层，只是现有 `rag` / `rag_query` 的稳定测试边界
 - `rag`：维护本地 SQLite chunk 真相源、SQLite 元数据/FTS 词法索引、SQLite 向量摘要元数据、USearch ANN 索引文件和 sidecar manifest，负责目录扫描、文件监听、文档抽取、文本切分、行号/页码/标题元数据提取、embedding 调用、chunk 复用、版本切换和增量重建；`rag_chunks` 会额外持久化每条向量的稳定 `vector_hash`，sidecar manifest 保存少量确定性 probe 向量语义哈希和整份 `.usearch` 文件摘要。probe 负责快速抽查，整文件摘要负责兜底同大小/同 mtime 的非 probe 污染；升级兼容会尝试通过 schema 迁移补齐 `vector_hash` 列。对于缺 `vector_hash` 且已回收 blob 的 legacy active 行，默认不会把当前 USearch 直接反写成新真相，只有旧 manifest probe 仍能验证当前 USearch 时才允许受控补齐缺失 hash；实现按 `service`、`indexing`、`storage`、`embedding`、`chunking`、`config`、`status`、`model` 拆成目录模块，`storage/metadata.rs` 单独承接 `rag_files`、FTS lexical index 和 SQLite 投影读写，避免继续把运行时编排、切块、向量请求和持久化混在一个文件里
@@ -41,7 +42,7 @@
 - `matcher` / `executor` 对 `base64_text` 额外支持 `/base64 <payload>`；执行时会先尝试把载荷识别为 UTF-8 Base64 文本，命中则解码，否则编码；当前与其他纯文本 slash 动作一样，支持 `inline`、`multiline`、`ocr`、`clipboard`、`selection`
 - `matcher` / `executor` 当前额外内建一组纯文本处理 slash 动作：`/upper`、`/title`、`/lower`、`/camel`、`/snake`、`/trim`、`/unique`、`/sort`、`/words`、`/lines`
 - `matcher` / `translate` 额外支持 `/translate`、`/fy`、`/tr`；执行时会读取 AI 功能页里的翻译提示词，并严格使用翻译 LLM 条目声明的当前协议：`responses` 走 `/responses`，`chat/completions` 走 `/chat/completions`。默认提示词把英文和简体中文视为核心语言对；未指定目标语言时按“简中->英文、英文->简中、其他语言->简中”处理，并要求保留原文语气、风格和格式，只返回译文。翻译请求无论命中哪个模型，都会显式关闭 `thinking` 并以流式方式消费 provider 的 SSE 输出；最终响应若混入 reasoning，也只能作为次级 disclosure 展示，不能冒充主译文
-- 全局快捷键当前支持“优先翻译当前应用选中文本；如果没有选中内容，再截图 OCR 并翻译”；这条链路会先在快捷键处理线程尝试读取选中文本，只有在选中文本缺失时才会走截图与 OCR provider 链路；一旦拿到待翻译文本，窗口层会先发出“翻译开始”事件并立即显示 launcher，翻译请求直接走 async `translate` 服务；流式 delta 会持续回填到 launcher，最终完成时再发结果事件收口
+- 全局快捷键当前支持“优先翻译当前应用选中文本；如果没有选中内容，再截图 OCR review”。无选中文本路径必须等用户在 review 中确认文本后，才发出“翻译开始”事件并进入 async `translate` 服务；流式 delta 继续回填到 launcher，最终完成时再发结果事件收口。截图采集主路径是 Wabity overlay + ScreenCaptureKit region capture 并由本地编码层落盘
 - `ocr` 在远程多模态 provider 下固定内置一条“只返回图片文字并保留换行”的 OCR prompt；服务会把截图字节编码成 data URL，并用 `responses` 的 `input_text + input_image` 结构发送，避免前端再拼装临时图片协议
 - `camel_case_text` / `snake_case_text` 逐行做命名风格转换；单词拆分会同时识别空白、常见分隔符和 `camelCase` / `HTTPServer` 这类大小写边界
 - `unique_lines` / `sort_lines` 按行处理文本：`/unique` 保留首次出现的行，`/sort` 做字典序排序；它们不会顺手裁剪空白，清理空白仍由 `/trim` 负责
@@ -59,7 +60,8 @@
 - `ocr` 现在支持两类 provider：macOS 本地 `Vision`，以及通过 OpenAI 兼容 `responses` 接口发送图文输入的远程多模态模型
 - `translate`、`ocr`、`rag_answer`、`rag` embedding 和设置页 `/models` 拉取都必须复用统一 OpenAI-compatible 薄 client 与适配逻辑；新增链路如果继续手写重复传输或解析，后续 provider 兼容性会再次分叉
 - OCR provider 选择和 OpenAI 风格 provider/model 两层声明来自配置层：provider 层提供 `base_url/api_key/protocol`，model 层提供 `id/model_type/model/supports_multimodal` 等能力标记；当前 OCR 只消费“普通 LLM 类型且显式开启多模态”的具体 `llmModelId`。保存设置时会做基本校验，启动阶段遇到坏配置则降级为明确不可用状态
-- 交互式截图本身仍然只在 macOS 下实现；远程 provider 目前只是替换“识别器”，没有顺带把截图能力跨平台化
+- 交互式截图本身仍然只在 macOS 下实现；当前 backend 是 ScreenCaptureKit region capture 并由本地编码层落盘。远程 provider 目前只是替换“识别器”，没有顺带把截图能力跨平台化；若选择远程 OCR，截图会在 Review 出现前发给所选 provider
+- 高级 OCR、vision prompt 和屏幕解析不在当前服务层范围内；OCR blocks / confidence 只能作为 review UI 的选择依据，不能让后端自动推断用户要翻译哪块、点击哪个 UI 或自动发送整图
 - `rag` 只消费配置层里显式配置成 Embedding 类型的条目；如果当前 Embedding provider 显式声明“接受多模态 input”，现有文本索引与查询链路会把文本 query/chunk 包装成 OpenAI-compatible 风格的 `input_text` content parts 再发往 `/embeddings`，避免运行时仍然硬编码成纯字符串数组；但当前索引与查询仍然只把文本 chunk 送入 embedding，不会直接把图片或视觉内容送进向量库。它当前会扫描后缀为 `.md`、`.mdx`、`.txt`、`.markdown`、`.rst`、`.adoc`、`.docx`、`.pdf` 的文档源，并按文档类型收紧单文件上限：纯文本/Markdown 20 MB、`docx` 16 MB、`pdf` 8 MB。纯文本类文件仍要求内容是可读 UTF-8 且不含 NUL 字节；`docx` 会先通过独立抽取层把 `word/document.xml` 规范化成 Markdown 风格文本；文本型 `pdf` 会先使用 `lopdf` 按页提取文本，但不再把“页内任一 text chunk 失败”直接升级成整页失败，而是保留可读 chunk、记录页级 warning，并对明显控制字符污染或可疑乱码页做轻量质量闸门后再进入 chunk 打包链路。Markdown 类文件和 `docx` 会先按标题、列表项、代码块和普通段落做语义预切，再在同一 `heading_path` 下按字符预算打包；只有单个语义块本身超过硬上限时，才回退到 `MarkdownSplitter` 在块内继续拆分。其余文本文件继续使用 `TextSplitter`。PDF chunk 主锚点是 `page_start/page_end`，文本文件继续保留 `line_start/line_end/paragraph_line_start`；Markdown fenced code block（含 info string）里的标题样式文本不会污染层级元数据。抽取 warning 会进入运行时状态和手动重建结果，前端可见最近若干条
 - `rag` 的扫描边界只受“显式选择的目录 + 生效中的 ignore glob”控制；不会额外把 `.gitignore`、`.ignore` 或全局 git ignore 当成隐式过滤条件，避免用户选中的文档被静默漏索引。这里的 ignore glob 分成两层：内置固定规则和用户追加规则；内置规则至少覆盖 `.git`、`node_modules`、`target`、`dist`、`build`、`out`、`.next`、`.nuxt`、`.svelte-kit`、`.turbo`、`.cache`、`coverage`、`.venv`、`venv`、`vendor`、`Pods`，前端不提供取消入口，后端归一化也会强制补回
 - `rag` 会把每个 chunk 的完整片段级元数据、文本和向量写入 SQLite `rag_chunks`，并给每条 active chunk 分配稳定的整数 `vector_key`；USearch 文件只保存 `vector_key -> vector` 的 ANN 结构，不再重复保存整份片段元数据
