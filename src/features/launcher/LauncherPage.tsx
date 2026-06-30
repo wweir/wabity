@@ -15,7 +15,6 @@ import {
 	dismissClipboardHistoryPanel as dismissClipboardHistoryWindow,
 	executeAction,
 	getClipboardHistory,
-	getAcpAgents,
 	getScreenshotReviewPreview,
 	getAcpSessionDetail,
 	getWorkspace,
@@ -50,15 +49,13 @@ import {
 } from "../../lib/tauri/client";
 import { useAutoResizeWindow } from "../../lib/tauri/useAutoResizeWindow";
 import type {
-	AcpAgentCatalog,
-	AcpAgentConfig,
-	ClipboardHistoryEntry,
-	ClipboardHistorySnapshot,
-	ClipboardHistorySelectionMode,
 	AcpRestoreNotice,
 	AcpSessionMessage,
 	AcpSessionDetail,
 	AcpSessionSummary,
+	ClipboardHistoryEntry,
+	ClipboardHistorySnapshot,
+	ClipboardHistorySelectionMode,
 	ShortcutRuntimeStatus,
 	ScreenshotReviewPayload,
 	WorkspaceState,
@@ -129,7 +126,6 @@ import { LauncherComposer } from "./components/LauncherComposer";
 import { LauncherFeedback } from "./components/LauncherFeedback";
 import { RestoreNoticeList } from "./components/RestoreNoticeList";
 import { WorkspacePickerPanel } from "./components/WorkspacePickerPanel";
-import { AgentPickerPanel } from "./components/AgentPickerPanel";
 import { LauncherSuggestionsSection } from "./components/LauncherSuggestionsSection";
 import { LauncherSessionSection } from "./components/LauncherSessionSection";
 import { LauncherClipboardSection } from "./components/LauncherClipboardSection";
@@ -199,11 +195,6 @@ export function LauncherPage({
 	const [rawText, setRawText] = useState("");
 	const [sessionSummaries, setSessionSummaries] = useState<AcpSessionSummary[]>([]);
 	const [sessionDetails, setSessionDetails] = useState<Record<string, AcpSessionDetail>>({});
-	const [agentCatalog, setAgentCatalog] = useState<AcpAgentCatalog>({
-		agents: [],
-		defaultAgentId: null,
-	});
-	const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
 	const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
 	const [activeSlashAction, setActiveSlashAction] = useState<ActionDescriptor | null>(null);
 	const [result, setResult] = useState<ExecutionResult | null>(null);
@@ -239,7 +230,6 @@ export function LauncherPage({
 	const [runtimeControlPendingKey, setRuntimeControlPendingKey] = useState<string | null>(null);
 	const [sessionPanelOpen, setSessionPanelOpen] = useState(false);
 	const [workspacePickerOpen, setWorkspacePickerOpen] = useState(false);
-	const [agentPickerOpen, setAgentPickerOpen] = useState(false);
 	const [restoreNotices, setRestoreNotices] = useState<AcpRestoreNotice[]>([]);
 	const [clipboardHistory, setClipboardHistory] = useState<ClipboardHistorySnapshot>({
 		pinnedEntries: [],
@@ -259,8 +249,6 @@ export function LauncherPage({
 	const clipboardPanelRef = useRef<HTMLElement | null>(null);
 	const workspacePickerTriggerRef = useRef<HTMLButtonElement | null>(null);
 	const workspacePickerPanelRef = useRef<HTMLDivElement | null>(null);
-	const agentPickerTriggerRef = useRef<HTMLButtonElement | null>(null);
-	const agentPickerPanelRef = useRef<HTMLDivElement | null>(null);
 	const inputAnchorRef = useRef<HTMLDivElement | null>(null);
 	const inputRef = useRef<HTMLInputElement | HTMLTextAreaElement | null>(null);
 	const pendingFocusAnimationFrameRef = useRef<number | null>(null);
@@ -432,11 +420,6 @@ export function LauncherPage({
 		sessionSummaries.find((session) => session.sessionId === activeSessionId) ??
 		activeSession?.session ??
 		null;
-	const selectedAgent =
-		agentCatalog.agents.find((agent) => agent.id === selectedAgentId) ??
-		agentCatalog.agents.find((agent) => agent.id === agentCatalog.defaultAgentId) ??
-		agentCatalog.agents[0] ??
-		null;
 	const workspaceBreadcrumbs = useMemo(() => buildWorkspaceBreadcrumbs(workspace), [workspace]);
 	const flattenedClipboardEntries = useMemo(
 		() => [...clipboardHistory.pinnedEntries, ...clipboardHistory.recentEntries],
@@ -466,17 +449,6 @@ export function LauncherPage({
 		initialWidth: 280,
 		watchKey: `${frameWidth}:${recentWorkspaceRoots.length}`,
 	});
-	const agentPickerOffset = useFloatingPanelOffset({
-		open: agentPickerOpen,
-		triggerRef: agentPickerTriggerRef,
-		shellRef,
-		horizontalAlign: "left",
-		gap: 8,
-		minWidth: 220,
-		extraWidth: 36,
-		initialWidth: 220,
-		watchKey: `${agentCatalog.agents.length}:${frameWidth}:${selectedAgentId ?? ""}`,
-	});
 	const sessionPanelOffset = useFloatingPanelOffset({
 		open: sessionPanelOpen,
 		triggerRef: sessionPanelTriggerRef,
@@ -490,7 +462,7 @@ export function LauncherPage({
 		watchKey: `${frameWidth}:${sessionSummaries.length}:${activeSessionId ?? ""}`,
 	});
 	const sessionCanSend = activeSession ? activeSession.session.status === "idle" : false;
-	const agentConfigured = agentCatalog.agents.length > 0;
+	const agentConfigured = true;
 	const appSearchActive = suggestionMode === "app";
 	const appSearchPending =
 		appSearchActive &&
@@ -622,18 +594,10 @@ export function LauncherPage({
 		!fileMode &&
 		rawText.trim().length > 0;
 	const showAgentActionButton = launcherMode;
-	const canRunAgentAction = agentConfigured
-		? canTriggerAgentAction
-		: Boolean(onOpenSettings) &&
-			!operationPending &&
-			!shortcutTranslationPending &&
-			!screenshotReviewOpen &&
-			!creatingSession;
-	const agentActionLabel = "Pi Agent";
-	const agentActionTitle = agentConfigured
-		? `${agentActionLabel} (${agentActionShortcutLabel})`
-		: "打开 Pi Agent 设置";
-	const showAgentActionShortcut = agentConfigured;
+	const canRunAgentAction = canTriggerAgentAction;
+	const agentActionLabel = "Agent";
+	const agentActionTitle = `${agentActionLabel} (${agentActionShortcutLabel})`;
+	const showAgentActionShortcut = true;
 
 	const clearScheduledLauncherInputFocus = useCallback(() => {
 		if (typeof window !== "undefined" && pendingFocusAnimationFrameRef.current !== null) {
@@ -827,7 +791,6 @@ export function LauncherPage({
 		setClipboardPanelOpen(false);
 		setClipboardSelectionMode("paste_externally");
 		setWorkspacePickerOpen(false);
-		setAgentPickerOpen(false);
 		setActiveSessionId(null);
 		setSessionSummaries((current) =>
 			current.map((session) => (session.isActive ? { ...session, isActive: false } : session)),
@@ -848,7 +811,7 @@ export function LauncherPage({
 			})
 			.catch((error: unknown) => {
 				if (isTrackedLauncherRequestCurrent(resetEpoch)) {
-					console.warn("failed to clear active Pi Agent session while dismissing launcher", error);
+					console.warn("failed to clear active Agent session while dismissing launcher", error);
 				}
 			});
 	}, [
@@ -1178,10 +1141,6 @@ export function LauncherPage({
 			setWorkspaceState(nextWorkspace);
 			resetQaConversationRef.current();
 		});
-		void getAcpAgents().then((catalog) => {
-			setAgentCatalog(catalog);
-			setSelectedAgentId(catalog.defaultAgentId ?? catalog.agents[0]?.id ?? null);
-		});
 		void getClipboardHistory().then((snapshot) => {
 			setClipboardHistory(snapshot);
 		});
@@ -1231,7 +1190,6 @@ export function LauncherPage({
 				setClipboardSelectionMode(payload.selectionMode);
 				setClipboardPanelOpen(true);
 				setWorkspacePickerOpen(false);
-				setAgentPickerOpen(false);
 				setSessionPanelOpen(false);
 				setSuggestionsHidden(true);
 			}),
@@ -1336,7 +1294,6 @@ export function LauncherPage({
 				setError(null);
 				setClipboardPanelOpen(false);
 				setWorkspacePickerOpen(false);
-				setAgentPickerOpen(false);
 				setSessionPanelOpen(false);
 				void getScreenshotReviewPreview(payload.sessionId)
 					.then((preview) => {
@@ -1442,7 +1399,7 @@ export function LauncherPage({
 				updatesUnlisten = unlisten;
 			})
 			.catch((error: unknown) => {
-				console.warn("failed to subscribe Pi Agent session updates", error);
+				console.warn("failed to subscribe Agent session updates", error);
 			});
 
 		void subscribeAcpSessionRemovals((sessionId) => {
@@ -1463,7 +1420,7 @@ export function LauncherPage({
 				removalsUnlisten = unlisten;
 			})
 			.catch((error: unknown) => {
-				console.warn("failed to subscribe Pi Agent session removals", error);
+				console.warn("failed to subscribe Agent session removals", error);
 			});
 
 		return () => {
@@ -1540,12 +1497,6 @@ export function LauncherPage({
 		onDismiss: () => setWorkspacePickerOpen(false),
 	});
 
-	useDismissOnPointerDownOutside({
-		open: agentPickerOpen,
-		triggerRef: agentPickerTriggerRef,
-		panelRef: agentPickerPanelRef,
-		onDismiss: () => setAgentPickerOpen(false),
-	});
 
 	useDismissOnPointerDownOutside({
 		open: sessionPanelOpen,
@@ -2378,7 +2329,7 @@ export function LauncherPage({
 			if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
 				return;
 			}
-			setError(getErrorMessage(promptError, "Pi Agent prompt 发送失败"));
+			setError(getErrorMessage(promptError, "Agent prompt 发送失败"));
 		} finally {
 			const requestStillCurrent = isTrackedLauncherRequestCurrent(requestEpoch);
 			endTrackedLauncherRequest(requestEpoch);
@@ -2409,7 +2360,7 @@ export function LauncherPage({
 			}
 
 			if (!targetSessionId) {
-				throw new Error("Pi Agent session 创建失败");
+				throw new Error("Agent session 创建失败");
 			}
 
 			const detail = await sendAcpPrompt(targetSessionId, prompt);
@@ -2712,11 +2663,6 @@ export function LauncherPage({
 				return;
 			}
 
-			if (agentPickerOpen) {
-				setAgentPickerOpen(false);
-				return;
-			}
-
 			if (sessionPanelOpen) {
 				setSessionPanelOpen(false);
 				return;
@@ -2839,28 +2785,22 @@ export function LauncherPage({
 		await applyWorkspaceSelection(path, "切换最近目录失败");
 	}
 
-	function handleAgentSelect(agent: AcpAgentConfig) {
-		setSelectedAgentId(agent.id);
-		setAgentPickerOpen(false);
-		setError(null);
-	}
-
 	const createAndActivateSession = useCallback(
 		async (requestEpoch: number = launcherResetEpochRef.current) => {
-			const detail = await createAcpSession(selectedAgent?.id ?? null);
+			const detail = await createAcpSession(null);
 			if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
-				throw new Error("launcher reset while creating Pi Agent session");
+				throw new Error("launcher reset while creating Agent session");
 			}
 			setSessionDetails((current) => upsertSessionDetailRecord(current, detail));
 			const summaries = await activateAcpSession(detail.session.sessionId);
 			if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
-				throw new Error("launcher reset while activating Pi Agent session");
+				throw new Error("launcher reset while activating Agent session");
 			}
 			setSessionSummaries(summaries);
 			setActiveSessionId(detail.session.sessionId);
 			return detail;
 		},
-		[isTrackedLauncherRequestCurrent, selectedAgent?.id],
+		[isTrackedLauncherRequestCurrent],
 	);
 
 	const handleCreateSession = useCallback(async () => {
@@ -2878,7 +2818,7 @@ export function LauncherPage({
 			if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
 				return;
 			}
-			setError(getErrorMessage(sessionError, "创建 Pi Agent session 失败"));
+			setError(getErrorMessage(sessionError, "创建 Agent session 失败"));
 		} finally {
 			const requestStillCurrent = isTrackedLauncherRequestCurrent(requestEpoch);
 			endTrackedLauncherRequest(requestEpoch);
@@ -2969,7 +2909,7 @@ export function LauncherPage({
 			applySessionDetail(detail);
 			setError(null);
 		} catch (sessionError) {
-			setError(getErrorMessage(sessionError, "切换 Pi Agent session 模式失败"));
+			setError(getErrorMessage(sessionError, "切换 Agent session 模式失败"));
 		} finally {
 			setRuntimeControlPendingKey(null);
 		}
@@ -2986,7 +2926,7 @@ export function LauncherPage({
 			applySessionDetail(detail);
 			setError(null);
 		} catch (sessionError) {
-			setError(getErrorMessage(sessionError, "更新 Pi Agent session 配置失败"));
+			setError(getErrorMessage(sessionError, "更新 Agent session 配置失败"));
 		} finally {
 			setRuntimeControlPendingKey(null);
 		}
@@ -3022,10 +2962,6 @@ export function LauncherPage({
 		[handleWorkspaceCrumbClick],
 	);
 
-	const handleToggleAgentPicker = useCallback(() => {
-		setAgentPickerOpen((current) => !current);
-		setClipboardPanelOpen(false);
-	}, []);
 
 	const handleCreateSessionClick = useCallback(() => {
 		void handleCreateSession();
@@ -3105,7 +3041,7 @@ export function LauncherPage({
 	);
 
 	const inputPlaceholder = activeSessionId
-		? "向当前 Pi Agent session 发送消息，或用 @ 插入当前 workspace 文件路径"
+		? "向当前 Agent session 发送消息，或用 @ 插入当前 workspace 文件路径"
 		: pendingSlashAction
 			? `已选择 ${pendingSlashAction.aliases[0] ?? pendingSlashAction.title}，输入待处理文本后按 Enter`
 			: "输入应用名，或用 / 执行动作、@ 搜索当前 workspace 文件";
@@ -3131,10 +3067,6 @@ export function LauncherPage({
 						onSelectWorkspaceCrumb={handleSelectWorkspaceCrumb}
 						onWorkspaceDragStart={handleWorkspaceDragStart}
 						agentConfigured={agentConfigured}
-						agentPickerOpen={agentPickerOpen}
-						agentPickerTriggerRef={agentPickerTriggerRef}
-						selectedAgentName={selectedAgent?.name ?? null}
-						onToggleAgentPicker={handleToggleAgentPicker}
 						creatingSession={creatingSession}
 						onCreateSession={handleCreateSessionClick}
 						sessionPanelOpen={sessionPanelOpen}
@@ -3219,12 +3151,7 @@ export function LauncherPage({
 							canRunTranslateAction={canRunTranslateAction}
 							agentActionShortcutLabel={agentActionShortcutLabel}
 							onAgentExecute={() => {
-								if (agentConfigured) {
-									void handleAgentExecute();
-									return;
-								}
-
-								onOpenSettings?.();
+								void handleAgentExecute();
 							}}
 							onRunTranslateAction={() => void handleTranslateAction()}
 							showCancelActiveSession={showCancelActiveSession}
@@ -3317,15 +3244,6 @@ export function LauncherPage({
 						workspace={workspace}
 						onPickWorkspace={() => void handleWorkspacePick()}
 						onSelectRecentWorkspace={(path) => void handleRecentWorkspaceClick(path)}
-					/>
-
-					<AgentPickerPanel
-						open={agentPickerOpen}
-						offset={agentPickerOffset}
-						panelRef={agentPickerPanelRef}
-						agents={agentCatalog.agents}
-						selectedAgentId={selectedAgent?.id ?? null}
-						onSelectAgent={handleAgentSelect}
 					/>
 				</>
 			) : null}

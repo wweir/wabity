@@ -11,10 +11,6 @@ interface LauncherHeaderProps {
 	onSelectWorkspaceCrumb: (path: string) => void;
 	onWorkspaceDragStart: (event: ReactMouseEvent<HTMLDivElement>) => void;
 	agentConfigured: boolean;
-	agentPickerOpen: boolean;
-	agentPickerTriggerRef: RefObject<HTMLButtonElement | null>;
-	selectedAgentName: string | null;
-	onToggleAgentPicker: () => void;
 	creatingSession: boolean;
 	onCreateSession: () => void;
 	sessionPanelOpen: boolean;
@@ -37,10 +33,6 @@ export function LauncherHeader({
 	onSelectWorkspaceCrumb,
 	onWorkspaceDragStart,
 	agentConfigured,
-	agentPickerOpen,
-	agentPickerTriggerRef,
-	selectedAgentName,
-	onToggleAgentPicker,
 	creatingSession,
 	onCreateSession,
 	sessionPanelOpen,
@@ -96,23 +88,7 @@ export function LauncherHeader({
 				/>
 			</div>
 
-			<div className="session-strip" aria-label="Pi Agent sessions">
-				{agentConfigured ? (
-					<button
-						aria-controls="agent-picker-panel"
-						aria-expanded={agentPickerOpen}
-						className={agentPickerOpen ? "agent-picker-trigger active" : "agent-picker-trigger"}
-						onClick={onToggleAgentPicker}
-						ref={agentPickerTriggerRef}
-						type="button"
-					>
-						<span className="agent-picker-trigger-label">Agent</span>
-						<span className="agent-picker-trigger-value">{selectedAgentName ?? "未选择"}</span>
-						<span className="agent-picker-trigger-caret" aria-hidden="true">
-							▾
-						</span>
-					</button>
-				) : null}
+			<div className="session-strip" aria-label="Agent sessions">
 				{agentConfigured ? (
 					<button
 						className="session-create-button"
