@@ -27,18 +27,18 @@
 1. 用全局快捷键唤起 launcher 或历史剪贴板面板
 2. 在当前 workspace 中搜索文件、执行本地动作、启动应用或终止进程
 3. 在 launcher 内执行轻量 RAG 问答
-4. 创建并管理本地 `stdio` ACP agent session
+4. 创建并管理内嵌 Agent session
 5. 翻译当前选中文本；无选中时回退到截图 OCR 后再翻译
 6. 维护少量文本剪贴板历史，并支持回贴到外部应用
-7. 在设置页维护快捷键、外观、通知、AI、RAG、ACP agent 和全局 MCP 配置
+7. 在设置页维护快捷键、外观、通知、功能绑定、模型资源、知识库、扩展（Agent 运行时说明和 MCP）配置
 
 明确非目标：
 
 - 不做插件市场
-- 不做远程 ACP transport 编排平台
+- 不做远程 agent transport 编排平台
 - 不做全盘文件索引
 - 不让前端接管核心业务调度
-- 不把 ACP session 和 launcher 轻量问答混成同一种会话模型
+- 不把 Agent session 和 launcher 轻量问答混成同一种会话模型
 
 ## 3. 系统上下文
 
@@ -54,19 +54,19 @@
 - 应用索引、目录监听、运行中进程枚举
 - OpenAI 兼容 LLM / OCR / Embedding 服务
 - macOS 截图采集、ScreenCaptureKit backend 与 Screen Recording 权限
-- ACP agent 进程
+- Pi SDK 运行时
 - USearch 索引文件与 SQLite
 
 ## 4. 分层结构
 
 ### 4.1 前端
 
-| 路径                    | 职责                                                           | 约束                       |
-| ----------------------- | -------------------------------------------------------------- | -------------------------- |
-| `src/app`               | 应用壳、视图切换、全局主题应用                                 | 不承载业务规则             |
-| `src/features/launcher` | launcher 输入、补全、结果面板、ACP transcript、clipboard panel | 只消费结构化后端结果       |
-| `src/features/settings` | 设置页分组 UI、草稿态、字段级校验展示                          | 不直接决定落盘与运行时装配 |
-| `src/lib/tauri`         | IPC client、事件订阅、浏览器 fallback                          | 前端与 Rust 的唯一通信边界 |
+| 路径                    | 职责                                                             | 约束                       |
+| ----------------------- | ---------------------------------------------------------------- | -------------------------- |
+| `src/app`               | 应用壳、视图切换、全局主题应用                                   | 不承载业务规则             |
+| `src/features/launcher` | launcher 输入、补全、结果面板、Agent transcript、clipboard panel | 只消费结构化后端结果       |
+| `src/features/settings` | 设置页分组 UI、草稿态、字段级校验展示                            | 不直接决定落盘与运行时装配 |
+| `src/lib/tauri`         | IPC client、事件订阅、浏览器 fallback                            | 前端与 Rust 的唯一通信边界 |
 
 前端只负责：
 
@@ -132,7 +132,7 @@
 
 它负责：
 
-- 持有 matcher、executor、file search、application、process、RAG、OCR、ACP 等服务实例
+- 持有 matcher、executor、file search、application、process、RAG、OCR、Agent 等服务实例
 - 持有配置存储和当前 workspace 运行时状态
 - 把持久化配置投影成运行时依赖
 - 对外暴露统一的查询、执行、设置更新和会话管理入口
@@ -153,7 +153,7 @@
 - RAG 元数据与词法索引：SQLite
 - RAG chunk 元数据、文本与暂存向量缓存：SQLite
 - RAG ANN 索引文件：USearch
-- ACP session 可恢复快照：应用状态存储
+- Agent session 可恢复状态：第一阶段不写入旧应用 saved session；后续若启用 Pi SDK session 存储，必须与应用状态存储分开建模
 
 原则：
 
@@ -183,7 +183,7 @@
 
 ### 6.2 轻量 RAG 问答
 
-问答链路和 ACP session 分离：
+问答链路和 Agent session 分离：
 
 1. launcher 触发 `rag_answer`
 2. 后端组装问答上下文、RAG 工具、受限文件读取与 opener 能力
@@ -195,22 +195,23 @@
 
 - 这是轻量多轮问答，不是第二套长期 agent session
 - 本地读文件和 opener 都受 workspace / source roots 白名单约束
-- 问答运行时可以使用 MCP，但不会把 ACP session 模型强塞进 launcher
+- 问答运行时可以使用 MCP，但不会把 Agent session 模型强塞进 launcher
 
-### 6.3 ACP Session
+### 6.3 Agent Session
 
-ACP 链路是独立运行时：
+Agent 链路是独立运行时：
 
 1. 用户在 launcher 中创建或切换 session
-2. Rust 启动本地 `stdio` agent 进程
-3. `AcpService` 维护 session 生命周期、事件流和快照恢复
+2. Rust 通过 `pi_agent_rust` 的 `pi::sdk` 创建内嵌 agent session
+3. `PiAgentService` 维护 session 生命周期、事件流和状态投影
 4. 前端按真实时序渲染 transcript
 
 约束：
 
-- ACP session 与轻量问答的状态、模型和输出面完全分开
+- Agent session 与轻量问答的状态、模型和输出面完全分开
 - transcript 顺序由运行时事件决定，前端不重排成摘要模板
-- session 级 mode / model / runtime option 只属于当前 session，不回写全局 AI 设置
+- session 级 provider / model 优先来自 Wabity 的文档问答 LLM 配置；后端只在 provider 能安全映射到 Pi SDK 已知 provider 时桥接，否则回退到 Pi SDK 自身配置。thinking、tools 和最大工具迭代次数仍由 Pi SDK 配置决定
+- 全局 MCP 清单第一阶段不自动桥接进 Agent session；RAG 问答仍可按自身规则使用 MCP
 
 ### 6.4 截图 OCR 与 Review
 
@@ -254,7 +255,7 @@ ACP 链路是独立运行时：
 - 快捷键重注册
 - macOS Dock 展示策略更新
 - 自启动状态与系统登录项对账
-- OCR / LLM / RAG / ACP / MCP 运行时配置更新
+- OCR / LLM / 知识库 / MCP 运行时配置更新；扩展页 Agent 面板展示内嵌运行时说明，并明确 Agent 会优先复用文档问答模型、无法映射时回退到底层 SDK 配置
 - 截图 backend 与 Screen Recording 权限状态变化后的运行时反馈
 
 其中 LLM 配置明确拆成两层：
@@ -278,7 +279,7 @@ Launcher 固定状态是会话级运行态，只保存在 `ShortcutRuntimeState`
 前端入口必须保持上下文相关：
 
 - 标准 launcher 空态不展示固定按钮
-- 下方交互区出现结果、问答、预览或 ACP session 时展示固定按钮
+- 下方交互区出现结果、问答、预览或 Agent session 时展示固定按钮
 - 设置页 header 在关闭按钮旁展示同一个固定按钮
 - 所有入口控制同一个 `launcherPinned` 状态，不区分 launcher 和设置页
 
@@ -325,7 +326,7 @@ RAG 建索引固定分两层：
 
 1. 前端负责展示和输入，Rust 负责业务调度与运行时约束
 2. IPC 边界显式建模，不依赖隐式字符串协议
-3. ACP session、轻量问答、普通 launcher 执行是三条不同链路
+3. Agent session、轻量问答、普通 launcher 执行是三条不同链路
 4. 平台能力统一下沉到 `infrastructure`，业务语义统一收敛到 `services`
 5. RAG 使用 USearch + SQLite 组合：SQLite 作为真相源，USearch 只负责 ANN 检索
 6. 配置条目先表达“接入点和能力”，运行时用途资格由后端统一投影，不让前端各自猜
@@ -338,8 +339,12 @@ RAG 建索引固定分两层：
 
 - 根目录 [README.md](/Users/wweir/Sites/Mine/wabity/README.md): 项目简介、开发命令、打包与发布说明
 - [docs/README.md](/Users/wweir/Sites/Mine/wabity/docs/README.md): `docs/` 文档索引与保留规则
+- [docs/pi-agent-single-runtime-migration-2026-06-29.md](/Users/wweir/Sites/Mine/wabity/docs/pi-agent-single-runtime-migration-2026-06-29.md): 移除 ACP client、收敛到 Pi SDK 单运行时的执行方案
 - [docs/screencapturekit-ocr-workflow-design-2026-05-14.md](/Users/wweir/Sites/Mine/wabity/docs/screencapturekit-ocr-workflow-design-2026-05-14.md): Screenshot Review、ScreenCaptureKit 截图 backend 与后续 vision prompt 边界设计
-- [src/features/settings/README.md](/Users/wweir/Sites/Mine/wabity/src/features/settings/README.md): 设置页局部约束与模块职责
+- [src/features/settings/README.md](/Users/wweir/Sites/Mine/wabity/src/features/settings/README.md): 设置页入口、模块职责和开发入口
+- [src/features/settings/SETTINGS_IA.md](/Users/wweir/Sites/Mine/wabity/src/features/settings/SETTINGS_IA.md): 设置页信息架构、导航和分组职责
+- [src/features/settings/SETTINGS_BEHAVIOR.md](/Users/wweir/Sites/Mine/wabity/src/features/settings/SETTINGS_BEHAVIOR.md): 设置页保存语义、跨页依赖、后端命令与行为边界
+- [src/features/settings/SETTINGS_UI.md](/Users/wweir/Sites/Mine/wabity/src/features/settings/SETTINGS_UI.md): 设置页视觉层级、布局、响应式和组件模式
 - [src/features/launcher/README.md](/Users/wweir/Sites/Mine/wabity/src/features/launcher/README.md): launcher feature 约束
 - [src-tauri/src/services/README.md](/Users/wweir/Sites/Mine/wabity/src-tauri/src/services/README.md): Rust service 层职责
 - [src-tauri/src/domain/README.md](/Users/wweir/Sites/Mine/wabity/src-tauri/src/domain/README.md): 领域模型边界

@@ -16,7 +16,7 @@ export const settingsSections: ReadonlyArray<{
 	{ id: "prompts", label: "AI 功能" },
 	{ id: "llm", label: "模型接入" },
 	{ id: "rag", label: "RAG" },
-	{ id: "acp", label: "ACP Agent" },
+	{ id: "acp", label: "Pi Agent" },
 	{ id: "mcp", label: "MCP" },
 	{ id: "about", label: "关于" },
 ] as const;
@@ -254,76 +254,18 @@ export function ShortcutRecorderField({
 	);
 }
 
-export const acpAgentOptions = [
-	{
-		id: "opencode",
-		label: "OpenCode",
-		command: "opencode acp",
-		launchMode: "login_shell" as const,
-		summary:
-			"OpenCode 是开源 AI coding agent，支持终端、桌面端和 IDE；这里预填的是它的 ACP 启动命令。",
-		installCommand: "curl -fsSL https://opencode.ai/install | bash",
-		installHint:
-			"也可以用 `brew install opencode` 或 `npm install -g opencode-ai`；安装后确认 `opencode acp` 可以直接执行。",
-		links: [
-			{ label: "官网", url: "https://opencode.ai" },
-			{ label: "安装文档", url: "https://opencode.ai/docs" },
-			{ label: "GitHub", url: "https://github.com/sst/opencode" },
-		],
-	},
-	{
-		id: "claude-agent",
-		label: "Claude Agent",
-		command: "claude-agent-acp",
-		launchMode: "login_shell" as const,
-		summary:
-			"Claude Agent ACP 是 Zed 维护的 ACP 适配器，用来把 Claude Agent SDK 暴露给 ACP 客户端。",
-		installCommand: "npm install -g @zed-industries/claude-agent-acp",
-		installHint:
-			"也可以从 GitHub Releases 下载单文件可执行程序；安装后确认 `claude-agent-acp` 可以直接执行。",
-		links: [
-			{
-				label: "README",
-				url: "https://github.com/zed-industries/claude-agent-acp#readme",
-			},
-			{
-				label: "Releases",
-				url: "https://github.com/zed-industries/claude-agent-acp/releases",
-			},
-			{
-				label: "npm",
-				url: "https://www.npmjs.com/package/@zed-industries/claude-agent-acp",
-			},
-		],
-	},
-	{
-		id: "codex",
-		label: "Codex",
-		command: "codex-acp",
-		launchMode: "login_shell" as const,
-		summary:
-			"Codex ACP 是 Zed 维护的 ACP 适配器，负责把 Codex CLI 暴露成可被 ACP 客户端调用的 Agent。",
-		installCommand: "npm install -g @zed-industries/codex-acp",
-		installHint:
-			"官方 README 主推 GitHub Releases 或 `npx @zed-industries/codex-acp`；这里给出常驻安装命令，目标是装完后能直接执行 `codex-acp`。",
-		links: [
-			{
-				label: "README",
-				url: "https://github.com/zed-industries/codex-acp#readme",
-			},
-			{
-				label: "Releases",
-				url: "https://github.com/zed-industries/codex-acp/releases",
-			},
-			{
-				label: "npm",
-				url: "https://www.npmjs.com/package/@zed-industries/codex-acp",
-			},
-		],
-	},
-] as const;
+export interface AcpAgentOption {
+	id: string;
+	label: string;
+	command: string;
+	launchMode: AcpAgentLaunchMode;
+	summary: string;
+	installCommand: string;
+	installHint: string;
+	links: ReadonlyArray<{ label: string; url: string }>;
+}
 
-export type AcpAgentOption = (typeof acpAgentOptions)[number];
+export const acpAgentOptions: readonly AcpAgentOption[] = [];
 
 const mcpTransportOptionsInternal = [
 	{
@@ -373,7 +315,7 @@ const acpAgentLaunchModeOptionsInternal: ReadonlyArray<{
 		value: "interactive_shell",
 		label: "Interactive Shell",
 		description:
-			"通过用户默认 shell 的 login + interactive 模式启动，更可能读取 .zshrc / .bashrc，但任何输出都可能污染 ACP stdio。",
+			"通过用户默认 shell 的 login + interactive 模式启动，更可能读取 .zshrc / .bashrc，但任何输出都可能污染 Pi Agent stdio。",
 	},
 ] as const;
 
@@ -456,7 +398,7 @@ export function renderPresetInstallGuide(
 				<span className="settings-acp-preset-kicker">安装指引</span>
 				<span className="settings-agent-meta">自定义 Agent</span>
 				<span className="settings-help-text settings-help-text-tight">
-					自己准备一个能在命令行里启动的 ACP Agent
+					自己准备一个能在命令行里启动的 Pi Agent
 					命令，然后填进下面的启动命令输入框，并选择合适的启动模式。
 				</span>
 			</>

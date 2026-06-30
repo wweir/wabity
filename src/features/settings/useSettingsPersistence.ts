@@ -532,7 +532,7 @@ export function useSettingsPersistence(args: UseSettingsPersistenceArgs) {
 			args.setSavedAcpSnapshot(buildAcpDraftSnapshot(nextDraftAgents));
 			args.setSavedAcpState(buildSavedAcpDraftState(nextDraftAgents, nextDefaultAgentId));
 		} catch (error: unknown) {
-			args.setSettingsError(getErrorMessage(error, "ACP 配置保存失败"));
+			args.setSettingsError(getErrorMessage(error, "Pi Agent 配置保存失败"));
 		} finally {
 			setSavingAgent(false);
 		}

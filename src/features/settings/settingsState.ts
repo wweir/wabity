@@ -1332,11 +1332,11 @@ export function validateAcpAgents(agents: AcpAgentDraft[]): AcpDraftValidation {
 		const currentAgentIssues: string[] = [];
 		const currentAgentFieldIssues: FieldIssueMap<AcpFieldKey> = {};
 		if (!agent.name.trim()) {
-			currentAgentIssues.push(`第 ${agentIndex + 1} 个 ACP Agent 缺少名称。`);
+			currentAgentIssues.push(`第 ${agentIndex + 1} 个 Pi Agent 缺少名称。`);
 			currentAgentFieldIssues.name = "请输入 Agent 名称。";
 		}
 		if (!agent.command.trim()) {
-			currentAgentIssues.push(`第 ${agentIndex + 1} 个 ACP Agent 缺少启动命令。`);
+			currentAgentIssues.push(`第 ${agentIndex + 1} 个 Pi Agent 缺少启动命令。`);
 			currentAgentFieldIssues.command = "请输入启动命令。";
 		}
 

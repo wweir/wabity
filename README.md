@@ -9,7 +9,7 @@
 - 全局快捷键支持切换主窗口、翻译选中文本/OCR，以及直接打开历史剪贴板；默认分别为 `Alt+Space`、`Alt+D`、`Alt+V`
 - macOS 下支持全局快捷键触发交互式截图 OCR；`Alt+D` 会先尝试翻译当前应用的选中文本，未选中时进入 Screenshot Review，用户确认/编辑后才翻译或复制。截图 backend 使用 Wabity 透明 overlay 收集区域，并通过 ScreenCaptureKit 保存截图，不再调用 shell `screencapture`
 - OCR provider 现已支持本地 macOS Vision 和远程 OpenAI 兼容多模态模型
-- 设置页已把快捷键、外观和 OCR 配置并入“通用”；“AI 功能”页按“翻译配置 / 文档问答配置”两个任务卡片维护各自的模型和系统提示词；LLM 页面按 provider 组维护 OpenAI 风格接入点和组内多个模型，编辑流收敛为“供应商预设与连接 / 模型、调用方式与用途”两段：配置类型直接区分 `LLM · responses stateless`、`LLM · responses stateful`、`LLM · chat/completions` 和 `Embedding`，其中 `responses` 页面仍可额外声明多模态，并提供 `OpenAI / DeepSeek / Ollama / 智谱 / SiliconFlow / 阿里云百炼 / 火山方舟 / 腾讯混元` 等内置模板；RAG 配置页支持用这些 embedding 模型为选中目录中的 `.md`、`.mdx`、`.txt`、`.markdown`、`.rst`、`.adoc`、`.docx`、`.pdf` 文件构建并持续维护本地文档索引，底层采用 SQLite 元数据与 chunk 真相源配合 USearch 派生向量索引，支持 watcher 增量维护、`staged/active` 版本切换，以及基于 `原文文本 + embedding fingerprint` 的全局向量复用以减少重复 embedding；当前按文档类型限制单文件大小：纯文本/Markdown 20 MB、`docx` 16 MB、`pdf` 8 MB
+- 设置页一级导航拆为“通用 / 功能 / 模型 / 知识库 / 扩展 / 关于”：通用页保留快捷键、外观、通知和桌面行为；功能页按“翻译配置 / 文档问答配置 / 截图识别”三个任务卡维护模型与提示词；模型页按 provider 组维护 OpenAI 风格接入点和组内多个模型，编辑流收敛为“供应商预设与连接 / 模型、调用方式与用途”两段：配置类型直接区分 `LLM · responses stateless`、`LLM · responses stateful`、`LLM · chat/completions` 和 `Embedding`，其中 `responses` 页面仍可额外声明多模态，并提供 `OpenAI / DeepSeek / Ollama / 智谱 / SiliconFlow / 阿里云百炼 / 火山方舟 / 腾讯混元` 等内置模板；知识库页支持用这些 embedding 模型为选中目录中的 `.md`、`.mdx`、`.txt`、`.markdown`、`.rst`、`.adoc`、`.docx`、`.pdf` 文件构建并持续维护本地文档索引，底层采用 SQLite 元数据与 chunk 真相源配合 USearch 派生向量索引，支持 watcher 增量维护、`staged/active` 版本切换，以及基于 `原文文本 + embedding fingerprint` 的全局向量复用以减少重复 embedding；当前按文档类型限制单文件大小：纯文本/Markdown 20 MB、`docx` 16 MB、`pdf` 8 MB；扩展页顶部展示 Agent 单运行时说明，下方维护内置 MCP 和全局自定义 MCP 服务清单
 - 透明窗口 + 圆角 launcher 外观
 - 默认单行输入框，可按 `Cmd/Ctrl+Enter` 插入换行并切到多行模式；单行和多行都用 `Enter` 执行
 - 历史剪贴板通过全局快捷键 `Alt+V` 打开独立面板：后台只保留少量文本记录，并支持固定少量常用项；如果 launcher 已在前台，选中某条会插入 launcher 输入框；否则会写回系统剪贴板、记住呼出前的前台应用、隐藏 launcher、重新激活原应用，并在确认目标应用重新成为前台后再发送粘贴快捷键
@@ -21,7 +21,7 @@
 - 文本类动作执行与结果反馈
 - OCR provider 抽象、macOS Vision 实现、远程 LLMOCR 实现、截图 OCR review，以及 ScreenCaptureKit 截图 backend 设计
 - 当前 workspace 写入 `config.toml`，最近目录历史单独写入 `workspace-history.toml`
-- 设置页已把 `ACP Agent` 和 `MCP` 拆成两个一级菜单：ACP Agent 页以编辑表单为主，预设改成下拉填表入口；MCP server 改成全局共享清单，并在建会话时通过 ACP `mcp_servers` 统一透传给选中的 agent
+- 设置页将长期 agent 能力收敛为 `扩展` 页顶部的 Agent 单运行时说明；外部 ACP agent 命令、启动模式和预设已停用。Agent session 会优先复用 `功能` 页里的文档问答模型；当前仅对 OpenAI / OpenRouter / DeepSeek / Ollama / SiliconFlow 这类可安全映射到 Pi SDK 的 provider 自动桥接。MCP server 仍是全局共享清单，当前继续服务于 RAG / MCP 管理链路，第一阶段不自动注入 Agent session
 
 ## 开发命令
 

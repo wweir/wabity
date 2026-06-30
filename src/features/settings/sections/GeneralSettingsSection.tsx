@@ -239,7 +239,7 @@ export function GeneralSettingsSection({
 					</div>
 					<div className="settings-item">
 						<label className="settings-label">
-							<span>ACP Agent 完成后通知</span>
+							<span>Pi Agent 完成后通知</span>
 							<input
 								checked={notificationSettings.notifyAcpPromptCompletion}
 								className="settings-toggle"

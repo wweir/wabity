@@ -28,7 +28,7 @@ export function AgentPickerPanel({
 			className="agent-picker-panel"
 			id="agent-picker-panel"
 			ref={panelRef}
-			aria-label="选择 ACP agent"
+			aria-label="选择 Pi Agent agent"
 			style={{
 				position: "absolute",
 				left: `${offset.x}px`,

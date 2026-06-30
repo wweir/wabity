@@ -15,11 +15,11 @@
 - `launcherPageModel.ts`：承接主按钮状态、状态栏文案、问答消息块和本地前端副作用这类纯推导，避免继续堆在页面组件顶部
 - `useRagRuntimeStatus.ts` / `useLauncherSelectionEffects.ts`：分别承接 RAG 运行态事件订阅、补全选择复位、补全列表滚动和剪贴板默认选中项维护
 - `launcher.css`：只保留样式入口和 `styles/` 子文件导入；launcher 特有布局、状态、消息流、Markdown、suggestions、clipboard 和响应式规则按职责拆到 `styles/launcher.*.css`，按钮、输入框、浮层和冷静中性色 design tokens 等共享外观基线统一回收到 `src/app/global.css`
-- ACP 会话时间线里的 `user / assistant / system` 消息卡片底色必须基于全局 token 组合，禁止在 `launcher.css` 里直接写死只适合浅色主题的消息背景
+- Pi Agent 会话时间线里的 `user / assistant / system` 消息卡片底色必须基于全局 token 组合，禁止在 `launcher.css` 里直接写死只适合浅色主题的消息背景
 - `MarkdownRenderer` 衍生出来的 Mermaid 状态文本、错误文案和 highlight.js 语法色同样必须走全局 code token；浅色和深色都不能继续保留私有 code palette 或只适合浅底块的 hex 色
 - session panel、restore notice、Markdown 辅助元素和轻量问答元信息区都必须复用全局 surface / text / status token；不要再靠 feature 私有的乳白半透明面和浅描边硬编码制造层级
 - session panel 列表项的激活态只保留单一高亮语义，禁止在触发器、面板头和条目内部重复堆叠“当前” pill；状态标签必须和 session dot 复用同一套运行中 / 更新 / 错误 / 断开语义颜色，关闭动作要保持明确按钮命中区和具体可访问名称
-- ACP 输出区的阅读层级仍然固定为“正文最重要，操作轨迹与思考更次级，角色元信息最低”，但实现方式不能再靠重排消息顺序伪造 `answer-first`；assistant message 必须按后端提供的 block 原始顺序渲染，保留 `content / actions / thought` 的真实交错时序，正文之所以更重要，只能靠字号、前景和留白建立，而不是把工具和 thought 强行塞到正文后面；tool detail 继续作为消息内部次级展开区，不能再做成比正文更抢眼的 inspection panel；`chat/completions` 返回的 reasoning 也必须沿用同一原则，不能再直接冒充正文；兼容层若把 thinking 混进 `message.content`，也必须先在后端归一化拆出次级 thought，再交给前端
+- Pi Agent 输出区的阅读层级仍然固定为“正文最重要，操作轨迹与思考更次级，角色元信息最低”，但实现方式不能再靠重排消息顺序伪造 `answer-first`；assistant message 必须按后端提供的 block 原始顺序渲染，保留 `content / actions / thought` 的真实交错时序，正文之所以更重要，只能靠字号、前景和留白建立，而不是把工具和 thought 强行塞到正文后面；tool detail 继续作为消息内部次级展开区，不能再做成比正文更抢眼的 inspection panel；`chat/completions` 返回的 reasoning 也必须沿用同一原则，不能再直接冒充正文；兼容层若把 thinking 混进 `message.content`，也必须先在后端归一化拆出次级 thought，再交给前端
 - `Agent` 行只保留身份标识；thought 入口降到正文后的消息元信息区，保持紧凑次级，不得继续占据 assistant 卡片的首个视觉落点；assistant 正文的字号和前景权重必须显著高于 thought / action 元信息
 - `actionCatalog.ts`：集中维护 launcher/browser fallback 共用的动作描述符和 slash alias，避免页面层与 fallback 重复声明动作元数据
 - 历史剪贴板只通过全局快捷键打开独立面板态；它只显示后端已经分好的 `Pinned / Recent` 文本条目，不伪装成补全列表，也不把 pin/unpin 规则放回前端
@@ -32,17 +32,17 @@
 - `sessions.ts`：session 摘要合并、状态文案和 dot class 计算
 - `useLauncherSuggestions.ts`：集中管理 `file / action / app / kill` 四类补全状态、异步请求和前端错误回写，避免 `LauncherPage.tsx` 同时持有候选状态机和页面级窗口编排
 - `useFloatingPanel.ts`：浮层附着定位和外部点击关闭的共享 hook，避免 `LauncherPage` 重复堆叠近似 effect
-- `components/SessionTimeline.tsx`：ACP 消息流与按真实顺序展开的 action trail
+- `components/SessionTimeline.tsx`：Pi Agent 消息流与按真实顺序展开的 action trail
 - `components/LauncherHeader.tsx`：顶部 workspace bar、agent 选择器、session 摘要按钮和 session dot 带；不再承担历史剪贴板入口
 - `components/LauncherComposer.tsx`：主输入区和底部操作条
-- `components/RestoreNoticeList.tsx` / `components/LauncherFeedback.tsx`：恢复提示、内联结果卡片、JSON / Markdown 预览，以及按 `session / result / QA` 拆开的反馈区；ACP 激活时同一块反馈区顶部还会展示当前 session 的 runtime mode / config option 控件
+- `components/RestoreNoticeList.tsx` / `components/LauncherFeedback.tsx`：迁移提示、内联结果卡片、JSON / Markdown 预览，以及按 `session / result / QA` 拆开的反馈区；Pi Agent 激活时同一块反馈区顶部展示当前 session 的 provider / model / thinking 等运行态摘要
 - `components/LauncherSuggestionsSection.tsx` / `components/LauncherSessionSection.tsx` / `components/LauncherClipboardSection.tsx`：suggestions、session、clipboard 三块独立 layer，作为输入热路径的稳定渲染边界
 - `components/MarkdownRenderer.tsx`：共享 markdown 渲染管线，统一处理 GFM、Mermaid、MDX 安全兼容和 Obsidian 风格扩展
 - `MarkdownRenderer.tsx` 里的 `remark-mdx` / `rehype-highlight` 改为异步加载，避免把整套 MDX 和语法高亮依赖静态塞进同一个懒加载 chunk
 - `components/CompletionPopup.tsx` / `SessionPanel.tsx` / `WorkspacePickerPanel.tsx` / `AgentPickerPanel.tsx`：launcher 外层浮层组件
 - `components/ClipboardHistoryPanel.tsx`：渲染历史剪贴板面板；当 launcher 已在前台时，`Enter` 把条目插入当前输入框；当 launcher 不在前台时，`Enter` 回贴外部应用；同时支持 `Cmd/Ctrl+P` 切换 pin、`Delete/Backspace` 删除，以及仅在面板打开时生效的 `Alt+A...` 常用项直贴和 `Alt+1...0` 最近项直贴。条目维护动作使用 icon-only 次级工具按钮，默认弱显著，只在 hover / active / focus-within 时抬升
-- `components/SessionTimeline.tsx`：仅在激活 ACP session 后才懒加载；会话 markdown 仍复用共享渲染器，但 mermaid 等较重依赖继续按需动态导入；action trail 改为按真实时序渲染的弱时间线，不再压成折行 pill 云，也不再保留独立标题栏或 hover 即抢焦点的详情面板
-- `components/LauncherFeedback.tsx` / `components/SessionTimeline.tsx`：ACP 流式输出时，前端只在用户仍停留在当前 assistant turn 尾部时自动跟随新增文本；一旦用户手动滚离当前 turn，就停止抢滚动位置
+- `components/SessionTimeline.tsx`：仅在激活 Pi Agent session 后才懒加载；会话 markdown 仍复用共享渲染器，但 mermaid 等较重依赖继续按需动态导入；action trail 改为按真实时序渲染的弱时间线，不再压成折行 pill 云，也不再保留独立标题栏或 hover 即抢焦点的详情面板
+- `components/LauncherFeedback.tsx` / `components/SessionTimeline.tsx`：Pi Agent 流式输出时，前端只在用户仍停留在当前 assistant turn 尾部时自动跟随新增文本；一旦用户手动滚离当前 turn，就停止抢滚动位置
 
 当前 UI 决策：
 
@@ -56,7 +56,7 @@
 - launcher 启动时优先恢复上次保存的当前 workspace；无效时回退到用户 `HOME`，最近目录只保留 3 个
 - launcher 外观跟随设置页的外观配置：启动时和设置保存后都会同步应用 `theme` / `fontSize`
 - launcher 默认失焦自动隐藏，但打开原生目录选择器时会临时抑制自动隐藏，避免页面看起来“闪退”
-- launcher 支持会话级窗口固定状态；固定只关闭失焦自动隐藏，不改变 `Esc`、`Alt+Space`、关闭按钮或执行结果显式关闭窗口的语义。标准空态不展示固定入口，只有结果、问答、ACP 会话、预览等下方交互区出现时才在交互区右上角展示固定按钮
+- launcher 支持会话级窗口固定状态；固定只关闭失焦自动隐藏，不改变 `Esc`、`Alt+Space`、关闭按钮或执行结果显式关闭窗口的语义。标准空态不展示固定入口，只有结果、问答、Pi Agent 会话、预览等下方交互区出现时才在交互区右上角展示固定按钮
 - 问答结果落地不是普通文本更新；`LauncherPage.tsx` 在写入 QA message 前必须显式调用 `armLauncherBlurAutoHideSuppression(...)`，并在结果初次落地与后续 resize 稳定期内临时关闭 blur auto-hide，同时暂停 `window focus`、`visibilitychange`、`onFocusChanged` 这类被动 refocus 链；稳定期结束后这两条保护要自动恢复，显式退出 QA 展示态时也要立即恢复，不能再把“等待下一次用户输入”当成唯一恢复路径，否则失焦隐藏会被长期关死。macOS 窗口层已经放弃 `nonactivating panel`，改成“可激活、只抢 key 不争 main”的 floating panel；同时结果展示期如果仍发生原生失焦，窗口层默认不会再自动抢回 key 焦点，而是只保留 suppression，等待用户显式重新聚焦；只有在原生 panel 已经掉出可见层时，窗口层才允许做一次不抢焦点的 `show/orderFrontRegardless` 补偿，避免结果面看起来像“自动隐藏”
 - QA 结果展示期不能简单粗暴地把原生 auto-resize 全关掉；当前策略是继续保留尺寸观察，但进入 QA 后切到“只增不减”的窗口同步。这样首屏回答、懒加载的 Markdown / 语法高亮 / citation 仍能把窗口继续撑开，而短时测量抖动不会把窗口又缩回去截断下半截内容；离开 QA 展示态后才恢复正常的可增可减 resize
 - launcher 通过快捷键、OCR 回填、快捷翻译结果回填或其他显示路径重新出现时，主输入框会主动恢复焦点，不能只依赖首次挂载时的 `autoFocus`
@@ -75,18 +75,18 @@
 - 主输入框聚焦态只保留柔和的底边提亮和浅背景过渡，不再叠全尺寸粗 outline，避免输入时视觉重心突然跳变
 - 主输入框必须带稳定的程序化名称；单行模式下补全关系按 `combobox + listbox + option` 暴露，active option 通过 `aria-activedescendant` 跟随选中项
 - 多行输入框按内容自动增高，但会基于屏幕可用高度收敛到固定上限；超出部分交给输入框内滚动，避免 Tauri 窗口被长文本继续撑高
-- 主输入区在“本地 launcher 模式”和“ACP session 模式”之间切换
-- 底部操作条在未激活 session 时固定保留 `ACP Agent` 入口：已配置 agent 时点击会自动创建或复用 ACP session，并在下方会话面板展示 agent 输出；未配置时按钮不再整颗消失，而是直接打开设置页；真正执行 agent 的快捷键仍是 `Alt+Enter`
+- 主输入区在“本地 launcher 模式”和“Pi Agent session 模式”之间切换
+- 底部操作条在未激活 session 时固定保留 `Pi Agent` 入口：点击会自动创建或复用 Pi Agent session，并在下方会话面板展示 agent 输出；真正执行 agent 的快捷键仍是 `Alt+Enter`
 - 顶部支持为“下一次新建 session”选择当前 agent；同一时刻可以并存多个不同 agent 的 session
-- 结果改为内联反馈；ACP 激活时下方改为“session runtime 控件 + 消息流”复合面板，runtime 控件只作用于当前 session
-- 内联结果卡和 ACP 消息流都带固定高度上限与内部滚动，不允许单次长输出把 launcher 主窗口顶出屏幕
+- 结果改为内联反馈；Pi Agent 激活时下方改为“session runtime 控件 + 消息流”复合面板，runtime 控件只作用于当前 session
+- 内联结果卡和 Pi Agent 消息流都带固定高度上限与内部滚动，不允许单次长输出把 launcher 主窗口顶出屏幕
 - `/format`、`/fmt`、`/json` 的预览、`/md` / `/markdown` 的 markdown 预览，以及 `/base64` 等快捷命令执行结果统一落在内联结果卡片；结果卡片自带复制按钮，JSON 走语法高亮，Markdown 走共享渲染器
 - 文本处理 slash 命令当前内建 `/upper`、`/title`、`/lower`、`/camel`、`/snake`、`/trim`、`/unique`、`/sort`、`/words`、`/lines`，以及走默认 LLM provider 的 `/translate`、`/fy`、`/tr`；其中 `/title` 会把每个词的首字母转为大写，`/unique` 和 `/sort` 都按行处理，翻译默认在未指定目标语言时按“简中->英文、英文->简中、其他语言->简中”处理，并保留原文风格与格式
-- 底部操作条只保留当前状态真正可执行的动作：未激活 session 时主链路顺序固定为 `设置 -> 翻译 -> ACP Agent -> 主按钮`；主按钮的文案、色调、禁用态和 Enter 行为共用同一套状态机：普通场景默认显示 `执行`，RAG 回退显示 `问答`，session 内显示 `发送`，文件 token 选中候选后显示 `插入路径`；显式 slash 动作优先显示动作本名（例如 `翻译`、`转大写`），`@token` 尚无候选时显示 `搜索路径` 且保持禁用。`补全` 只作为尾部辅助按钮出现；当前 session 的关闭统一收敛到顶部会话区和会话面板，不再在底部重复放一个“关闭会话”
-- ACP `Agent` 按钮和主按钮共用同一套会话状态，但不能复用“候选搜索加载”这类辅助态；补全查询、普通动作执行、Agent prompt 发送必须分别建模，否则按钮文案和禁用态会被串错
+- 底部操作条只保留当前状态真正可执行的动作：未激活 session 时主链路顺序固定为 `设置 -> 翻译 -> Pi Agent -> 主按钮`；主按钮的文案、色调、禁用态和 Enter 行为共用同一套状态机：普通场景默认显示 `执行`，RAG 回退显示 `问答`，session 内显示 `发送`，文件 token 选中候选后显示 `插入路径`；显式 slash 动作优先显示动作本名（例如 `翻译`、`转大写`），`@token` 尚无候选时显示 `搜索路径` 且保持禁用。`补全` 只作为尾部辅助按钮出现；当前 session 的关闭统一收敛到顶部会话区和会话面板，不再在底部重复放一个“关闭会话”
+- Pi Agent 入口按钮和主按钮共用同一套会话状态，但不能复用“候选搜索加载”这类辅助态；补全查询、普通动作执行、Agent prompt 发送必须分别建模，否则按钮文案和禁用态会被串错
 - 底部 `设置` 入口继续保持 icon-only 次级按钮，但图标语义改成三滑杆调参 glyph，而不是密集的实心齿轮；这种小尺寸下的识别度更高，也更贴近“配置当前行为”的语义
 - 动作条在深色主题下不再额外包一层浅底胶囊容器；主按钮、翻译按钮和设置按钮直接用语义 token 区分强弱状态，避免“按钮上再贴按钮”的贴纸感
-- 输入框下方、按钮左侧定义为左对齐状态栏；空闲时默认展示最近一次本地提交的内容，但当 RAG 后台索引、模型请求或 Agent 长任务在运行时，状态栏会切到 `运行状态` 并优先展示对应进度文案；RAG 重建态除了阶段外，还要显示当前 `completed/total` 文件进度，避免只剩“正在扫描 / 剩余 N 个”这种无法判断进度的弱提示；ACP / 问答态的会话标题、agent、workspace 和错误也统一显示在这里，不再在输出区底部重复补一条状态线；状态栏本体最多展示两行内容，长文案与多条状态项都通过栏内纵向滚动查看，不再使用自动跑马灯或额外 tooltip
+- 输入框下方、按钮左侧定义为左对齐状态栏；空闲时默认展示最近一次本地提交的内容，但当 RAG 后台索引、模型请求或 Agent 长任务在运行时，状态栏会切到 `运行状态` 并优先展示对应进度文案；RAG 重建态除了阶段外，还要显示当前 `completed/total` 文件进度，避免只剩“正在扫描 / 剩余 N 个”这种无法判断进度的弱提示；Pi Agent / 问答态的会话标题、agent、workspace 和错误也统一显示在这里，不再在输出区底部重复补一条状态线；状态栏本体最多展示两行内容，长文案与多条状态项都通过栏内纵向滚动查看，不再使用自动跑马灯或额外 tooltip
 - `/format` 成为 JSON 格式化主命令，`/fmt` 为短别名，保留 `/json` 兼容；当输入命中该命令且后续内容是合法 JSON 时，输入框下方直接显示 pretty format 预览
 - `/md` 成为 Markdown 渲染主命令，`/markdown` 为长别名；命中后输入框下方直接显示 Markdown 预览，支持 GFM、Mermaid、MDX 安全兼容，以及 Obsidian 风格 `[[wiki link]]`、`> [!note]` callout、`==highlight==`
 - `/base64` 作为文本编解码命令；执行时会自动尝试把载荷识别为 UTF-8 Base64 文本，命中则解码，否则编码；当前与其他纯文本 slash 动作一样，支持 `inline`、`multiline`、`ocr`、`clipboard`、`selection`
@@ -126,16 +126,16 @@
 - session 点只承担轻量切换和通知，不承担完整标签页语义
 - session 光点语义固定为：绿色慢闪=`running`，快闪=有新通知，灰色=会话断开，黄色=可恢复错误，红色=不可恢复错误
 - `prompt` 发出后，前端立即插入用户消息和 pending assistant 占位，避免会话看起来“没反应”
-- ACP 会话流展示改为最新 turn 在上、历史 turn 在下；时间线按 message 边界渲染，同一条 assistant turn 内的 `thought`、`actions`、正文仍作为该消息内部块显示，但块顺序必须忠实保留 agent 的真实输出时序，不再压成固定 `正文 -> 操作 -> thought` 摘要
+- Pi Agent 会话流展示改为最新 turn 在上、历史 turn 在下；时间线按 message 边界渲染，同一条 assistant turn 内的 `thought`、`actions`、正文仍作为该消息内部块显示，但块顺序必须忠实保留 agent 的真实输出时序，不再压成固定 `正文 -> 操作 -> thought` 摘要
 - 时间线上相邻的 `thought` 块会在前端合并显示，避免 agent 连续推送 reasoning chunk 时被拆成多个折叠块制造视觉噪音
 - 时间线中的“思考”折叠必须使用真实按钮并暴露展开态，不能再用 click-only `div`；但它出现在时间线里的位置必须由真实输出顺序决定，而不是统一挪到正文后
 - thought 展开内容使用面向阅读的普通排版，并更接近辅助注释而不是引用块/日志摘录；折叠入口必须给出简短预览，避免只剩一个无信息量的小标签
 - thought 继续保持折叠和弱化，但它所在的 block 位置必须忠实反映真实时间线；不能再把 thought 开关统一搬到正文与 action 之后的消息元信息区
 - assistant action trail 不再把带相同 `correlationId` 的 `tool-call` / `tool-update` 压成单个 tool pill，而是按原始顺序渲染为线性事件条目；详情默认只在显式点击后以内联次级展开区展示，并在展示层尽量解码常见转义文本；hover 只保留轻量反馈，不再直接展开详情
 - thought block 默认折叠，但用户手动展开后，在同一条消息继续流式追加时必须尽量保留展开状态；不要每次增量更新就把用户已打开的内容重新折回去
-- ACP 流式输出的自动滚动目标是“当前 turn 的最新文本尾部”，不是简单地把消息列表永远锁在顶部；否则数据虽在增量更新，用户仍看不到最新 token
+- Pi Agent 流式输出的自动滚动目标是“当前 turn 的最新文本尾部”，不是简单地把消息列表永远锁在顶部；否则数据虽在增量更新，用户仍看不到最新 token
 - session 更新合并以 `lastUpdatedAtMs` 和消息权重单调收敛，避免旧快照覆盖异步事件流
-- session 恢复完全依赖 agent 自身能力；agent 不支持 `session/load` 时，只提示，不伪装恢复成功
+- session 恢复依赖 Pi SDK 自身 session 存储；旧 Pi Agent saved session 只提示迁移，不伪装恢复成功
 - 全局快捷键默认使用 `Alt+Space` 唤起 launcher；`Alt+D` 会优先翻译当前应用选中文本，未选中时进入截图 OCR review，确认后才翻译或复制；截图 backend 使用 Wabity overlay + ScreenCaptureKit region capture；`Alt+V` 会直接打开历史剪贴板浮层
 
 约束：
@@ -147,7 +147,7 @@
 
 - RAG 问答采用双入口：显式 slash 动作 `/ask` / `/qa` / `/docs` 可以强制进入；普通文本模式下，如果应用搜索没有弹出补全框，则默认主动作回退到 RAG 问答
 - 只要应用搜索存在可见候选，主动作仍保持应用启动优先级；不要把所有普通自然语言都无条件送进问答
-- launcher 会在本地同时保留最近几轮问答的 user/assistant 文本，以及一份显式 `conversationState`：其中包含上一轮 `responses` 的 `response_id`、续链 scope、累计 citation、累计 action 轨迹和累计工具摘要。后端只在 scope 与当前 provider + workspace 一致时继续沿用它；当当前问答协议是 `responses stateful` 时，继续追问优先把 `previous_response_id` 交给后端，只发送当前问题；如果首轮续问被 provider 以预算或上下文过大拒绝，后端会自动丢弃旧 `response_id`，改用最近历史重试一次；`responses stateless` 和 `chat/completions` 则统一回退到显式回传最近历史。这仍只是轻量多轮上下文，不是 ACP session
+- launcher 会在本地同时保留最近几轮问答的 user/assistant 文本，以及一份显式 `conversationState`：其中包含上一轮 `responses` 的 `response_id`、续链 scope、累计 citation、累计 action 轨迹和累计工具摘要。后端只在 scope 与当前 provider + workspace 一致时继续沿用它；当当前问答协议是 `responses stateful` 时，继续追问优先把 `previous_response_id` 交给后端，只发送当前问题；如果首轮续问被 provider 以预算或上下文过大拒绝，后端会自动丢弃旧 `response_id`，改用最近历史重试一次；`responses stateless` 和 `chat/completions` 则统一回退到显式回传最近历史。这仍只是轻量多轮上下文，不是 Pi Agent session
 - `Esc` 显式收起 launcher 时，现在按“结束当前这一轮 launcher 本地交互”处理：除了清空轻量问答上下文，还要同步清掉当前输入、内联结果展示、pending slash 动作和当前激活 session 选择，重新回到干净的 launcher 初始态；其它隐藏路径例如 blur auto-hide、打开引用前的临时隐藏、执行结果要求关闭 launcher 或全局快捷键 toggle 隐藏都保留当前上下文，避免把“临时收起窗口”和“主动结束本轮交互”混成同一个动作
 - 轻量问答的结构化 payload 除了 `conversationState`、citation、action 和 tool 摘要外，还允许带一段可选 `reasoning`；只有在 provider 同时给出明确正文和 reasoning 时，前端才把这段 reasoning 接成次级 thought 折叠块，绝不能再把 reasoning 当主答案兜底展示；`chat/completions` 兼容层若把 thinking 作为 `content` 数组项或 `<think>...</think>` 片段返回，后端也必须先拆成 `primary_text + reasoning`
 - 翻译结果卡同样允许带一段次级 `reasoning`，并且必须复用和时间线一致的 thought disclosure 展示；它只能附着在明确译文之后，不能独立占据结果卡，也不能在没有 `primary_text` 时兜底展示成“译文”

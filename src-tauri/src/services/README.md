@@ -2,11 +2,11 @@
 
 职责：
 
-- `acp`：启动本地 `stdio` ACP agent、维护 session 生命周期并投影消息流；`mod.rs` 只保留 service 主流程、session 记录和 runtime 事件消费，agent 命令构建下沉到 `command_builder`，ACP mode / config / MCP transport 映射下沉到 `mapping`
+- `pi_agent`：通过 `pi_agent_rust` 的 `pi::sdk` 创建内嵌 Pi Agent session、维护 session 生命周期并投影消息流；service 主流程只负责 session 记录、事件消费和前端投影，不再启动外部 ACP agent 进程
 - `application`：扫描已安装应用、按需构建缓存索引并执行应用启动；首次查询同步建快照，过旧后异步补刷新
 - `process`：维护当前运行进程的按需缓存快照，为 `/kill` 提供低延迟补全搜索，并在执行阶段重新实时校验后再终止目标
 - `matcher`：根据输入上下文筛选并排序动作
-- `notification`：根据通知设置、launcher 前后台态和完成事件语义，决定是否发系统通知，并把问答/ACP 的最终响应压缩成受控摘要
+- `notification`：根据通知设置、launcher 前后台态和完成事件语义，决定是否发系统通知，并把问答/Pi Agent 的最终响应压缩成受控摘要
 - `executor`：执行动作并返回结构化结果
 - `open_target`：解析 launcher `/open` 输入，并把 URL、文件或目录交给系统默认 opener
 - `file_search`：基于当前 workspace 做模糊文件搜索；运行时维护多 workspace LRU 缓存，并为已命中的 workspace 安装目录 watcher，尽量用增量更新替代反复全量重建；本地快照只保留路径字符串，展示字段按需投影
@@ -47,14 +47,14 @@
 - `camel_case_text` / `snake_case_text` 逐行做命名风格转换；单词拆分会同时识别空白、常见分隔符和 `camelCase` / `HTTPServer` 这类大小写边界
 - `unique_lines` / `sort_lines` 按行处理文本：`/unique` 保留首次出现的行，`/sort` 做字典序排序；它们不会顺手裁剪空白，清理空白仍由 `/trim` 负责
 - `file_search` 按操作系统选择搜索后端；当前 macOS 优先 workspace 范围内的 Spotlight，失败或无结果时回退到 `ignore` + `skim` matcher 的本地索引；索引记录只缓存 `path`，`file_name` 和 `parent` 在匹配阶段按需切片
-- `acp` 当前只支持本地 `stdio` ACP transport，不声明文件或终端 capability；但 session 创建/恢复时会把全局 MCP server 配置透传给 ACP agent
-- `acp` 当前不会把自己实现成 MCP client/bridge；如果 agent 支持 ACP `mcp_servers`，就由 agent 自己连接这些 MCP server
+- `pi_agent` 不再支持 ACP `stdio` transport，不声明 ACP client capability，也不透传 `mcp_servers`；第一阶段 Pi Agent session 只消费 Pi SDK 自身的 provider、model、thinking、tool 和 session 配置
+- `pi_agent` 当前不会把自己实现成 MCP client/bridge；全局 MCP 清单继续服务于 RAG 问答和 MCP 设置页，后续若要注入 Pi session 必须通过 Pi SDK `ToolFactory` 明确建模
 - `builtin_mcp` 不是新的索引链路；`rag` 模块只包装已有 USearch + SQLite 查询能力，`document` 模块只包装已有文档读取 / chunk 摘录能力，不重复维护第二份索引或抽取缓存
 - `builtin_mcp` 当前复用统一内置 loopback HTTP 端口 `127.0.0.1:43189`，主路径固定为 `/internal/mcp`，兼容保留旧的 `/internal/mcp/rag`；只返回 JSON response mode，`GET` 明确返回 `405`，不伪装成已启用 SSE
 - `builtin_mcp` 的 tool 可见性受内置模块配置控制：同一个 server 根据设置页启用的模块决定 `tools/list` / `tools/call`；如果 server 已启用但没有任何模块，endpoint 仍运行，但工具目录为空
 - `builtin_mcp` 的 `document` 模块只允许访问当前 workspace 根目录和显式配置的 RAG source roots，不把内置 MCP 扩成任意本地文件读取口子
 - `builtin_mcp` 的 `rag` 模块在索引仍有 pending 文件时不会把部分命中伪装成稳定成功结果；它会返回显式 error payload，并把 partial result 放进结构化字段里提醒调用方当前结果不完整
-- `acp` 会持久化 live session 快照，并在启动时尝试使用 agent 的 `session/load` 恢复；不支持或失败时只记录恢复提示
+- `pi_agent` 会依赖 Pi SDK 自身 session 存储维护可恢复状态；旧 ACP saved session 不再自动恢复，只作为迁移提示来源
 - 真正的系统能力接入通过基础设施层或前端 effect 完成
 - 当前 workspace 属于运行时状态：启动默认回到 `HOME`，配置层只持久化最近 3 个目录用于快速切换
 - `ocr` 现在支持两类 provider：macOS 本地 `Vision`，以及通过 OpenAI 兼容 `responses` 接口发送图文输入的远程多模态模型
@@ -82,13 +82,13 @@
 - `search_files`、`search_apps`、`search_processes`、RAG 检索、embedding 批次、索引元数据持久化、翻译和远程 OCR 请求都必须打结构化耗时日志，先观测再优化，禁止继续凭体感改热点
 - `application`、`process`、`file_search` 和 RAG 文件摄取除了耗时，还必须记录条目数、路径字节数、抽取文本字节数、chunk 数和向量字节估算等业务观测字段，避免后续再用进程总 RSS 猜热点
 - `rag_answer` 和 `translate` 一样走运行时调度，而不是塞进纯本地 `executor`
-- 轻量问答完成通知挂在 `rag_answer` 的最终返回边界；ACP 完成通知挂在 `PromptFinished` / `PromptFailed` / 运行中异常退出的终态事件，不能让前端根据投影后的 session update 自己猜
+- 轻量问答完成通知挂在 `rag_answer` 的最终返回边界；Pi Agent 完成通知挂在 Pi SDK `AgentEnd` / 运行中异常退出的终态事件，不能让前端根据投影后的增量 update 自己猜
 - 问答后端的稳定公开入口在 `question_answer_backend`；`AppState` 和 `src-tauri/tests/` 都通过这一层调用，集成测试不需要启动 Tauri 命令分发或伪造完整 `AppState`
 - `rag_answer` 不再自动前置 RAG 查询结果；模型必须显式调用 `wabity.rag.query` 才能拿到向量检索命中，再按需继续调用 `wabity.read_file_lines` 或 `wabity.read_document_excerpt`
 - `rag_answer` 的 `wabity.read_file_lines` 不是任意本地文件读取口子；它只允许访问当前 workspace 根目录和显式配置的 RAG source roots，citation 打开链路也复用同一套路径白名单。对 `docx`，工具不会直接返回原始 ZIP/XML，而是复用索引同款抽取逻辑返回规范化后的可读文本行；对 `pdf`，问答链路必须改走 `wabity.read_document_excerpt`，按 chunk/page 读取规范化摘录，而不是伪装成按行读文件
 - `rag_answer` 的 `wabity.system.open` 也不是任意本机打开口子；它虽然会作为内置 tool 注入模型，但执行前必须通过两层约束：当前问题明确要求“打开”，且本地路径必须落在当前 workspace 或显式配置的 RAG source roots 内。tool description 还会动态拼入宿主机 OS / version / package managers，避免模型把平台能力硬编码错
-- `rag_answer` 支持 launcher 内部多轮上下文，但仍不是 ACP session；它会同时接收最近问答历史和显式 `conversation_state`。只有当前 LLM 条目是 `responses` 且开启 `supports_stateful` 时，才会在继续追问时把 `previous_response_id` 送进请求；`responses stateless` 和 `chat/completions` 继续回退到显式历史。问答请求严格按条目声明的协议发往对应 endpoint，不做跨协议兜底；若 stateful 首轮续问因为 provider 预算或上下文限制失败，会自动改用显式最近历史重试一次。但 citation / action / tool 摘要会在所有协议下持续累积，避免后续回答丢失证据链
+- `rag_answer` 支持 launcher 内部多轮上下文，但仍不是 Pi Agent session；它会同时接收最近问答历史和显式 `conversation_state`。只有当前 LLM 条目是 `responses` 且开启 `supports_stateful` 时，才会在继续追问时把 `previous_response_id` 送进请求；`responses stateless` 和 `chat/completions` 继续回退到显式历史。问答请求严格按条目声明的协议发往对应 endpoint，不做跨协议兜底；若 stateful 首轮续问因为 provider 预算或上下文限制失败，会自动改用显式最近历史重试一次。但 citation / action / tool 摘要会在所有协议下持续累积，避免后续回答丢失证据链
 - `rag_answer` 当前要求问答 LLM 是普通 LLM 类型；若协议是 `responses`，问答链路会优先把 HTTP/SSE MCP server 直接注入请求；`chat/completions` 与 `stdio` MCP server 当前都不支持这条注入路径。若 provider 对工具支持不完整，运行时会自动从“全量工具”回退到“仅内置工具”，必要时再退到“无工具请求”
 - `rag_answer` 的系统提示词同样来自 AI 功能配置；检索策略和工具调用规则由运行时固定补充，避免用户误以为 RAG 结果仍然是自动投喂
 - `rag_query` 在最终返回前会先扩大召回窗口，并行获取向量/BM25 两路候选，按 `absolute_path + chunk_index` 去重合并后再做轻量 rerank，并同时应用多层过滤：显式 `min_score` / 默认高置信阈值、相对首个命中的尾部截断、强实体 query 的锚点词硬过滤，以及标题-only / base64 这类低质量 chunk 剔除；通过这些过滤后，才按文件轮转裁剪，且单文件最多保留 2 个 chunk，避免长文档把 top-k 和弱相关尾部一起塞满；`pending_indexing` 不再只在“0 命中”时才上报，而是任何存在 pending 元数据时都显式返回
-- `rag_answer` 会把每一轮工具循环投影成结构化 `actions`：包括“第 N 步”标记、内置工具的调用参数和执行结果，以及 MCP tool call 的输入/输出摘要；前端直接复用 ACP action bar 展示，不再把问答执行过程压扁成单条 summary
+- `rag_answer` 会把每一轮工具循环投影成结构化 `actions`：包括“第 N 步”标记、内置工具的调用参数和执行结果，以及 MCP tool call 的输入/输出摘要；前端直接复用 Agent action bar 展示，不再把问答执行过程压扁成单条 summary

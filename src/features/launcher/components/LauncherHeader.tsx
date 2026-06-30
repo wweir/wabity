@@ -96,7 +96,7 @@ export function LauncherHeader({
 				/>
 			</div>
 
-			<div className="session-strip" aria-label="ACP sessions">
+			<div className="session-strip" aria-label="Pi Agent sessions">
 				{agentConfigured ? (
 					<button
 						aria-controls="agent-picker-panel"

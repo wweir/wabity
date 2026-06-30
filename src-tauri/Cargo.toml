@@ -23,7 +23,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = ["codegen"] }
 
 [dependencies]
-agent-client-protocol = "0.10.4"
+pi_agent_rust = { version = "0.1.18", default-features = false }
 anyhow.workspace = true
 arboard = "3"
 async-trait = "0.1"
@@ -41,7 +41,7 @@ md5 = "0.7"
 notify = "8.2.0"
 reqwest.workspace = true
 roxmltree = "0.20"
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 serde.workspace = true
 serde_json.workspace = true
 shlex = "1"

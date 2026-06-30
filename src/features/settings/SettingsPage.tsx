@@ -1699,17 +1699,17 @@ export function SettingsPage({
 		const nextAgents = [...acpAgents, nextAgent];
 		setAcpNotice({
 			tone: "info",
-			text: `${option.label} 已加入 ACP Agent 草稿，还没写回 config.toml。`,
+			text: `${option.label} 已加入 Pi Agent 草稿，还没写回 config.toml。`,
 		});
 		applyAgentDrafts(nextAgents, nextAgent.id);
 	}
 
 	function handleAddCustomAgent() {
-		const nextAgent = createAgentDraft("ACP Agent", "");
+		const nextAgent = createAgentDraft("Pi Agent", "");
 		const nextAgents = [...acpAgents, nextAgent];
 		setAcpNotice({
 			tone: "info",
-			text: "已创建新的自定义 ACP Agent 草稿。先补全名称和启动命令，再保存。",
+			text: "已创建新的自定义 Pi Agent 草稿。先补全名称和启动命令，再保存。",
 		});
 		applyAgentDrafts(nextAgents, nextAgent.id);
 	}

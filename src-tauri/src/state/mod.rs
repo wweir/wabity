@@ -454,8 +454,19 @@ impl AppState {
 
     pub async fn create_acp_session(&self, agent_id: Option<String>) -> Result<AcpSessionDetail> {
         let workspace = self.workspace().await?;
-        let agent = self.resolve_acp_agent(agent_id.as_deref()).await?;
-        let mcp_servers = self.effective_acp_mcp_servers().await?;
+        let agent = self
+            .resolve_acp_agent(agent_id.as_deref())
+            .await
+            .unwrap_or_else(|_| AcpAgentConfig {
+                id: "pi-agent".to_string(),
+                name: "Pi Agent".to_string(),
+                program: String::new(),
+                args: Vec::new(),
+                shell_command: None,
+                launch_mode: crate::domain::acp::AcpAgentLaunchMode::Direct,
+                mcp_servers: Vec::new(),
+            });
+        let mcp_servers = Vec::new();
         let runtime_agent = hydrate_runtime_agent(agent.clone(), mcp_servers.clone());
         let workspace_root = normalize_workspace_root(&workspace.root_path)?;
         let detail = self

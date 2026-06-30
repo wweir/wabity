@@ -51,7 +51,7 @@ export function SessionPanel({
 		>
 			<header className="session-panel-header">
 				<div className="session-panel-heading">
-					<strong className="session-panel-heading-title">ACP 会话</strong>
+					<strong className="session-panel-heading-title">Pi Agent 会话</strong>
 					<span className="session-panel-heading-summary">
 						{sessionSummaries.length === 0
 							? "还没有创建会话。"
@@ -62,8 +62,8 @@ export function SessionPanel({
 			{sessionSummaries.length === 0 ? (
 				<p className="session-panel-empty">
 					{agentConfigured
-						? "还没有 ACP session。点击左侧 + 先创建一个。"
-						: "还没有 ACP session。先在设置里配置 agent。"}
+						? "还没有 Pi Agent session。点击左侧 + 先创建一个。"
+						: "还没有 Pi Agent session。先在设置里配置 agent。"}
 				</p>
 			) : (
 				<div className="session-panel-list" role="list">

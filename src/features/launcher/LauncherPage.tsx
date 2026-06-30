@@ -629,10 +629,10 @@ export function LauncherPage({
 			!shortcutTranslationPending &&
 			!screenshotReviewOpen &&
 			!creatingSession;
-	const agentActionLabel = "ACP Agent";
+	const agentActionLabel = "Pi Agent";
 	const agentActionTitle = agentConfigured
 		? `${agentActionLabel} (${agentActionShortcutLabel})`
-		: "打开 ACP Agent 设置";
+		: "打开 Pi Agent 设置";
 	const showAgentActionShortcut = agentConfigured;
 
 	const clearScheduledLauncherInputFocus = useCallback(() => {
@@ -848,7 +848,7 @@ export function LauncherPage({
 			})
 			.catch((error: unknown) => {
 				if (isTrackedLauncherRequestCurrent(resetEpoch)) {
-					console.warn("failed to clear active ACP session while dismissing launcher", error);
+					console.warn("failed to clear active Pi Agent session while dismissing launcher", error);
 				}
 			});
 	}, [
@@ -1442,7 +1442,7 @@ export function LauncherPage({
 				updatesUnlisten = unlisten;
 			})
 			.catch((error: unknown) => {
-				console.warn("failed to subscribe ACP session updates", error);
+				console.warn("failed to subscribe Pi Agent session updates", error);
 			});
 
 		void subscribeAcpSessionRemovals((sessionId) => {
@@ -1463,7 +1463,7 @@ export function LauncherPage({
 				removalsUnlisten = unlisten;
 			})
 			.catch((error: unknown) => {
-				console.warn("failed to subscribe ACP session removals", error);
+				console.warn("failed to subscribe Pi Agent session removals", error);
 			});
 
 		return () => {
@@ -2378,7 +2378,7 @@ export function LauncherPage({
 			if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
 				return;
 			}
-			setError(getErrorMessage(promptError, "ACP prompt 发送失败"));
+			setError(getErrorMessage(promptError, "Pi Agent prompt 发送失败"));
 		} finally {
 			const requestStillCurrent = isTrackedLauncherRequestCurrent(requestEpoch);
 			endTrackedLauncherRequest(requestEpoch);
@@ -2409,7 +2409,7 @@ export function LauncherPage({
 			}
 
 			if (!targetSessionId) {
-				throw new Error("ACP session 创建失败");
+				throw new Error("Pi Agent session 创建失败");
 			}
 
 			const detail = await sendAcpPrompt(targetSessionId, prompt);
@@ -2849,12 +2849,12 @@ export function LauncherPage({
 		async (requestEpoch: number = launcherResetEpochRef.current) => {
 			const detail = await createAcpSession(selectedAgent?.id ?? null);
 			if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
-				throw new Error("launcher reset while creating ACP session");
+				throw new Error("launcher reset while creating Pi Agent session");
 			}
 			setSessionDetails((current) => upsertSessionDetailRecord(current, detail));
 			const summaries = await activateAcpSession(detail.session.sessionId);
 			if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
-				throw new Error("launcher reset while activating ACP session");
+				throw new Error("launcher reset while activating Pi Agent session");
 			}
 			setSessionSummaries(summaries);
 			setActiveSessionId(detail.session.sessionId);
@@ -2878,7 +2878,7 @@ export function LauncherPage({
 			if (!isTrackedLauncherRequestCurrent(requestEpoch)) {
 				return;
 			}
-			setError(getErrorMessage(sessionError, "创建 ACP session 失败"));
+			setError(getErrorMessage(sessionError, "创建 Pi Agent session 失败"));
 		} finally {
 			const requestStillCurrent = isTrackedLauncherRequestCurrent(requestEpoch);
 			endTrackedLauncherRequest(requestEpoch);
@@ -2969,7 +2969,7 @@ export function LauncherPage({
 			applySessionDetail(detail);
 			setError(null);
 		} catch (sessionError) {
-			setError(getErrorMessage(sessionError, "切换 ACP session 模式失败"));
+			setError(getErrorMessage(sessionError, "切换 Pi Agent session 模式失败"));
 		} finally {
 			setRuntimeControlPendingKey(null);
 		}
@@ -2986,7 +2986,7 @@ export function LauncherPage({
 			applySessionDetail(detail);
 			setError(null);
 		} catch (sessionError) {
-			setError(getErrorMessage(sessionError, "更新 ACP session 配置失败"));
+			setError(getErrorMessage(sessionError, "更新 Pi Agent session 配置失败"));
 		} finally {
 			setRuntimeControlPendingKey(null);
 		}
@@ -3105,7 +3105,7 @@ export function LauncherPage({
 	);
 
 	const inputPlaceholder = activeSessionId
-		? "向当前 ACP session 发送消息，或用 @ 插入当前 workspace 文件路径"
+		? "向当前 Pi Agent session 发送消息，或用 @ 插入当前 workspace 文件路径"
 		: pendingSlashAction
 			? `已选择 ${pendingSlashAction.aliases[0] ?? pendingSlashAction.title}，输入待处理文本后按 Enter`
 			: "输入应用名，或用 / 执行动作、@ 搜索当前 workspace 文件";

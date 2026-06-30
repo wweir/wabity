@@ -368,10 +368,10 @@ const SessionFeedback = memo(function SessionFeedback({
 	return (
 		<div className="session-log" ref={sessionLogRef}>
 			{hasRuntimeControls ? (
-				<section className="session-runtime-panel" aria-label="ACP 运行时配置">
+				<section className="session-runtime-panel" aria-label="Pi Agent 运行时配置">
 					<header className="session-runtime-header">
 						<div className="session-runtime-heading">
-							<span className="session-runtime-kicker">ACP Runtime</span>
+							<span className="session-runtime-kicker">Pi Agent Runtime</span>
 							<strong className="session-runtime-title">当前会话运行时</strong>
 						</div>
 						<span className="session-runtime-summary">
