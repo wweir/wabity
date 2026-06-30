@@ -114,16 +114,6 @@ pub(super) fn reconcile_saved_session_builtin_mcp(
     snapshot
 }
 
-pub(super) fn hydrate_runtime_agent(
-    agent: AcpAgentConfig,
-    mcp_servers: Vec<AcpMcpServerConfig>,
-) -> AcpAgentConfig {
-    AcpAgentConfig {
-        mcp_servers,
-        ..agent
-    }
-}
-
 fn builtin_mcp_should_be_available(catalog: &AcpMcpServerCatalog, builtin_running: bool) -> bool {
     builtin_running && catalog.builtin.enabled && !catalog.builtin.enabled_modules.is_empty()
 }

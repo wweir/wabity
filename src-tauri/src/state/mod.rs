@@ -17,23 +17,29 @@ mod session_snapshot;
 mod settings;
 
 use self::acp_catalog::{
-    effective_mcp_servers, hydrate_runtime_agent, normalize_acp_agent_catalog,
-    normalize_acp_mcp_server_catalog, reconcile_saved_session_builtin_mcp,
+    effective_mcp_servers, normalize_acp_agent_catalog, normalize_acp_mcp_server_catalog,
+    reconcile_saved_session_builtin_mcp,
 };
-use self::session_snapshot::{
-    build_acp_session_persist_hook, merge_restored_session_snapshots, store_session_snapshot,
-    SnapshotWriteMode,
-};
+use self::session_snapshot::merge_restored_session_snapshots;
 use self::settings::{
     build_ocr_provider, fetch_llm_provider_models, validate_llm_settings, validate_ocr_settings,
     validate_rag_settings,
 };
 use crate::services::{
-    acp::AcpService, application::ApplicationService, builtin_mcp::BuiltinMcpServerService,
-    clipboard::ClipboardService, executor::ExecutorService, file_search::FileSearchService,
-    matcher::MatcherService, notification::NotificationService, ocr::OcrProvider,
-    open_target::OpenTargetService, process::ProcessService, question_answer_backend,
-    rag::RagIndexService, translate,
+    acp::{AcpService, AgentSessionRuntimeConfig},
+    application::ApplicationService,
+    builtin_mcp::BuiltinMcpServerService,
+    clipboard::ClipboardService,
+    executor::ExecutorService,
+    file_search::FileSearchService,
+    matcher::MatcherService,
+    notification::NotificationService,
+    ocr::OcrProvider,
+    open_target::OpenTargetService,
+    process::ProcessService,
+    question_answer_backend,
+    rag::RagIndexService,
+    translate,
 };
 use crate::{
     domain::{
@@ -46,6 +52,7 @@ use crate::{
         settings::{
             builtin_llm_provider_templates, AppSettings, BuiltinLlmProviderTemplate,
             LlmProviderConfig, LlmProviderModelEntry, LlmSettings, RagSettings,
+            ResolvedLlmModelBinding,
         },
         workspace::WorkspaceState,
     },
@@ -127,7 +134,6 @@ impl AppState {
         clipboard.start();
         let notification =
             NotificationService::new(app_handle, shortcut_state, config_store.clone());
-        let acp_session_persist_hook = build_acp_session_persist_hook(config_store.clone());
 
         Ok(Self {
             matcher,
@@ -138,7 +144,7 @@ impl AppState {
             file_search: FileSearchService::new()?,
             clipboard,
             notification: notification.clone(),
-            acp: AcpService::new(notification, Some(acp_session_persist_hook)),
+            acp: AcpService::new(notification),
             ocr_provider: Arc::new(StdRwLock::new(build_ocr_provider(&config.ocr, &config.llm))),
             rag_index,
             builtin_mcp,
@@ -452,30 +458,14 @@ impl AppState {
         self.builtin_mcp.status().await
     }
 
-    pub async fn create_acp_session(&self, agent_id: Option<String>) -> Result<AcpSessionDetail> {
+    pub async fn create_acp_session(&self, _agent_id: Option<String>) -> Result<AcpSessionDetail> {
         let workspace = self.workspace().await?;
-        let agent = self
-            .resolve_acp_agent(agent_id.as_deref())
-            .await
-            .unwrap_or_else(|_| AcpAgentConfig {
-                id: "pi-agent".to_string(),
-                name: "Pi Agent".to_string(),
-                program: String::new(),
-                args: Vec::new(),
-                shell_command: None,
-                launch_mode: crate::domain::acp::AcpAgentLaunchMode::Direct,
-                mcp_servers: Vec::new(),
-            });
-        let mcp_servers = Vec::new();
-        let runtime_agent = hydrate_runtime_agent(agent.clone(), mcp_servers.clone());
         let workspace_root = normalize_workspace_root(&workspace.root_path)?;
-        let detail = self
-            .acp
-            .create_session(workspace_root, runtime_agent.clone(), mcp_servers.clone())
-            .await?;
-        self.upsert_session_snapshot(&detail.session, &agent, &mcp_servers)
-            .await?;
-        Ok(detail)
+        let config = self.app_config().await?;
+        let runtime_config = resolve_agent_session_runtime_config(&config);
+        self.acp
+            .create_session(workspace_root, pi_agent_config(), runtime_config)
+            .await
     }
 
     pub async fn activate_acp_session(
@@ -497,7 +487,7 @@ impl AppState {
     }
 
     pub async fn acp_session_detail(&self, session_id: &str) -> Result<Option<AcpSessionDetail>> {
-        let session_id = normalize_required_id("ACP session id", session_id)?;
+        let session_id = normalize_required_id("Pi Agent session id", session_id)?;
         Ok(self.acp.session_detail(&session_id).await)
     }
 
@@ -506,11 +496,8 @@ impl AppState {
         session_id: &str,
         prompt: String,
     ) -> Result<AcpSessionDetail> {
-        let session_id = normalize_required_id("ACP session id", session_id)?;
-        let detail = self.acp.send_prompt(&session_id, prompt).await?;
-        self.update_acp_runtime_session_snapshot(&session_id, &detail)
-            .await?;
-        Ok(detail)
+        let session_id = normalize_required_id("Pi Agent session id", session_id)?;
+        self.acp.send_prompt(&session_id, prompt).await
     }
 
     pub async fn set_acp_session_mode(
@@ -518,11 +505,8 @@ impl AppState {
         session_id: &str,
         mode_id: String,
     ) -> Result<AcpSessionDetail> {
-        let session_id = normalize_required_id("ACP session id", session_id)?;
-        let detail = self.acp.set_session_mode(&session_id, mode_id).await?;
-        self.update_acp_runtime_session_snapshot(&session_id, &detail)
-            .await?;
-        Ok(detail)
+        let session_id = normalize_required_id("Pi Agent session id", session_id)?;
+        self.acp.set_session_mode(&session_id, mode_id).await
     }
 
     pub async fn set_acp_session_config_option(
@@ -531,18 +515,14 @@ impl AppState {
         config_id: String,
         value_id: String,
     ) -> Result<AcpSessionDetail> {
-        let session_id = normalize_required_id("ACP session id", session_id)?;
-        let detail = self
-            .acp
+        let session_id = normalize_required_id("Pi Agent session id", session_id)?;
+        self.acp
             .set_session_config_option(&session_id, config_id, value_id)
-            .await?;
-        self.update_acp_runtime_session_snapshot(&session_id, &detail)
-            .await?;
-        Ok(detail)
+            .await
     }
 
     pub async fn close_acp_session(&self, session_id: &str) -> Result<()> {
-        let session_id = normalize_required_id("ACP session id", session_id)?;
+        let session_id = normalize_required_id("Pi Agent session id", session_id)?;
         self.acp.close_session(&session_id).await?;
         self.remove_session_snapshot(&session_id).await?;
         Ok(())
@@ -598,56 +578,6 @@ impl AppState {
         Ok(restored)
     }
 
-    async fn upsert_session_snapshot(
-        &self,
-        summary: &AcpSessionSummary,
-        agent: &AcpAgentConfig,
-        mcp_servers: &[AcpMcpServerConfig],
-    ) -> Result<()> {
-        store_session_snapshot(
-            &self.config_store,
-            summary,
-            agent,
-            mcp_servers,
-            SnapshotWriteMode::InsertOrUpdate,
-        )
-        .await
-    }
-
-    async fn update_session_snapshot(
-        &self,
-        summary: &AcpSessionSummary,
-        agent: &AcpAgentConfig,
-        mcp_servers: &[AcpMcpServerConfig],
-    ) -> Result<()> {
-        store_session_snapshot(
-            &self.config_store,
-            summary,
-            agent,
-            mcp_servers,
-            SnapshotWriteMode::UpdateOnly,
-        )
-        .await
-    }
-
-    async fn update_acp_runtime_session_snapshot(
-        &self,
-        session_id: &str,
-        detail: &AcpSessionDetail,
-    ) -> Result<()> {
-        let session_runtime_config = self
-            .acp
-            .session_runtime_config(session_id)
-            .await
-            .with_context(|| format!("unknown ACP session: {session_id}"))?;
-        self.update_session_snapshot(
-            &detail.session,
-            &session_runtime_config.agent,
-            &session_runtime_config.mcp_servers,
-        )
-        .await
-    }
-
     async fn remove_session_snapshot(&self, session_id: &str) -> Result<()> {
         let store = self.config_store.write().await;
         let mut config = store.load().await?;
@@ -661,21 +591,98 @@ impl AppState {
         store.save(&config).await?;
         Ok(())
     }
+}
 
-    async fn resolve_acp_agent(&self, agent_id: Option<&str>) -> Result<AcpAgentConfig> {
-        let catalog = self.acp_agents().await?;
-        let selected_agent_id =
-            normalize_optional_id(agent_id).or(catalog.default_agent_id.clone());
-        let Some(selected_agent_id) = selected_agent_id else {
-            anyhow::bail!("ACP agent 未配置");
-        };
-
-        catalog
-            .agents
-            .into_iter()
-            .find(|agent| agent.id == selected_agent_id)
-            .with_context(|| format!("unknown ACP agent: {selected_agent_id}"))
+fn pi_agent_config() -> AcpAgentConfig {
+    AcpAgentConfig {
+        id: "pi-agent".to_string(),
+        name: "Agent".to_string(),
+        program: String::new(),
+        args: Vec::new(),
+        shell_command: None,
+        launch_mode: crate::domain::acp::AcpAgentLaunchMode::Direct,
+        mcp_servers: Vec::new(),
     }
+}
+
+fn resolve_agent_session_runtime_config(config: &AppConfig) -> AgentSessionRuntimeConfig {
+    let Some(binding) = resolve_agent_model_binding(&config.llm) else {
+        return AgentSessionRuntimeConfig::default();
+    };
+    let Some(provider) = resolve_pi_provider_id(binding.provider()) else {
+        return AgentSessionRuntimeConfig::default();
+    };
+    let Some(model) = binding.model_name().map(str::to_string) else {
+        return AgentSessionRuntimeConfig::default();
+    };
+
+    AgentSessionRuntimeConfig {
+        provider: Some(provider),
+        model: Some(model),
+        api_key: non_empty_string(&binding.provider().api_key),
+        ..AgentSessionRuntimeConfig::default()
+    }
+}
+
+fn resolve_agent_model_binding(llm_settings: &LlmSettings) -> Option<ResolvedLlmModelBinding<'_>> {
+    llm_settings
+        .question_answer_model_id
+        .as_deref()
+        .and_then(|model_id| llm_settings.find_model_binding(model_id))
+        .filter(|binding| binding.can_handle_ai_task())
+        .or_else(|| {
+            llm_settings
+                .translation_model_id
+                .as_deref()
+                .and_then(|model_id| llm_settings.find_model_binding(model_id))
+                .filter(|binding| binding.can_handle_ai_task())
+        })
+        .or_else(|| {
+            llm_settings
+                .iter_model_bindings()
+                .find(|binding| binding.can_handle_ai_task())
+        })
+}
+
+fn resolve_pi_provider_id(provider: &LlmProviderConfig) -> Option<String> {
+    if let Some(provider_id) = provider
+        .builtin_preset_id
+        .as_deref()
+        .and_then(resolve_pi_provider_id_from_template)
+    {
+        return Some(provider_id.to_string());
+    }
+
+    resolve_pi_provider_id_from_base_url(&provider.base_url).map(ToOwned::to_owned)
+}
+
+fn resolve_pi_provider_id_from_template(template_id: &str) -> Option<&'static str> {
+    match template_id.trim() {
+        "openai" => Some("openai"),
+        "openrouter" => Some("openrouter"),
+        "deepseek" => Some("deepseek"),
+        "ollama" => Some("ollama"),
+        "siliconflow" => Some("siliconflow-cn"),
+        _ => None,
+    }
+}
+
+fn resolve_pi_provider_id_from_base_url(base_url: &str) -> Option<&'static str> {
+    let normalized = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
+    match normalized.as_str() {
+        "https://api.openai.com/v1" => Some("openai"),
+        "https://openrouter.ai/api/v1" => Some("openrouter"),
+        "https://api.deepseek.com" | "https://api.deepseek.com/v1" => Some("deepseek"),
+        "http://localhost:11434/v1" | "http://127.0.0.1:11434/v1" => Some("ollama"),
+        "https://api.siliconflow.cn/v1" => Some("siliconflow-cn"),
+        "https://api.siliconflow.com/v1" => Some("siliconflow"),
+        _ => None,
+    }
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 fn apply_app_settings_to_config(config: &mut AppConfig, settings: AppSettings) -> Result<()> {
@@ -1223,10 +1230,11 @@ mod tests {
         },
         apply_app_settings_to_config, merge_restored_session_snapshots, normalize_optional_id,
         normalize_required_id, normalized_existing_session_id,
-        session_snapshot::apply_session_snapshot,
+        resolve_agent_session_runtime_config, resolve_pi_provider_id_from_base_url,
+        session_snapshot::{apply_session_snapshot, SnapshotWriteMode},
         settings::{validate_llm_provider_config, validate_rag_settings},
         LauncherWindowSize, LauncherWindowViewMode, ShortcutAction, ShortcutRuntimeState,
-        SnapshotWriteMode, SHORTCUT_PRESS_STALE_AFTER,
+        SHORTCUT_PRESS_STALE_AFTER,
     };
     use crate::domain::{
         acp::{
@@ -1243,6 +1251,75 @@ mod tests {
     use crate::infrastructure::openai_compatible::{extract_model_entries, extract_model_ids};
     use crate::services::builtin_mcp;
     use serde_json::json;
+
+    fn test_agent_provider(id: &str, builtin_preset_id: Option<&str>) -> LlmProviderConfig {
+        LlmProviderConfig {
+            id: id.to_string(),
+            name: id.to_string(),
+            base_url: "https://api.example.com/v1".to_string(),
+            api_key: "sk-test".to_string(),
+            protocol: LlmProviderProtocol::Responses,
+            models: vec![LlmModelConfig {
+                id: format!("{id}-model"),
+                model_type: LlmModelType::Llm,
+                model: "test-model".to_string(),
+                model_identity_hint: None,
+                builtin_preset_model_id: None,
+                supports_multimodal: false,
+                supports_stateful: true,
+            }],
+            builtin_preset_id: builtin_preset_id.map(ToOwned::to_owned),
+            managed_base_url: false,
+        }
+    }
+
+    #[test]
+    fn agent_runtime_config_reuses_question_answer_model_when_provider_maps_to_pi() {
+        let provider = test_agent_provider("qa", Some("openrouter"));
+        let model_id = provider.models[0].id.clone();
+        let config = AppConfig {
+            llm: LlmSettings {
+                providers: vec![provider],
+                translation_model_id: None,
+                question_answer_model_id: Some(model_id),
+            },
+            ..AppConfig::default()
+        };
+
+        let runtime = resolve_agent_session_runtime_config(&config);
+
+        assert_eq!(runtime.provider.as_deref(), Some("openrouter"));
+        assert_eq!(runtime.model.as_deref(), Some("test-model"));
+        assert_eq!(runtime.api_key.as_deref(), Some("sk-test"));
+    }
+
+    #[test]
+    fn agent_runtime_config_falls_back_for_unmapped_provider() {
+        let provider = test_agent_provider("custom", None);
+        let model_id = provider.models[0].id.clone();
+        let config = AppConfig {
+            llm: LlmSettings {
+                providers: vec![provider],
+                translation_model_id: None,
+                question_answer_model_id: Some(model_id),
+            },
+            ..AppConfig::default()
+        };
+
+        let runtime = resolve_agent_session_runtime_config(&config);
+
+        assert!(runtime.provider.is_none());
+        assert!(runtime.model.is_none());
+        assert!(runtime.api_key.is_none());
+    }
+
+    #[test]
+    fn pi_provider_base_url_mapping_accepts_ollama_localhost_alias() {
+        assert_eq!(
+            resolve_pi_provider_id_from_base_url("http://localhost:11434/v1/"),
+            Some("ollama")
+        );
+    }
 
     #[test]
     fn shortcut_press_only_triggers_once_until_release() {

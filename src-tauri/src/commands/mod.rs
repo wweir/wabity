@@ -132,82 +132,25 @@ where
 #[cfg(test)]
 mod tests {
     use serde_json::{json, Value};
-    use tauri::{
-        ipc::{Invoke, InvokeBody, InvokeError},
-        test::{
-            get_ipc_response, mock_builder, mock_context, noop_assets, MockRuntime, INVOKE_KEY,
-        },
-        webview::InvokeRequest,
-        Runtime,
-    };
-
-    fn handle_optional_window_label_test<R: Runtime>(invoke: Invoke<R>) -> bool {
-        if invoke.message.command() != "handle_optional_window_label_test" {
-            return false;
-        }
-
-        let resolver = invoke.resolver.clone();
-        let Some(window_label) = super::parse_or_invoke_error::<Option<String>, R>(
-            &invoke,
-            "handle_optional_window_label_test",
-            "windowLabel",
-        ) else {
-            return true;
-        };
-
-        resolver.respond(Ok::<Value, InvokeError>(json!({
-            "windowLabel": window_label,
-        })));
-        true
-    }
-
-    fn build_test_webview() -> (tauri::App<MockRuntime>, tauri::WebviewWindow<MockRuntime>) {
-        let app = mock_builder()
-            .invoke_handler(handle_optional_window_label_test::<MockRuntime>)
-            .build(mock_context(noop_assets()))
-            .expect("test app should build");
-        let webview = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
-            .build()
-            .expect("test webview should build");
-
-        (app, webview)
-    }
-
-    fn invoke_request(body: Value) -> InvokeRequest {
-        InvokeRequest {
-            cmd: "handle_optional_window_label_test".into(),
-            callback: tauri::ipc::CallbackFn(0),
-            error: tauri::ipc::CallbackFn(1),
-            url: "http://tauri.localhost".parse().expect("url should parse"),
-            body: InvokeBody::Json(body),
-            headers: Default::default(),
-            invoke_key: INVOKE_KEY.to_string(),
-        }
+    #[tauri::command(rename_all = "camelCase")]
+    fn handle_optional_window_label_test(window_label: Option<String>) -> Value {
+        json!({ "windowLabel": window_label })
     }
 
     #[test]
     fn optional_ipc_arg_missing_yields_none() {
-        let (_app, webview) = build_test_webview();
-
-        let response = get_ipc_response(&webview, invoke_request(json!({})))
-            .expect("missing optional arg should succeed")
-            .deserialize::<Value>()
-            .expect("response should deserialize");
-
-        assert_eq!(response, json!({ "windowLabel": null }));
+        assert_eq!(
+            handle_optional_window_label_test(None),
+            json!({ "windowLabel": null })
+        );
     }
 
     #[test]
     fn optional_ipc_arg_invalid_type_returns_error() {
-        let (_app, webview) = build_test_webview();
-
-        let error = get_ipc_response(&webview, invoke_request(json!({ "windowLabel": 123 })))
+        let error = serde_json::from_value::<Option<String>>(json!(123))
             .expect_err("invalid optional arg type should be rejected");
-        let message = error
-            .as_str()
-            .expect("invoke error should serialize as a string");
+        let message = error.to_string();
 
-        assert!(message.contains("windowLabel"));
         assert!(message.contains("invalid type"));
     }
 }

@@ -1,34 +1,23 @@
 use std::{
     collections::HashMap,
-    future::Future,
     path::PathBuf,
-    pin::Pin,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
+use pi::model::ThinkingLevel;
 use pi::sdk::{create_agent_session, AbortHandle, AgentEvent, AgentSessionHandle, SessionOptions};
 use tauri::ipc::Channel;
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 
 use crate::domain::acp::{
-    AcpActionEvent, AcpAgentConfig, AcpMcpServerConfig, AcpMessageBlock, AcpMessageRole,
-    AcpRestoreNotice, AcpSessionDetail, AcpSessionErrorLevel, AcpSessionMessage,
-    AcpSessionRuntimeState, AcpSessionStatus, AcpSessionSummary,
+    AcpActionEvent, AcpAgentConfig, AcpMessageBlock, AcpMessageRole, AcpRestoreNotice,
+    AcpSessionDetail, AcpSessionErrorLevel, AcpSessionMessage, AcpSessionRuntimeState,
+    AcpSessionStatus, AcpSessionSummary,
 };
 use crate::infrastructure::config::SavedAcpSession;
 use crate::services::notification::NotificationService;
-
-pub type SessionPersistHook = Arc<
-    dyn Fn(
-            AcpSessionSummary,
-            AcpAgentConfig,
-            Vec<AcpMcpServerConfig>,
-        ) -> Pin<Box<dyn Future<Output = ()> + Send>>
-        + Send
-        + Sync,
->;
 
 #[derive(Clone)]
 pub struct AcpService {
@@ -39,13 +28,10 @@ pub struct AcpService {
     runtime_event_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<RuntimeEvent>>>>,
     session_update_channels: Arc<RwLock<Vec<Channel<AcpSessionDetail>>>>,
     session_removal_channels: Arc<RwLock<Vec<Channel<String>>>>,
-    session_persist_hook: Option<SessionPersistHook>,
     notification: NotificationService,
 }
 
 struct SessionRecord {
-    agent: AcpAgentConfig,
-    mcp_servers: Vec<AcpMcpServerConfig>,
     summary: AcpSessionSummary,
     runtime: AcpSessionRuntimeState,
     messages: Vec<AcpSessionMessage>,
@@ -54,18 +40,21 @@ struct SessionRecord {
     current_abort: Option<AbortHandle>,
 }
 
-#[derive(Clone)]
-pub struct SessionRuntimeConfig {
-    pub agent: AcpAgentConfig,
-    pub mcp_servers: Vec<AcpMcpServerConfig>,
-}
-
 pub struct RestoreAttemptResult {
     pub restored: Option<AcpSessionDetail>,
     pub keep_snapshot: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Default)]
+pub struct AgentSessionRuntimeConfig {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub api_key: Option<String>,
+    pub thinking: Option<ThinkingLevel>,
+    pub enabled_tools: Option<Vec<String>>,
+    pub max_tool_iterations: Option<usize>,
+}
+
 enum RuntimeEvent {
     TextDelta {
         session_id: String,
@@ -84,18 +73,17 @@ enum RuntimeEvent {
     },
     PromptFinished {
         session_id: String,
+        completion: Option<oneshot::Sender<()>>,
     },
     PromptFailed {
         session_id: String,
         error: String,
+        completion: Option<oneshot::Sender<()>>,
     },
 }
 
 impl AcpService {
-    pub fn new(
-        notification: NotificationService,
-        session_persist_hook: Option<SessionPersistHook>,
-    ) -> Self {
+    pub fn new(notification: NotificationService) -> Self {
         let (runtime_event_tx, runtime_event_rx) = mpsc::unbounded_channel();
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -105,7 +93,6 @@ impl AcpService {
             runtime_event_rx: Arc::new(Mutex::new(Some(runtime_event_rx))),
             session_update_channels: Arc::new(RwLock::new(Vec::new())),
             session_removal_channels: Arc::new(RwLock::new(Vec::new())),
-            session_persist_hook,
             notification,
         }
     }
@@ -168,19 +155,11 @@ impl AcpService {
         sessions.get(session_id).map(record_detail)
     }
 
-    pub async fn session_runtime_config(&self, session_id: &str) -> Option<SessionRuntimeConfig> {
-        let sessions = self.sessions.read().await;
-        sessions.get(session_id).map(|record| SessionRuntimeConfig {
-            agent: record.agent.clone(),
-            mcp_servers: record.mcp_servers.clone(),
-        })
-    }
-
     pub async fn create_session(
         &self,
         workspace_root: PathBuf,
         agent: AcpAgentConfig,
-        mcp_servers: Vec<AcpMcpServerConfig>,
+        runtime_config: AgentSessionRuntimeConfig,
     ) -> Result<AcpSessionDetail> {
         let session_id = format!("pi-agent-{}", now_ms());
         let title = workspace_root
@@ -189,13 +168,22 @@ impl AcpService {
             .filter(|name| !name.trim().is_empty())
             .unwrap_or("Pi Agent")
             .to_string();
-        let handle = create_agent_session(SessionOptions {
+        let mut session_options = SessionOptions {
+            provider: runtime_config.provider,
+            model: runtime_config.model,
+            api_key: runtime_config.api_key,
+            thinking: runtime_config.thinking,
+            enabled_tools: runtime_config.enabled_tools,
             working_directory: Some(workspace_root.clone()),
             no_session: false,
             ..SessionOptions::default()
-        })
-        .await
-        .context("failed to create Pi Agent session")?;
+        };
+        if let Some(max_tool_iterations) = runtime_config.max_tool_iterations {
+            session_options.max_tool_iterations = max_tool_iterations;
+        }
+        let handle = create_agent_session(session_options)
+            .await
+            .context("failed to create Pi Agent session")?;
 
         let summary = AcpSessionSummary {
             session_id: session_id.clone(),
@@ -211,8 +199,6 @@ impl AcpService {
             last_updated_at_ms: now_ms(),
         };
         let record = SessionRecord {
-            agent,
-            mcp_servers,
             summary,
             runtime: AcpSessionRuntimeState::default(),
             messages: Vec::new(),
@@ -318,30 +304,27 @@ impl AcpService {
             })
             .await;
 
+        let (completion_tx, completion_rx) = oneshot::channel();
         match result {
             Ok(_) => {
                 let _ = self.runtime_event_tx.send(RuntimeEvent::PromptFinished {
                     session_id: session_id.to_string(),
+                    completion: Some(completion_tx),
                 });
             }
             Err(error) => {
                 let _ = self.runtime_event_tx.send(RuntimeEvent::PromptFailed {
                     session_id: session_id.to_string(),
                     error: error.to_string(),
+                    completion: Some(completion_tx),
                 });
             }
         }
-
-        let (respond_to, respond_rx) = oneshot::channel();
-        let session_id_for_wait = session_id.to_string();
-        let service = self.clone();
-        tauri::async_runtime::spawn(async move {
-            let detail = service.session_detail(&session_id_for_wait).await;
-            let _ = respond_to.send(detail);
-        });
-        respond_rx
+        completion_rx
             .await
-            .context("Pi Agent prompt response channel closed")?
+            .context("Pi Agent prompt completion channel closed")?;
+        self.session_detail(session_id)
+            .await
             .with_context(|| format!("unknown Pi Agent session: {session_id}"))
     }
 
@@ -396,20 +379,28 @@ impl AcpService {
         std::mem::take(&mut *self.restore_notices.write().await)
     }
 
-    async fn apply_runtime_event(&self, event: RuntimeEvent) -> Result<()> {
+    async fn apply_runtime_event(&self, mut event: RuntimeEvent) -> Result<()> {
         let mut notify_success = None;
         let mut notify_failure = None;
+        let completion = match &mut event {
+            RuntimeEvent::PromptFinished { completion, .. }
+            | RuntimeEvent::PromptFailed { completion, .. } => completion.take(),
+            _ => None,
+        };
         let session_id = match &event {
             RuntimeEvent::TextDelta { session_id, .. }
             | RuntimeEvent::ThinkingDelta { session_id, .. }
             | RuntimeEvent::ToolEvent { session_id, .. }
-            | RuntimeEvent::PromptFinished { session_id }
+            | RuntimeEvent::PromptFinished { session_id, .. }
             | RuntimeEvent::PromptFailed { session_id, .. } => session_id.clone(),
         };
 
         let detail = {
             let mut sessions = self.sessions.write().await;
             let Some(record) = sessions.get_mut(&session_id) else {
+                if let Some(completion) = completion {
+                    let _ = completion.send(());
+                }
                 return Ok(());
             };
             match event {
@@ -458,17 +449,7 @@ impl AcpService {
                 }
             }
             record.summary.last_updated_at_ms = now_ms();
-            let detail = record_detail(record);
-            if let Some(hook) = &self.session_persist_hook {
-                let summary = detail.session.clone();
-                let agent = record.agent.clone();
-                let mcp_servers = record.mcp_servers.clone();
-                let hook = hook.clone();
-                tauri::async_runtime::spawn(async move {
-                    hook(summary, agent, mcp_servers).await;
-                });
-            }
-            detail
+            record_detail(record)
         };
 
         self.emit_session_update(&detail).await;
@@ -481,6 +462,9 @@ impl AcpService {
             self.notification
                 .notify_acp_prompt_failure(&agent_name, Some(error))
                 .await;
+        }
+        if let Some(completion) = completion {
+            let _ = completion.send(());
         }
         Ok(())
     }
@@ -581,12 +565,6 @@ fn forward_message_event(
                 delta,
             });
         }
-        pi::model::AssistantMessageEvent::TextEnd { content, .. } if !content.is_empty() => {
-            let _ = tx.send(RuntimeEvent::TextDelta {
-                session_id: session_id.to_string(),
-                delta: String::new(),
-            });
-        }
         pi::model::AssistantMessageEvent::ThinkingDelta { delta, .. } => {
             let _ = tx.send(RuntimeEvent::ThinkingDelta {
                 session_id: session_id.to_string(),
@@ -600,12 +578,6 @@ fn forward_message_event(
                 title: tool_call.name.clone(),
                 correlation_id: Some(tool_call.id.clone()),
                 detail: Some(tool_call.arguments.to_string()),
-            });
-        }
-        pi::model::AssistantMessageEvent::Error { error, .. } => {
-            let _ = tx.send(RuntimeEvent::PromptFailed {
-                session_id: session_id.to_string(),
-                error: format!("{error:?}"),
             });
         }
         _ => {}
