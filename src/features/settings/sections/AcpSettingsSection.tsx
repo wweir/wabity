@@ -1,102 +1,68 @@
-import type { Dispatch, ReactElement, SetStateAction } from "react";
-import { getSettingsPanelId, getSettingsTabId } from "../settingsShared";
+import type { ReactElement } from "react";
 import type { BindSectionBlockRef } from "../sectionViewShared";
-import type {
-	AcpAgentDraft,
-	AcpDraftValidation,
-	AcpFieldKey,
-	AcpInlineNotice,
-	FieldIssueMap,
-} from "../settingsTypes";
+import { renderDependencyHealthList } from "../sectionViewShared";
+import type { DependencyHealthItem } from "../settingsTypes";
 
-export interface AcpSettingsSectionProps {
+export interface AgentRuntimePanelProps {
 	bindSectionBlockRef: BindSectionBlockRef;
-	acpNotice: AcpInlineNotice | null;
-	acpAgents: AcpAgentDraft[];
-	acpValidation: AcpDraftValidation;
-	selectedAgentId: string | null;
-	selectedAgent: AcpAgentDraft | null;
-	selectedAgentIssueCount: number;
-	selectedAgentFieldIssues: FieldIssueMap<AcpFieldKey>;
-	acpHasUnsavedChanges: boolean;
-	savingAgent: boolean;
-	selectedPresetOptionId: string;
-	setSelectedPresetOptionId: Dispatch<SetStateAction<string>>;
-	bindAcpFieldRef: unknown;
-	setSelectedAgentId: Dispatch<SetStateAction<string | null>>;
-	onAddCustomAgent: () => void;
-	onLocateFirstAcpIssue: () => void;
-	onDiscardAcpDraft: () => void;
-	onSaveAgent: () => Promise<void>;
-	onRemoveAgent: (agentId: string) => void;
-	onApplyPresetSelection: () => void;
-	onAgentFieldChange: (agentId: string, key: AcpFieldKey, value: string) => void;
+	healthItems: DependencyHealthItem[];
+	blockId?: string;
 }
 
-export function AcpSettingsSection({
-	acpAgents,
-	acpNotice,
+const bridgedProviderLabels = ["OpenAI", "OpenRouter", "DeepSeek", "Ollama", "SiliconFlow"];
+
+export function AgentRuntimePanel({
 	bindSectionBlockRef,
-}: AcpSettingsSectionProps): ReactElement {
-	const legacyAgentCount = acpAgents.length;
-
+	healthItems,
+	blockId = "extensions-agent",
+}: AgentRuntimePanelProps): ReactElement {
 	return (
-		<section
-			aria-labelledby={getSettingsTabId("acp")}
-			className="settings-section"
-			id={getSettingsPanelId("acp")}
-			role="tabpanel"
+		<div
+			className="settings-editor-card settings-agent-runtime-card"
+			id={blockId}
+			ref={bindSectionBlockRef(blockId)}
 		>
-			<div className="settings-section-header">
-				<div>
-					<span className="settings-section-kicker">Pi Agent</span>
-					<h2>Pi Agent</h2>
-					<p>Wabity 现在只支持内嵌 Pi SDK session，不再启动外部 Pi Agent / ACP agent 命令。</p>
+			<div className="settings-agent-runtime-hero">
+				<div className="settings-acp-detail-copy">
+					<span className="settings-section-kicker">Agent runtime</span>
+					<strong className="settings-agent-runtime-title">内嵌 Agent session</strong>
+					<span className="settings-help-text settings-help-text-tight">
+						创建 session 时会优先复用“功能”里的文档问答模型；无法安全映射的 provider 继续交给底层
+						SDK 配置处理。
+					</span>
 				</div>
+				<span className="settings-agent-runtime-badge">无需单独配置</span>
 			</div>
 
-			<div className="settings-editor-card" id="acp-form" ref={bindSectionBlockRef("acp-form")}>
-				<div className="settings-editor-card-header">
-					<div className="settings-acp-detail-copy">
-						<span className="settings-section-kicker">运行时</span>
-						<strong className="settings-agent-mcp-title">Pi SDK 单运行时</strong>
-						<span className="settings-help-text settings-help-text-tight">
-							Agent session 由 Rust 后端通过 <code>pi::sdk</code> 创建。第一阶段沿用 Pi 自身
-							provider / model / tools 配置；Wabity 不再保存外部 agent 启动命令。
-						</span>
-					</div>
-				</div>
-				<div className="settings-info-list">
-					<div className="settings-info-row">
-						<span>外部命令</span>
-						<strong>已移除</strong>
-					</div>
-					<div className="settings-info-row">
-						<span>运行方式</span>
-						<strong>内嵌 Pi SDK</strong>
-					</div>
-					<div className="settings-info-row">
-						<span>全局 MCP</span>
-						<strong>暂不自动注入 Pi Agent session</strong>
-					</div>
-				</div>
-			</div>
+			{renderDependencyHealthList(healthItems)}
 
-			{legacyAgentCount > 0 || acpNotice ? (
-				<div className="settings-editor-card settings-editor-card-subtle">
-					<div className="settings-editor-card-header">
-						<div className="settings-acp-detail-copy">
-							<span className="settings-section-kicker">迁移提示</span>
-							<strong className="settings-agent-mcp-title">旧 ACP 配置已停用</strong>
-							<span className="settings-help-text settings-help-text-tight">
-								检测到 {legacyAgentCount} 条旧外部 agent 配置。它们不会再用于创建
-								session；请直接使用 Pi Agent 入口创建新的内嵌 session。
+			<div className="settings-agent-runtime-grid" aria-label="Agent 运行时规则">
+				<div className="settings-agent-runtime-row settings-agent-runtime-row-wide">
+					<span className="settings-info-label">模型来源</span>
+					<strong>优先复用文档问答模型</strong>
+					<span className="settings-help-text settings-help-text-tight">
+						如果没有可用问答模型，会退回到底层 SDK 自身的 provider/model 配置。
+					</span>
+				</div>
+				<div className="settings-agent-runtime-row settings-agent-runtime-row-wide">
+					<span className="settings-info-label">自动桥接 provider</span>
+					<div className="settings-agent-provider-list">
+						{bridgedProviderLabels.map((label) => (
+							<span className="settings-agent-provider-chip" key={label}>
+								{label}
 							</span>
-						</div>
+						))}
 					</div>
-					{acpNotice ? <p className="settings-inline-notice">{acpNotice.text}</p> : null}
 				</div>
-			) : null}
-		</section>
+				<div className="settings-agent-runtime-row">
+					<span className="settings-info-label">外部命令</span>
+					<strong>已删除</strong>
+				</div>
+				<div className="settings-agent-runtime-row">
+					<span className="settings-info-label">全局 MCP</span>
+					<strong>不自动注入 session</strong>
+				</div>
+			</div>
+		</div>
 	);
 }

@@ -1,5 +1,6 @@
 import type { Dispatch, KeyboardEvent as ReactKeyboardEvent, SetStateAction } from "react";
 import type { BuiltinMcpConfig, BuiltinMcpServerStatus } from "../../../lib/tauri/types";
+import { AgentRuntimePanel } from "./AcpSettingsSection";
 import {
 	DISCARD_DRAFT_BUTTON_LABEL,
 	buildFieldIssueId,
@@ -13,13 +14,14 @@ import {
 	summarizeMcpServerDraft,
 } from "../settingsShared";
 import {
-	type BindAcpFieldRef,
+	type BindMcpFieldRef,
 	type BindSectionBlockRef,
 	renderFieldError,
 } from "../sectionViewShared";
 import type {
 	AcpInlineNotice,
 	AcpMcpServerDraft,
+	DependencyHealthItem,
 	FieldIssueMap,
 	McpDraftValidation,
 	McpFieldKey,
@@ -29,6 +31,7 @@ import type {
 export interface McpSettingsSectionProps {
 	bindSectionBlockRef: BindSectionBlockRef;
 	mcpNotice: AcpInlineNotice | null;
+	agentHealthItems: DependencyHealthItem[];
 	regularMcpServers: AcpMcpServerDraft[];
 	selectedMcpServerId: string | null;
 	selectedMcpServer: AcpMcpServerDraft | null;
@@ -45,7 +48,7 @@ export interface McpSettingsSectionProps {
 	builtinMcpTransportMeta: ReturnType<typeof getMcpTransportMeta>;
 	builtinMcpServerStatus: BuiltinMcpServerStatus | null;
 	builtinMcpToggleDisabled: boolean;
-	bindAcpFieldRef: BindAcpFieldRef;
+	bindMcpFieldRef: BindMcpFieldRef;
 	bindMcpListOptionRef: (serverId: string) => (node: HTMLButtonElement | null) => void;
 	onSelectMcpServer: (serverId: string) => void;
 	onMcpCatalogKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>, serverId: string) => void;
@@ -68,6 +71,7 @@ export interface McpSettingsSectionProps {
 export function McpSettingsSection({
 	bindSectionBlockRef,
 	mcpNotice,
+	agentHealthItems,
 	regularMcpServers,
 	selectedMcpServerId,
 	selectedMcpServer,
@@ -84,7 +88,7 @@ export function McpSettingsSection({
 	builtinMcpTransportMeta,
 	builtinMcpServerStatus,
 	builtinMcpToggleDisabled,
-	bindAcpFieldRef,
+	bindMcpFieldRef,
 	bindMcpListOptionRef,
 	onSelectMcpServer,
 	onMcpCatalogKeyDown,
@@ -120,6 +124,8 @@ export function McpSettingsSection({
 			role="tabpanel"
 			tabIndex={0}
 		>
+			<AgentRuntimePanel bindSectionBlockRef={bindSectionBlockRef} healthItems={agentHealthItems} />
+
 			{mcpNotice ? (
 				<div className={`settings-banner settings-banner-${mcpNotice.tone}`}>{mcpNotice.text}</div>
 			) : null}
@@ -140,9 +146,9 @@ export function McpSettingsSection({
 					</div>
 					<label className="settings-mcp-builtin-toggle-row">
 						<span className="settings-mcp-builtin-toggle-copy">
-							<strong className="settings-agent-name">向 Agent 暴露内置工具</strong>
+							<strong className="settings-agent-name">启用内置 MCP 工具</strong>
 							<span className="settings-help-text settings-help-text-tight">
-								启用后，下面勾选的模块会通过同一个本地 MCP 服务暴露给所有 Agent。
+								启用后，下面勾选的模块会通过同一个本地 MCP 服务暴露给支持 MCP 的链路。
 							</span>
 						</span>
 						<input
@@ -178,7 +184,7 @@ export function McpSettingsSection({
 						</div>
 						<span className="settings-help-text settings-help-text-tight">
 							{builtinMcpConfig.enabled
-								? "保存后会把当前启用的内置模块统一暴露给 Agent。"
+								? "保存后会更新本机内置 MCP 服务的模块清单。"
 								: builtinMcpServerStatus?.running
 									? "服务已经就绪；开启后会把下面勾选的模块挂到这个本地地址。"
 									: builtinMcpServerStatus?.lastError || "桌面端启动后会自动暴露这个本地地址。"}
@@ -390,7 +396,7 @@ export function McpSettingsSection({
 													onMcpServerFieldChange(selectedMcpServer.id, "name", event.target.value)
 												}
 												placeholder="例如 filesystem"
-												ref={bindAcpFieldRef("server", selectedMcpServer.id, "name")}
+												ref={bindMcpFieldRef("server", selectedMcpServer.id, "name")}
 												type="text"
 												value={selectedMcpServer.name}
 											/>
@@ -447,7 +453,7 @@ export function McpSettingsSection({
 															)
 														}
 														placeholder="例如 npx"
-														ref={bindAcpFieldRef("server", selectedMcpServer.id, "command")}
+														ref={bindMcpFieldRef("server", selectedMcpServer.id, "command")}
 														type="text"
 														value={selectedMcpServer.command}
 													/>
@@ -490,7 +496,7 @@ export function McpSettingsSection({
 															)
 														}
 														placeholder="每行一个 KEY=VALUE"
-														ref={bindAcpFieldRef("server", selectedMcpServer.id, "envText")}
+														ref={bindMcpFieldRef("server", selectedMcpServer.id, "envText")}
 														rows={3}
 														value={selectedMcpServer.envText}
 													/>
@@ -521,7 +527,7 @@ export function McpSettingsSection({
 															)
 														}
 														placeholder="https://example.com/mcp"
-														ref={bindAcpFieldRef("server", selectedMcpServer.id, "url")}
+														ref={bindMcpFieldRef("server", selectedMcpServer.id, "url")}
 														type="text"
 														value={selectedMcpServer.url}
 													/>
@@ -558,7 +564,7 @@ export function McpSettingsSection({
 															)
 														}
 														placeholder="每行一个 KEY=VALUE"
-														ref={bindAcpFieldRef("server", selectedMcpServer.id, "headersText")}
+														ref={bindMcpFieldRef("server", selectedMcpServer.id, "headersText")}
 														rows={3}
 														spellCheck={false}
 														value={selectedMcpServer.headersText}

@@ -6,7 +6,6 @@ import { LauncherPinButton } from "../../app/LauncherPinButton";
 import {
 	chooseDirectory,
 	getAppSettings,
-	getAcpAgents,
 	getAcpMcpServers,
 	getBuiltinMcpServerStatus,
 	getShortcut,
@@ -42,7 +41,6 @@ import { useSettingsWindowFrame } from "./useSettingsWindowFrame";
 import { applyAppearanceSettings, defaultAppearanceSettings } from "../../app/appearance";
 import {
 	AboutSettingsSection,
-	AcpSettingsSection,
 	GeneralSettingsSection,
 	LlmSettingsSection,
 	McpSettingsSection,
@@ -51,17 +49,15 @@ import {
 } from "./SettingsSectionViews";
 import {
 	SettingsQuickJumpList,
-	acpAgentOptions,
 	getMcpTransportMeta,
 	getSettingsPanelId,
 	getSettingsTabId,
 	settingsSections,
 } from "./settingsShared";
 import {
-	AcpAgentDraft,
-	AcpFieldKey,
 	AcpInlineNotice,
 	AcpMcpServerDraft,
+	DependencyHealthItem,
 	LlmEditableFieldKey,
 	LlmFieldKey,
 	LlmModelFieldKey,
@@ -71,7 +67,6 @@ import {
 	McpTransport,
 	PendingMcpFocusTarget,
 	RagFieldKey,
-	SavedAcpDraftState,
 	SavedLlmDraftState,
 	SavedMcpDraftState,
 	SavedRagDraftState,
@@ -82,20 +77,16 @@ import {
 	applyLlmProviderKind,
 	applyBuiltinTemplateModelMetadata,
 	applyBuiltinTemplateToProvider,
-	buildAcpDraftSnapshot,
-	buildAgentCommand,
 	buildLlmDraftSnapshot,
 	buildMcpDraftSnapshot,
 	buildPromptsDraftSnapshot,
 	buildQuestionAnswerTaskDraftSnapshot,
 	buildRagDraftSnapshot,
-	buildSavedAcpDraftState,
 	buildSavedLlmDraftState,
 	buildSavedMcpDraftState,
 	buildSavedRagDraftState,
 	clearProviderModelIdentityHints,
 	buildTranslationTaskDraftSnapshot,
-	createAgentDraft,
 	createDefaultAppSettings,
 	createDefaultGeneralSettings,
 	createDefaultLlmSettings,
@@ -112,7 +103,6 @@ import {
 	extraRagIgnoreGlobPlaceholder,
 	findBuiltinTemplate,
 	findBuiltinTemplateModelByModelName,
-	findFirstAcpIssue,
 	findFirstLlmIssue,
 	findFirstMcpIssue,
 	formatTextLines,
@@ -138,7 +128,6 @@ import {
 	selectExistingIdOrFirst,
 	splitExtraRagIgnoreGlobs,
 	summarizeLlmProviderProfile,
-	validateAcpAgents,
 	validateLlmSettings,
 	validateMcpServers,
 	validateRagSettings,
@@ -152,6 +141,61 @@ interface SettingsPageProps {
 	onBack: () => void;
 	onAppearanceChange?: (appearance: AppearanceSettings) => void;
 	onLauncherPinnedChange?: (pinned: boolean) => void | Promise<void>;
+}
+
+const bridgeableAgentProviderMatchers = [
+	"openai",
+	"openrouter",
+	"deepseek",
+	"ollama",
+	"siliconflow",
+	"silicon-flow",
+];
+
+function getBoundProviderLabel(provider: LlmProviderConfig | null) {
+	return provider?.name || provider?.models[0]?.model || provider?.baseUrl || "未配置";
+}
+
+function providerCanBridgeToAgent(provider: LlmProviderConfig | null) {
+	if (!provider) {
+		return false;
+	}
+
+	const bridgeSource = [provider.builtinPresetId, provider.name, provider.baseUrl]
+		.filter(Boolean)
+		.join(" ")
+		.toLowerCase();
+	return bridgeableAgentProviderMatchers.some((matcher) => bridgeSource.includes(matcher));
+}
+
+function buildModelDependencyHealthItem(
+	label: string,
+	selectedProvider: LlmProviderConfig | null,
+	missingDetail: string,
+): DependencyHealthItem {
+	return selectedProvider
+		? {
+				status: "ok",
+				label,
+				detail: `当前使用 ${getBoundProviderLabel(selectedProvider)}。`,
+			}
+		: {
+				status: "warning",
+				label,
+				detail: missingDetail,
+			};
+}
+
+function hasEffectiveRagRebuildInputChanges(
+	ragSettings: RagSettings,
+	persistedRagSettings: RagSettings,
+) {
+	return (
+		ragSettings.embeddingModelId !== persistedRagSettings.embeddingModelId ||
+		JSON.stringify(ragSettings.sourceDirectories) !==
+			JSON.stringify(persistedRagSettings.sourceDirectories) ||
+		JSON.stringify(ragSettings.ignoreGlobs) !== JSON.stringify(persistedRagSettings.ignoreGlobs)
+	);
 }
 
 export function SettingsPage({
@@ -199,15 +243,6 @@ export function SettingsPage({
 		buildSavedRagDraftState(createDefaultRagSettings()),
 	);
 	const [ragScanResult, setRagScanResult] = useState<RagScanResult | null>(null);
-	const [acpAgents, setAcpAgentsState] = useState<AcpAgentDraft[]>([]);
-	const [defaultAgentId, setDefaultAgentId] = useState<string | null>(null);
-	const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
-	const [savedAcpSnapshot, setSavedAcpSnapshot] = useState(() => buildAcpDraftSnapshot([]));
-	const [savedAcpState, setSavedAcpState] = useState<SavedAcpDraftState>(() =>
-		buildSavedAcpDraftState([], null),
-	);
-	const [acpNotice, setAcpNotice] = useState<AcpInlineNotice | null>(null);
-	const [selectedPresetOptionId, setSelectedPresetOptionId] = useState("__custom__");
 	const [selectedMcpTransport, setSelectedMcpTransport] = useState<McpTransport>("stdio");
 	const [mcpServers, setMcpServersState] = useState<AcpMcpServerDraft[]>([]);
 	const [selectedMcpServerId, setSelectedMcpServerId] = useState<string | null>(null);
@@ -240,7 +275,7 @@ export function SettingsPage({
 	const [scanningRag, setScanningRag] = useState(false);
 	const [mcpPanelMode, setMcpPanelMode] = useState<McpPanelMode>("create");
 	const [settingsError, setSettingsError] = useState<string | null>(null);
-	const acpFieldRefs = useRef<
+	const mcpFieldRefs = useRef<
 		Record<string, HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | null>
 	>({});
 	const mcpListOptionRefs = useRef<Record<string, HTMLButtonElement | null>>({});
@@ -270,11 +305,6 @@ export function SettingsPage({
 		activeSection,
 		setActiveSection,
 	});
-
-	function applyAgentDrafts(nextAgents: AcpAgentDraft[], nextSelectedAgentId: string | null) {
-		setAcpAgentsState(nextAgents);
-		setSelectedAgentId(nextSelectedAgentId);
-	}
 
 	function applyMcpServerDrafts(
 		nextServers: AcpMcpServerDraft[],
@@ -692,19 +722,6 @@ export function SettingsPage({
 		void getShortcut().then((config) => {
 			setShortcutSettings(config);
 		});
-		void getAcpAgents().then((catalog) => {
-			const draftAgents = catalog.agents.map((agent) => ({
-				id: agent.id,
-				name: agent.name,
-				command: buildAgentCommand(agent),
-				launchMode: agent.launchMode,
-			}));
-			const nextDefaultAgentId = catalog.defaultAgentId ?? catalog.agents[0]?.id ?? null;
-			applyAgentDrafts(draftAgents, draftAgents[0]?.id ?? null);
-			setDefaultAgentId(nextDefaultAgentId);
-			setSavedAcpSnapshot(buildAcpDraftSnapshot(draftAgents));
-			setSavedAcpState(buildSavedAcpDraftState(draftAgents, nextDefaultAgentId));
-		});
 		void getAcpMcpServers().then((catalog) => {
 			const draftServers = catalog.servers.map(createMcpServerDraftFromConfig);
 			applyMcpServerDrafts(draftServers, draftServers[0]?.id ?? null);
@@ -879,13 +896,6 @@ export function SettingsPage({
 	}, [llmSettings.providers, ragSettings.embeddingModelId]);
 
 	useEffect(() => {
-		const nextSelectedAgentId = selectExistingIdOrFirst(acpAgents, selectedAgentId);
-		if (nextSelectedAgentId !== selectedAgentId) {
-			setSelectedAgentId(nextSelectedAgentId);
-		}
-	}, [acpAgents, selectedAgentId]);
-
-	useEffect(() => {
 		const nextSelectedMcpServerId = selectExistingIdOrFirst(mcpServers, selectedMcpServerId);
 		if (nextSelectedMcpServerId !== selectedMcpServerId) {
 			setSelectedMcpServerId(nextSelectedMcpServerId);
@@ -902,10 +912,10 @@ export function SettingsPage({
 			scrollToSectionBlock("mcp-form");
 		}
 
-		const refKey = buildAcpFieldRefKey("server", pendingTarget.serverId, pendingTarget.fieldKey);
+		const refKey = buildMcpFieldRefKey("server", pendingTarget.serverId, pendingTarget.fieldKey);
 		const focusTimer = window.setTimeout(
 			() => {
-				acpFieldRefs.current[refKey]?.focus();
+				mcpFieldRefs.current[refKey]?.focus();
 			},
 			pendingTarget.scrollToForm ? 180 : 0,
 		);
@@ -923,7 +933,6 @@ export function SettingsPage({
 	const isRecording = (key: keyof ShortcutConfig) => editingShortcut === key;
 	const llmValidation = validateLlmSettings(llmSettings, builtinLlmTemplates);
 	const ragValidation = validateRagSettings(ragSettings, llmSettings);
-	const acpValidation = validateAcpAgents(acpAgents);
 	const mcpValidation = validateMcpServers(mcpServers);
 	const promptsDraftSnapshot = buildPromptsDraftSnapshot(promptsSettings, llmSettings);
 	const persistedPromptsDraftSnapshot = buildPromptsDraftSnapshot(
@@ -952,13 +961,11 @@ export function SettingsPage({
 	const questionAnswerHasUnsavedChanges =
 		questionAnswerTaskDraftSnapshot !== persistedQuestionAnswerTaskDraftSnapshot;
 	const {
-		handleDiscardAcpDraft,
 		handleDiscardLlmDraft,
 		handleDiscardMcpDraft,
 		handleDiscardQuestionAnswerDraft,
 		handleDiscardRagDraft,
 		handleDiscardTranslationDraft,
-		handleSaveAgent,
 		handleSaveLlm,
 		handleSaveMcp,
 		handleSaveOcr,
@@ -967,7 +974,6 @@ export function SettingsPage({
 		handleSaveTranslationConfig,
 		saveAppSettings,
 		saveNotificationSettings,
-		savingAgent,
 		savingLlm,
 		savingMcp,
 		savingOcr,
@@ -976,17 +982,12 @@ export function SettingsPage({
 		savingSettings,
 		savingTranslationConfig,
 	} = useSettingsPersistence({
-		acpAgents,
-		acpValidationIssueCount: acpValidation.totalIssues,
 		appearanceSettings,
-		applyAgentDrafts,
 		applyMcpServerDrafts,
 		builtinMcpConfig,
-		defaultAgentId,
 		generalSettings,
 		llmSettings,
 		llmValidationIssueCount: llmValidation.totalIssues,
-		locateFirstAcpIssue,
 		locateFirstLlmIssue,
 		locateFirstMcpIssue,
 		locateFirstRagIssue,
@@ -997,18 +998,13 @@ export function SettingsPage({
 		promptsSettings,
 		ragSettings,
 		ragValidationIssueCount: ragValidation.totalIssues,
-		savedAcpSnapshot,
-		savedAcpState,
 		savedLlmSnapshot,
 		savedMcpSnapshot,
 		savedMcpState,
-		selectedAgentId,
 		selectedLlmProviderId,
 		selectedMcpServerId,
-		setAcpNotice,
 		setAppearanceSettings,
 		setBuiltinMcpConfig,
-		setDefaultAgentId,
 		setGeneralSettings,
 		setLlmModelErrors,
 		setLlmModelOptions,
@@ -1022,8 +1018,6 @@ export function SettingsPage({
 		setPersistedAppSettings,
 		setPromptsSettings,
 		setRagSettings,
-		setSavedAcpSnapshot,
-		setSavedAcpState,
 		setSavedLlmSnapshot,
 		setSavedLlmState,
 		setSavedMcpSnapshot,
@@ -1039,8 +1033,6 @@ export function SettingsPage({
 	const llmHasUnsavedChanges = llmDraftSnapshot !== savedLlmSnapshot;
 	const ragDraftSnapshot = buildRagDraftSnapshot(ragSettings);
 	const ragHasUnsavedChanges = ragDraftSnapshot !== savedRagSnapshot;
-	const acpDraftSnapshot = buildAcpDraftSnapshot(acpAgents);
-	const acpHasUnsavedChanges = acpDraftSnapshot !== savedAcpSnapshot;
 	const mcpDraftSnapshot = buildMcpDraftSnapshot(mcpServers, builtinMcpConfig);
 	const mcpHasUnsavedChanges = mcpDraftSnapshot !== savedMcpSnapshot;
 	const selectedLlmProvider =
@@ -1087,6 +1079,38 @@ export function SettingsPage({
 		eligibleAiTaskProviders.find(
 			(provider) => provider.models[0]?.id === llmSettings.questionAnswerModelId,
 		) ?? null;
+	const selectedOcrProvider =
+		ocrSettings.provider === "llm_ocr"
+			? (eligibleOcrProviders.find(
+					(provider) => provider.models[0]?.id === ocrSettings.llmModelId,
+				) ?? null)
+			: null;
+	const promptsDependencyHealthItems: DependencyHealthItem[] = [
+		buildModelDependencyHealthItem(
+			"翻译模型",
+			selectedTranslationProvider,
+			"未选择可用的普通 LLM 条目；翻译会在运行时不可用。",
+		),
+		buildModelDependencyHealthItem(
+			"文档问答模型",
+			selectedQuestionAnswerProvider,
+			"未选择可用的普通 LLM 条目；文档问答和 Agent 复用都会回退或不可用。",
+		),
+		ocrSettings.provider === "llm_ocr"
+			? buildModelDependencyHealthItem(
+					"OCR 模型",
+					selectedOcrProvider,
+					"已启用大模型 OCR，但没有选择可用的多模态 responses 模型。",
+				)
+			: {
+					status: "info",
+					label: "OCR 模型",
+					detail:
+						ocrSettings.provider === "system"
+							? "当前使用系统 OCR，不依赖模型页里的多模态条目。"
+							: "OCR 已禁用；无选中文本的 OCR 翻译路径会不可用。",
+				},
+	];
 	const translationPromptIsDefault =
 		promptsSettings.translationPrompt.trim() === defaultPromptsSettings.translationPrompt.trim();
 	const questionAnswerPromptIsDefault =
@@ -1128,6 +1152,64 @@ export function SettingsPage({
 	const ragStatusDescription = ragHasUnsavedChanges
 		? "保存后写回 Embedding、目录和忽略规则。"
 		: "配置已写入本地；需要时再手动重建。";
+	const ragRebuildInputChanged = hasEffectiveRagRebuildInputChanges(
+		ragSettings,
+		persistedAppSettings.rag,
+	);
+	const ragDependencyHealthItems: DependencyHealthItem[] = [
+		selectedRagEmbeddingProvider
+			? {
+					status: "ok",
+					label: "Embedding 模型",
+					detail: `当前使用 ${getBoundProviderLabel(selectedRagEmbeddingProvider)}。`,
+				}
+			: ragSettings.embeddingModelId
+				? {
+						status: "warning",
+						label: "Embedding 模型",
+						detail: "当前选择的 Embedding 条目已经不存在或不再具备 Embedding 能力。",
+					}
+				: ragSourceDirectoryCount > 0
+					? {
+							status: "warning",
+							label: "Embedding 模型",
+							detail: "已配置扫描目录，但还没有选择 Embedding 条目；保存前需要补齐。",
+						}
+					: {
+							status: "info",
+							label: "Embedding 模型",
+							detail: "尚未启用知识库目录；可以先保存空白配置。",
+						},
+		{
+			status: ragRebuildInputChanged ? "warning" : "ok",
+			label: "索引重建",
+			detail: ragRebuildInputChanged
+				? "Embedding、扫描目录或忽略规则有变化；保存后会触发索引重建。"
+				: "当前草稿不会改变有效索引输入；需要时可手动重建。",
+		},
+	];
+	const agentProviderBridgeable = providerCanBridgeToAgent(selectedQuestionAnswerProvider);
+	const agentDependencyHealthItems: DependencyHealthItem[] = [
+		selectedQuestionAnswerProvider
+			? {
+					status: agentProviderBridgeable ? "ok" : "info",
+					label: "Agent 模型",
+					detail: agentProviderBridgeable
+						? `会尝试把文档问答模型 ${getBoundProviderLabel(selectedQuestionAnswerProvider)} 桥接给 Pi SDK。`
+						: `文档问答模型 ${getBoundProviderLabel(selectedQuestionAnswerProvider)} 不能安全映射到 Pi SDK 已知 provider，Agent 会回退 SDK 自身配置。`,
+				}
+			: {
+					status: "warning",
+					label: "Agent 模型",
+					detail: "功能页未配置文档问答模型；Agent session 会回退到底层 Pi SDK 配置。",
+				},
+		{
+			status: "info",
+			label: "MCP 注入",
+			detail:
+				"全局 MCP 清单当前不会自动注入 Agent session；后续需要单独通过 Pi SDK ToolFactory 建模。",
+		},
+	];
 	const ragSummaryItems: Array<{ label: string; value: string }> = [
 		{ label: "扫描目录", value: `${ragSourceDirectoryCount} 个` },
 		{ label: "额外忽略", value: `${ragExtraIgnoreGlobCount} 条` },
@@ -1147,33 +1229,27 @@ export function SettingsPage({
 				{ label: "警告", value: String(ragScanResult.warningCount) },
 			]
 		: [];
-	const selectedAgent = acpAgents.find((agent) => agent.id === selectedAgentId) ?? null;
 	const selectedMcpServer = mcpServers.find((server) => server.id === selectedMcpServerId) ?? null;
 	const sectionSummaryText: Record<SettingsSectionId, string> = {
 		general: "即时生效",
 		prompts: promptsHaveUnsavedChanges ? "有草稿" : "已同步",
 		llm: llmHasUnsavedChanges ? "有草稿" : `${llmSettings.providers.length} 条`,
 		rag: ragHasUnsavedChanges ? "有草稿" : `目录 ${ragSourceDirectoryCount}`,
-		acp: acpHasUnsavedChanges ? "有草稿" : `${acpAgents.length} 个 Agent`,
 		mcp: mcpHasUnsavedChanges
 			? "有草稿"
 			: `${mcpServers.length} 个服务 / ${builtinMcpConfig.enabledModules.length} 个内置模块`,
 		about: "只读",
 	};
 	const sectionDescriptionText: Record<SettingsSectionId, string> = {
-		general: "快捷键、通知、外观和 OCR。",
-		prompts: "翻译与文档问答。",
-		llm: "维护可复用的模型接入条目。",
-		rag: "索引输入、目录与重建。",
-		acp: "本地 Agent 启动命令与模式。",
-		mcp: "全局 MCP 服务清单。",
+		general: "快捷键、通知、外观和桌面行为。",
+		prompts: "翻译、文档问答、OCR 和提示词绑定。",
+		llm: "维护可复用的模型资源。",
+		rag: "本地文档知识库与索引。",
+		mcp: "Agent runtime 与全局 MCP 扩展。",
 		about: "版本与项目信息。",
 	};
 	const activeSectionLabel =
 		settingsSections.find((section) => section.id === activeSection)?.label ?? "设置";
-	const selectedAgentIssueCount = selectedAgent
-		? (acpValidation.agentIssues[selectedAgent.id]?.length ?? 0)
-		: 0;
 	const selectedMcpIssueCount = selectedMcpServer
 		? (mcpValidation.serverIssues[selectedMcpServer.id]?.length ?? 0)
 		: 0;
@@ -1188,9 +1264,6 @@ export function SettingsPage({
 	const selectedLlmFieldIssues = selectedLlmProvider
 		? (llmValidation.providerFieldIssues[selectedLlmProvider.id] ?? {})
 		: {};
-	const selectedAgentFieldIssues = selectedAgent
-		? (acpValidation.agentFieldIssues[selectedAgent.id] ?? {})
-		: {};
 	const selectedMcpFieldIssues = selectedMcpServer
 		? (mcpValidation.serverFieldIssues[selectedMcpServer.id] ?? {})
 		: {};
@@ -1198,30 +1271,15 @@ export function SettingsPage({
 		mcpPanelMode === "create" || (!selectedMcpServer && mcpServers.length === 0);
 	const isMcpEditMode = !isMcpCreateMode && selectedMcpServer !== null;
 
-	function buildAcpFieldRefKey(
-		scope: "agent" | "server",
-		id: string,
-		field: McpFieldKey | AcpFieldKey,
-	) {
+	function buildMcpFieldRefKey(scope: "server", id: string, field: McpFieldKey) {
 		return `${scope}:${id}:${field}`;
 	}
 
-	function bindAcpFieldRef(
-		scope: "agent" | "server",
-		id: string,
-		field: McpFieldKey | AcpFieldKey,
-	) {
-		const refKey = buildAcpFieldRefKey(scope, id, field);
+	function bindMcpFieldRef(scope: "server", id: string, field: McpFieldKey) {
+		const refKey = buildMcpFieldRefKey(scope, id, field);
 		return (node: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement | null) => {
-			acpFieldRefs.current[refKey] = node;
+			mcpFieldRefs.current[refKey] = node;
 		};
-	}
-
-	function focusAcpField(scope: "agent" | "server", id: string, field: McpFieldKey | AcpFieldKey) {
-		const refKey = buildAcpFieldRefKey(scope, id, field);
-		window.requestAnimationFrame(() => {
-			acpFieldRefs.current[refKey]?.focus();
-		});
 	}
 
 	function buildLlmFieldRefKey(id: string, field: LlmFieldKey) {
@@ -1265,17 +1323,6 @@ export function SettingsPage({
 		focusLlmField(nextIssue.providerId, nextIssue.fieldKey);
 	}
 
-	function locateFirstAcpIssue() {
-		const nextIssue = findFirstAcpIssue(acpAgents);
-		if (!nextIssue) {
-			return;
-		}
-
-		setActiveSection("acp");
-		setSelectedAgentId(nextIssue.agentId);
-		focusAcpField("agent", nextIssue.agentId, nextIssue.fieldKey);
-	}
-
 	function locateFirstMcpIssue() {
 		const nextIssue = findFirstMcpIssue(mcpServers);
 		if (!nextIssue) {
@@ -1295,7 +1342,7 @@ export function SettingsPage({
 
 		setActiveSection("rag");
 		setSettingsError(
-			ragValidation.fieldIssues[nextField] ?? ragValidation.issues[0] ?? "RAG 配置不合法",
+			ragValidation.fieldIssues[nextField] ?? ragValidation.issues[0] ?? "知识库配置不合法",
 		);
 		focusRagField(nextField);
 	}
@@ -1312,13 +1359,6 @@ export function SettingsPage({
 			.catch((dragError: unknown) => {
 				console.warn("failed to start settings window dragging", dragError);
 			});
-	}
-
-	function handleAgentFieldChange(agentId: string, key: AcpFieldKey, value: string) {
-		setAcpNotice(null);
-		setAcpAgentsState((current) =>
-			current.map((agent) => (agent.id === agentId ? { ...agent, [key]: value } : agent)),
-		);
 	}
 
 	function handleAddLlmProvider() {
@@ -1609,7 +1649,7 @@ export function SettingsPage({
 			const result = await scanRagSources(ragSettings, llmSettings);
 			setRagScanResult(result);
 		} catch (error: unknown) {
-			setSettingsError(getErrorMessage(error, "RAG 扫描失败"));
+			setSettingsError(getErrorMessage(error, "知识库扫描失败"));
 		} finally {
 			setScanningRag(false);
 		}
@@ -1680,67 +1720,6 @@ export function SettingsPage({
 				enabledModules: nextEnabledModules,
 			};
 		});
-	}
-
-	function handleAddPresetAgent(option: (typeof acpAgentOptions)[number]) {
-		const existingAgent = acpAgents.find(
-			(agent) => agent.command.trim() === option.command && agent.launchMode === option.launchMode,
-		);
-		if (existingAgent) {
-			setAcpNotice({
-				tone: "warn",
-				text: `${option.label} 已存在。相同启动命令和启动模式不需要重复添加。`,
-			});
-			setSelectedAgentId(existingAgent.id);
-			return;
-		}
-
-		const nextAgent = createAgentDraft(option.label, option.command, option.launchMode);
-		const nextAgents = [...acpAgents, nextAgent];
-		setAcpNotice({
-			tone: "info",
-			text: `${option.label} 已加入 Pi Agent 草稿，还没写回 config.toml。`,
-		});
-		applyAgentDrafts(nextAgents, nextAgent.id);
-	}
-
-	function handleAddCustomAgent() {
-		const nextAgent = createAgentDraft("Pi Agent", "");
-		const nextAgents = [...acpAgents, nextAgent];
-		setAcpNotice({
-			tone: "info",
-			text: "已创建新的自定义 Pi Agent 草稿。先补全名称和启动命令，再保存。",
-		});
-		applyAgentDrafts(nextAgents, nextAgent.id);
-	}
-
-	function handleApplyPresetSelection() {
-		if (!selectedPresetOptionId) {
-			return;
-		}
-
-		if (selectedPresetOptionId === "__custom__") {
-			handleAddCustomAgent();
-			setSelectedPresetOptionId("__custom__");
-			return;
-		}
-
-		const option = acpAgentOptions.find((item) => item.id === selectedPresetOptionId);
-		if (!option) {
-			return;
-		}
-
-		handleAddPresetAgent(option);
-		setSelectedPresetOptionId("__custom__");
-	}
-
-	function handleRemoveAgent(agentId: string) {
-		setAcpNotice(null);
-		const nextAgents = acpAgents.filter((agent) => agent.id !== agentId);
-		applyAgentDrafts(
-			nextAgents,
-			selectedAgentId === agentId ? (nextAgents[0]?.id ?? null) : selectedAgentId,
-		);
 	}
 
 	return (
@@ -1845,22 +1824,15 @@ export function SettingsPage({
 								<GeneralSettingsSection
 									appearanceSettings={appearanceSettings}
 									bindSectionBlockRef={bindSectionBlockRef}
-									eligibleOcrProviders={eligibleOcrProviders}
 									generalSettings={generalSettings}
 									isRecording={isRecording}
 									notificationSettings={notificationSettings}
-									ocrSettings={ocrSettings}
 									onSaveAppSettings={saveAppSettings}
 									onSaveNotificationSettings={saveNotificationSettings}
-									onSaveOcr={handleSaveOcr}
 									onShortcutClick={handleShortcutClick}
-									savingOcr={savingOcr}
 									savingSettings={savingSettings}
 									savingShortcutKey={savingShortcutKey}
-									setOcrSettings={setOcrSettings}
 									shortcutSettings={shortcutSettings}
-									showLlmOcrFields={showLlmOcrFields}
-									summarizeLlmProviderProfile={summarizeLlmProviderProfile}
 								/>
 							) : null}
 
@@ -1869,26 +1841,33 @@ export function SettingsPage({
 									bindSectionBlockRef={bindSectionBlockRef}
 									defaultQuestionAnswerPrompt={defaultPromptsSettings.ragAnswerSystemPrompt}
 									defaultTranslationPrompt={defaultPromptsSettings.translationPrompt}
+									dependencyHealthItems={promptsDependencyHealthItems}
 									eligibleAiTaskProviders={eligibleAiTaskProviders}
+									eligibleOcrProviders={eligibleOcrProviders}
 									llmSettings={llmSettings}
 									onDiscardQuestionAnswerDraft={handleDiscardQuestionAnswerDraft}
 									onDiscardTranslationDraft={handleDiscardTranslationDraft}
 									onLlmRouteProviderChange={handleLlmRouteProviderChange}
 									onSaveQuestionAnswerConfig={handleSaveQuestionAnswerConfig}
+									onSaveOcr={handleSaveOcr}
 									onSaveTranslationConfig={handleSaveTranslationConfig}
 									onSelectSection={handleSelectSection}
+									ocrSettings={ocrSettings}
 									promptsSettings={promptsSettings}
 									questionAnswerHasUnsavedChanges={questionAnswerHasUnsavedChanges}
 									questionAnswerPromptExpanded={questionAnswerPromptExpanded}
 									questionAnswerPromptSummary={questionAnswerPromptSummary}
 									savingAiTaskConfig={savingAiTaskConfig}
+									savingOcr={savingOcr}
 									savingQuestionAnswerConfig={savingQuestionAnswerConfig}
 									savingTranslationConfig={savingTranslationConfig}
 									selectedQuestionAnswerProvider={selectedQuestionAnswerProvider}
 									selectedTranslationProvider={selectedTranslationProvider}
 									setPromptsSettings={setPromptsSettings}
+									setOcrSettings={setOcrSettings}
 									setQuestionAnswerPromptExpanded={setQuestionAnswerPromptExpanded}
 									setTranslationPromptExpanded={setTranslationPromptExpanded}
+									showLlmOcrFields={showLlmOcrFields}
 									summarizeLlmProviderProfile={summarizeLlmProviderProfile}
 									translationHasUnsavedChanges={translationHasUnsavedChanges}
 									translationPromptExpanded={translationPromptExpanded}
@@ -1961,6 +1940,7 @@ export function SettingsPage({
 									bindRagFieldRef={bindRagFieldRef}
 									bindSectionBlockRef={bindSectionBlockRef}
 									defaultRagIgnoreGlobs={defaultRagIgnoreGlobs}
+									dependencyHealthItems={ragDependencyHealthItems}
 									eligibleRagEmbeddingProviders={eligibleRagEmbeddingProviders}
 									extraRagIgnoreGlobPlaceholder={extraRagIgnoreGlobPlaceholder}
 									formatTextLines={formatTextLines}
@@ -1990,35 +1970,10 @@ export function SettingsPage({
 								/>
 							) : null}
 
-							{activeSection === "acp" ? (
-								<AcpSettingsSection
-									acpAgents={acpAgents}
-									acpHasUnsavedChanges={acpHasUnsavedChanges}
-									acpNotice={acpNotice}
-									acpValidation={acpValidation}
-									bindAcpFieldRef={bindAcpFieldRef}
-									bindSectionBlockRef={bindSectionBlockRef}
-									onAddCustomAgent={handleAddCustomAgent}
-									onAgentFieldChange={handleAgentFieldChange}
-									onApplyPresetSelection={handleApplyPresetSelection}
-									onDiscardAcpDraft={handleDiscardAcpDraft}
-									onLocateFirstAcpIssue={locateFirstAcpIssue}
-									onRemoveAgent={handleRemoveAgent}
-									onSaveAgent={handleSaveAgent}
-									savingAgent={savingAgent}
-									selectedAgent={selectedAgent}
-									selectedAgentFieldIssues={selectedAgentFieldIssues}
-									selectedAgentId={selectedAgentId}
-									selectedAgentIssueCount={selectedAgentIssueCount}
-									selectedPresetOptionId={selectedPresetOptionId}
-									setSelectedAgentId={setSelectedAgentId}
-									setSelectedPresetOptionId={setSelectedPresetOptionId}
-								/>
-							) : null}
-
 							{activeSection === "mcp" ? (
 								<McpSettingsSection
-									bindAcpFieldRef={bindAcpFieldRef}
+									agentHealthItems={agentDependencyHealthItems}
+									bindMcpFieldRef={bindMcpFieldRef}
 									bindMcpListOptionRef={bindMcpListOptionRef}
 									bindSectionBlockRef={bindSectionBlockRef}
 									builtinMcpConfig={builtinMcpConfig}

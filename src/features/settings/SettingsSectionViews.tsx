@@ -2,7 +2,6 @@ export {
 	AboutSettingsSection,
 	type AboutSettingsSectionProps,
 } from "./sections/AboutSettingsSection";
-export { AcpSettingsSection, type AcpSettingsSectionProps } from "./sections/AcpSettingsSection";
 export {
 	GeneralSettingsSection,
 	type GeneralSettingsSectionProps,

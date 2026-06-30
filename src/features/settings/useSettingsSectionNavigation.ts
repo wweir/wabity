@@ -18,7 +18,6 @@ export function useSettingsSectionNavigation({
 		prompts: null,
 		llm: null,
 		rag: null,
-		acp: null,
 		mcp: null,
 		about: null,
 	});

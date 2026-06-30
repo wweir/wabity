@@ -1,13 +1,18 @@
 import type {
 	AcpMcpServerConfig,
-	AcpAgentLaunchMode,
 	BuiltinMcpConfig,
 	BuiltinMcpModuleKey,
 	LlmProviderConfig,
 	PromptsSettings,
 } from "../../lib/tauri/types";
 
-export type SettingsSectionId = "general" | "prompts" | "llm" | "rag" | "acp" | "mcp" | "about";
+export interface DependencyHealthItem {
+	status: "ok" | "warning" | "info";
+	label: string;
+	detail: string;
+}
+
+export type SettingsSectionId = "general" | "prompts" | "llm" | "rag" | "mcp" | "about";
 
 export type McpPanelMode = "edit" | "create";
 
@@ -17,26 +22,15 @@ export interface SettingsQuickLink {
 	hint: string;
 }
 
-export interface AcpAgentDraft {
-	id: string;
-	name: string;
-	command: string;
-	launchMode: AcpAgentLaunchMode;
-}
-
 export type McpTransport = AcpMcpServerConfig["transport"];
 export type BuiltinMcpFieldKey = BuiltinMcpModuleKey | "enabled";
-export type AcpFieldKey = "name" | "command" | "launchMode";
 export type McpFieldKey = "name" | "command" | "url" | "envText" | "headersText";
 export type LlmFieldKey = "name" | "baseUrl" | "model";
 export type LlmEditableFieldKey = LlmFieldKey | "apiKey" | "supportsMultimodal";
 export type LlmModelFieldKey = "model";
 export type RagFieldKey = "embeddingModelId" | "sourceDirectories" | "ignoreGlobs";
 export type LlmProviderKind =
-	| "llm_responses_stateless"
-	| "llm_responses_stateful"
-	| "llm_chat_completions"
-	| "embedding";
+	"llm_responses_stateless" | "llm_responses_stateful" | "llm_chat_completions" | "embedding";
 
 export type FieldIssueMap<FieldKey extends string> = Partial<Record<FieldKey, string>>;
 
@@ -49,17 +43,6 @@ export interface AcpMcpServerDraft {
 	argsText: string;
 	envText: string;
 	headersText: string;
-}
-
-export interface AcpDraftValidation {
-	totalIssues: number;
-	agentIssues: Record<string, string[]>;
-	agentFieldIssues: Record<string, FieldIssueMap<AcpFieldKey>>;
-}
-
-export interface SavedAcpDraftState {
-	agents: AcpAgentDraft[];
-	defaultAgentId: string | null;
 }
 
 export interface SavedMcpDraftState {
@@ -104,11 +87,6 @@ export interface PendingMcpFocusTarget {
 	serverId: string;
 	fieldKey: McpFieldKey;
 	scrollToForm: boolean;
-}
-
-export interface AcpIssueFocusTarget {
-	agentId: string;
-	fieldKey: AcpFieldKey;
 }
 
 export interface McpIssueFocusTarget {

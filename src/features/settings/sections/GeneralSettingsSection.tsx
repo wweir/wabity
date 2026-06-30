@@ -1,10 +1,7 @@
-import type { Dispatch, SetStateAction } from "react";
 import type {
 	AppearanceSettings,
 	GeneralSettings,
-	LlmProviderConfig,
 	NotificationSettings,
-	OcrSettings,
 	ShortcutConfig,
 } from "../../../lib/tauri/types";
 import { ShortcutRecorderField, getSettingsPanelId, getSettingsTabId } from "../settingsShared";
@@ -15,12 +12,8 @@ export interface GeneralSettingsSectionProps {
 	notificationSettings: NotificationSettings;
 	appearanceSettings: AppearanceSettings;
 	shortcutSettings: ShortcutConfig;
-	ocrSettings: OcrSettings;
 	savingSettings: boolean;
 	savingShortcutKey: keyof ShortcutConfig | null;
-	savingOcr: boolean;
-	showLlmOcrFields: boolean;
-	eligibleOcrProviders: LlmProviderConfig[];
 	bindSectionBlockRef: BindSectionBlockRef;
 	isRecording: (key: keyof ShortcutConfig) => boolean;
 	onShortcutClick: (key: keyof ShortcutConfig) => void;
@@ -30,9 +23,6 @@ export interface GeneralSettingsSectionProps {
 		nextAppearance: AppearanceSettings,
 	) => Promise<void>;
 	onSaveNotificationSettings: (nextNotification: NotificationSettings) => Promise<void>;
-	onSaveOcr: () => Promise<void>;
-	setOcrSettings: Dispatch<SetStateAction<OcrSettings>>;
-	summarizeLlmProviderProfile: (provider: LlmProviderConfig) => string;
 }
 
 export function GeneralSettingsSection({
@@ -40,20 +30,13 @@ export function GeneralSettingsSection({
 	notificationSettings,
 	appearanceSettings,
 	shortcutSettings,
-	ocrSettings,
 	savingSettings,
 	savingShortcutKey,
-	savingOcr,
-	showLlmOcrFields,
-	eligibleOcrProviders,
 	bindSectionBlockRef,
 	isRecording,
 	onShortcutClick,
 	onSaveAppSettings,
 	onSaveNotificationSettings,
-	onSaveOcr,
-	setOcrSettings,
-	summarizeLlmProviderProfile,
 }: GeneralSettingsSectionProps) {
 	return (
 		<section
@@ -239,7 +222,7 @@ export function GeneralSettingsSection({
 					</div>
 					<div className="settings-item">
 						<label className="settings-label">
-							<span>Pi Agent 完成后通知</span>
+							<span>Agent 完成后通知</span>
 							<input
 								checked={notificationSettings.notifyAcpPromptCompletion}
 								className="settings-toggle"
@@ -328,100 +311,6 @@ export function GeneralSettingsSection({
 							</select>
 						</label>
 					</div>
-				</div>
-			</div>
-
-			<div
-				className="settings-editor-card settings-editor-card-subtle settings-general-card"
-				id="general-ocr"
-				ref={bindSectionBlockRef("general-ocr")}
-			>
-				<div className="settings-editor-card-header settings-general-card-header">
-					<div className="settings-general-card-copy">
-						<h3 className="settings-subsection-title">截图识别</h3>
-						<span className="settings-help-text settings-help-text-tight">
-							截图识别仍只在 macOS 可用。远程识别会复用已配置的多模态模型。
-						</span>
-					</div>
-				</div>
-
-				<div className="settings-general-field-list">
-					<div className="settings-item">
-						<label className="settings-label">
-							<span>识别方式</span>
-							<select
-								className="settings-select"
-								value={ocrSettings.provider}
-								onChange={(event) =>
-									setOcrSettings((current) => ({
-										...current,
-										provider: event.target.value as OcrSettings["provider"],
-										llmModelId:
-											event.target.value === "llm_ocr"
-												? (current.llmModelId ?? eligibleOcrProviders[0]?.models[0]?.id ?? null)
-												: current.llmModelId,
-									}))
-								}
-								disabled={savingOcr}
-							>
-								<option value="system">系统 OCR</option>
-								<option value="llm_ocr">大模型 OCR</option>
-								<option value="disabled">禁用</option>
-							</select>
-						</label>
-					</div>
-
-					{showLlmOcrFields ? (
-						<div className="settings-item settings-item-stacked settings-item-wide">
-							<label
-								className="settings-label settings-label-stacked"
-								htmlFor="general-ocr-llm-provider"
-							>
-								<span>OCR 模型</span>
-							</label>
-							<select
-								className="settings-select"
-								disabled={savingOcr}
-								id="general-ocr-llm-provider"
-								onChange={(event) =>
-									setOcrSettings((current) => ({
-										...current,
-										llmModelId: event.target.value || null,
-									}))
-								}
-								value={ocrSettings.llmModelId ?? ""}
-							>
-								<option value="">选择一个已开启多模态的模型条目</option>
-								{eligibleOcrProviders.map((provider) => (
-									<option
-										key={provider.models[0]?.id ?? provider.id}
-										value={provider.models[0]?.id ?? ""}
-									>
-										{provider.name || provider.models[0]?.model || provider.baseUrl}
-										{` · ${summarizeLlmProviderProfile(provider)}`}
-									</option>
-								))}
-							</select>
-							<span className="settings-help-text">
-								这里只接受普通 LLM 类型、并且显式开启了多模态的模型条目。
-							</span>
-							{eligibleOcrProviders.length === 0 ? (
-								<span className="settings-help-text settings-help-text-tight">
-									当前没有可用的 OCR 模型。先到模型接入页添加支持多模态的普通 LLM 条目。
-								</span>
-							) : null}
-						</div>
-					) : null}
-				</div>
-				<div className="settings-general-card-actions settings-general-card-actions-end">
-					<button
-						className="settings-button settings-button-compact"
-						disabled={savingOcr}
-						onClick={() => void onSaveOcr()}
-						type="button"
-					>
-						{savingOcr ? "保存中..." : "保存 OCR 设置"}
-					</button>
 				</div>
 			</div>
 		</section>

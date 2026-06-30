@@ -1,6 +1,4 @@
 import type { ReactNode } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
-import type { AcpAgentLaunchMode } from "../../lib/tauri/types";
 import type {
 	AcpMcpServerDraft,
 	McpTransport,
@@ -13,11 +11,10 @@ export const settingsSections: ReadonlyArray<{
 	label: string;
 }> = [
 	{ id: "general", label: "通用" },
-	{ id: "prompts", label: "AI 功能" },
-	{ id: "llm", label: "模型接入" },
-	{ id: "rag", label: "RAG" },
-	{ id: "acp", label: "Pi Agent" },
-	{ id: "mcp", label: "MCP" },
+	{ id: "prompts", label: "功能" },
+	{ id: "llm", label: "模型" },
+	{ id: "rag", label: "知识库" },
+	{ id: "mcp", label: "扩展" },
 	{ id: "about", label: "关于" },
 ] as const;
 
@@ -27,15 +24,15 @@ export const settingsQuickLinks: Readonly<Record<SettingsSectionId, readonly Set
 		prompts: [
 			{ id: "prompts-translation", label: "翻译配置", hint: "模型与提示词" },
 			{ id: "prompts-rag-answer", label: "文档问答", hint: "模型与提示词" },
+			{ id: "prompts-ocr", label: "截图识别", hint: "OCR 模型" },
 		],
 		llm: [],
 		rag: [],
-		acp: [
-			{ id: "acp-catalog", label: "Agent 列表", hint: "已配置条目" },
-			{ id: "acp-presets", label: "模板", hint: "预设与安装提示" },
-			{ id: "acp-form", label: "基础信息", hint: "名称与命令" },
+		mcp: [
+			{ id: "extensions-agent", label: "Agent", hint: "运行时" },
+			{ id: "mcp-builtin", label: "内置 MCP", hint: "本机服务" },
+			{ id: "mcp-catalog", label: "全局 MCP", hint: "服务清单" },
 		],
-		mcp: [],
 		about: [{ id: "about-overview", label: "关于 Wabity", hint: "版本与项目" }],
 	} as const;
 
@@ -69,14 +66,6 @@ function getShortcutRecorderActionLabel(
 	}
 
 	return shortcutValue.trim() ? "重新录制" : "开始录制";
-}
-
-function getPresetInstallLinkSeparator(index: number, total: number): string {
-	if (index === 0) {
-		return " ";
-	}
-
-	return index === total - 1 ? " 和 " : "、";
 }
 
 export function getSettingsTabId(sectionId: SettingsSectionId): string {
@@ -254,19 +243,6 @@ export function ShortcutRecorderField({
 	);
 }
 
-export interface AcpAgentOption {
-	id: string;
-	label: string;
-	command: string;
-	launchMode: AcpAgentLaunchMode;
-	summary: string;
-	installCommand: string;
-	installHint: string;
-	links: ReadonlyArray<{ label: string; url: string }>;
-}
-
-export const acpAgentOptions: readonly AcpAgentOption[] = [];
-
 const mcpTransportOptionsInternal = [
 	{
 		transport: "stdio",
@@ -281,7 +257,7 @@ const mcpTransportOptionsInternal = [
 		transport: "http",
 		label: "HTTP",
 		description: "通过服务地址连接远程 MCP 服务",
-		summary: "适合已经部署好的远程 MCP 服务。保存后会把服务地址和请求头随会话一起交给当前 Agent。",
+		summary: "适合已经部署好的远程 MCP 服务。保存后作为全局 MCP 服务条目，供支持 MCP 的链路读取。",
 		fieldsHint: "需要填写服务地址；可选填写请求头。",
 		example: "https://example.com/mcp",
 	},
@@ -295,123 +271,12 @@ const mcpTransportOptionsInternal = [
 	},
 ] as const;
 
-const acpAgentLaunchModeOptionsInternal: ReadonlyArray<{
-	value: AcpAgentLaunchMode;
-	label: string;
-	description: string;
-}> = [
-	{
-		value: "direct",
-		label: "直接执行",
-		description: "直接把命令拆成 program + args 执行，不读取 shell 配置。",
-	},
-	{
-		value: "login_shell",
-		label: "Login Shell",
-		description:
-			"通过用户默认 shell 的 login 模式启动，读取 login profile，不保证读取 .zshrc / .bashrc。",
-	},
-	{
-		value: "interactive_shell",
-		label: "Interactive Shell",
-		description:
-			"通过用户默认 shell 的 login + interactive 模式启动，更可能读取 .zshrc / .bashrc，但任何输出都可能污染 Pi Agent stdio。",
-	},
-] as const;
-
-function isWindowsPlatform() {
-	return typeof navigator !== "undefined" && /Windows/iu.test(navigator.userAgent);
-}
-
-export const acpAgentLaunchModeOptions = isWindowsPlatform()
-	? acpAgentLaunchModeOptionsInternal.filter((option) => option.value !== "interactive_shell")
-	: acpAgentLaunchModeOptionsInternal;
-
 export const mcpTransportOptions = mcpTransportOptionsInternal;
 
 export function getMcpTransportMeta(transport: McpTransport) {
 	return (
 		mcpTransportOptionsInternal.find((option) => option.transport === transport) ??
 		mcpTransportOptionsInternal[0]
-	);
-}
-
-export function formatAcpAgentOptionLabel(option: AcpAgentOption, alreadyAdded: boolean) {
-	return `${option.label} · ${option.command} · ${getAcpAgentLaunchModeMeta(option.launchMode).label}${alreadyAdded ? " · 已配置" : ""}`;
-}
-
-export function getAcpAgentLaunchModeMeta(launchMode: AcpAgentLaunchMode) {
-	if (isWindowsPlatform() && launchMode === "interactive_shell") {
-		return {
-			value: "login_shell" as const,
-			label: "Login Shell",
-			description:
-				"Windows 默认命令处理器不区分 login / interactive shell，当前会按 Login Shell 执行。",
-		};
-	}
-
-	return (
-		acpAgentLaunchModeOptions.find((option) => option.value === launchMode) ??
-		acpAgentLaunchModeOptions[1] ??
-		acpAgentLaunchModeOptionsInternal[0]
-	);
-}
-
-export function renderPresetInstallGuide(
-	selectedPresetInstallOption: AcpAgentOption | null,
-	selectedPresetOptionId: string,
-) {
-	if (selectedPresetInstallOption) {
-		return (
-			<>
-				<span className="settings-acp-preset-kicker">安装指引</span>
-				<span className="settings-agent-meta">安装 {selectedPresetInstallOption.label}</span>
-				<p className="settings-install-guide-summary">
-					{selectedPresetInstallOption.summary} 相关入口：
-					{selectedPresetInstallOption.links.map((link, index) => (
-						<span key={link.url}>
-							{getPresetInstallLinkSeparator(index, selectedPresetInstallOption.links.length)}
-							<button
-								className="settings-text-link"
-								onClick={() => void openUrl(link.url)}
-								type="button"
-							>
-								{link.label}
-							</button>
-						</span>
-					))}
-					。
-				</p>
-				<code className="settings-install-guide-command">
-					{selectedPresetInstallOption.installCommand}
-				</code>
-				<span className="settings-help-text settings-help-text-tight">
-					{selectedPresetInstallOption.installHint}
-				</span>
-			</>
-		);
-	}
-
-	if (selectedPresetOptionId === "__custom__") {
-		return (
-			<>
-				<span className="settings-acp-preset-kicker">安装指引</span>
-				<span className="settings-agent-meta">自定义 Agent</span>
-				<span className="settings-help-text settings-help-text-tight">
-					自己准备一个能在命令行里启动的 Pi Agent
-					命令，然后填进下面的启动命令输入框，并选择合适的启动模式。
-				</span>
-			</>
-		);
-	}
-
-	return (
-		<>
-			<span className="settings-acp-preset-kicker">安装指引</span>
-			<span className="settings-help-text settings-help-text-tight">
-				先从左侧选择一个预设，右侧会展示对应的安装命令和官方入口。
-			</span>
-		</>
 	);
 }
 

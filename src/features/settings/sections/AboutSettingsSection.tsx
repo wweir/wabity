@@ -133,6 +133,12 @@ export function AboutSettingsSection({
 					</span>
 				</div>
 				<div className="settings-item">
+					<span className="settings-info-label">Agent</span>
+					<span className="settings-info-value">
+						Agent session 基于 Pi Agent SDK 内嵌运行。感谢 Pi Agent 项目提供核心运行时能力。
+					</span>
+				</div>
+				<div className="settings-item">
 					<span className="settings-info-label">更新</span>
 					{updateStatus === "available" ? (
 						<button

@@ -10,10 +10,11 @@ import {
 import {
 	type BindRagFieldRef,
 	type BindSectionBlockRef,
+	renderDependencyHealthList,
 	renderFieldError,
 	renderValidationIssueBox,
 } from "../sectionViewShared";
-import type { RagDraftValidation } from "../settingsTypes";
+import type { DependencyHealthItem, RagDraftValidation } from "../settingsTypes";
 
 export interface RagSettingsSectionProps {
 	bindSectionBlockRef: BindSectionBlockRef;
@@ -22,6 +23,7 @@ export interface RagSettingsSectionProps {
 	ragScanResult: RagScanResult | null;
 	ragSummaryItems: Array<{ label: string; value: string }>;
 	ragScanSummaryItems: Array<{ label: string; value: string }>;
+	dependencyHealthItems: DependencyHealthItem[];
 	selectedRagEmbeddingProviderLabel: string;
 	selectedRagEmbeddingProvider: LlmProviderConfig | null;
 	eligibleRagEmbeddingProviders: LlmProviderConfig[];
@@ -54,6 +56,7 @@ export function RagSettingsSection({
 	ragScanResult,
 	ragSummaryItems,
 	ragScanSummaryItems,
+	dependencyHealthItems,
 	selectedRagEmbeddingProviderLabel,
 	selectedRagEmbeddingProvider,
 	eligibleRagEmbeddingProviders,
@@ -86,6 +89,8 @@ export function RagSettingsSection({
 			role="tabpanel"
 			tabIndex={0}
 		>
+			{renderDependencyHealthList(dependencyHealthItems)}
+
 			<div className="settings-rag-layout">
 				<aside
 					className="settings-rag-sidebar"
@@ -114,7 +119,7 @@ export function RagSettingsSection({
 									? `${selectedRagEmbeddingProvider.models[0]?.model ?? ""} · ${selectedRagEmbeddingProvider.baseUrl}`
 									: eligibleRagEmbeddingProviders.length > 0
 										? "先在右侧选一个 Embedding 条目。"
-										: "当前没有可用的 Embedding 条目，先去模型接入页新增一个。"}
+										: "当前没有可用的 Embedding 条目，先去模型页新增一个。"}
 							</span>
 							<span className="settings-rag-summary-note">
 								建索引时，文档内容会发送给当前 Embedding
@@ -200,7 +205,7 @@ export function RagSettingsSection({
 					ref={bindSectionBlockRef("rag-pipeline")}
 				>
 					<div
-						aria-label="RAG 配置操作"
+						aria-label="知识库配置操作"
 						className="settings-rag-toolbar settings-rag-toolbar-compact"
 					>
 						<div className="settings-rag-toolbar-actions">
@@ -238,7 +243,7 @@ export function RagSettingsSection({
 									onClick={() => void onSaveRag()}
 									type="button"
 								>
-									{savingRag ? "保存中..." : "保存 RAG 配置"}
+									{savingRag ? "保存中..." : "保存知识库配置"}
 								</button>
 							) : null}
 						</div>
@@ -263,7 +268,7 @@ export function RagSettingsSection({
 											className="settings-item-description"
 											id="rag-embedding-provider-description"
 										>
-											这里只能选带 Embedding 能力的条目。没有可选项时，先去模型接入页新增。
+											这里只能选带 Embedding 能力的条目。没有可选项时，先去模型页新增。
 										</span>
 									</label>
 									<select

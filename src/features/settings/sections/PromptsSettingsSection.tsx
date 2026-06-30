@@ -1,12 +1,18 @@
 import type { Dispatch, ReactElement, SetStateAction } from "react";
-import type { LlmProviderConfig, LlmSettings, PromptsSettings } from "../../../lib/tauri/types";
+import type {
+	LlmProviderConfig,
+	LlmSettings,
+	OcrSettings,
+	PromptsSettings,
+} from "../../../lib/tauri/types";
 import {
 	DISCARD_DRAFT_BUTTON_LABEL,
 	getSettingsPanelId,
 	getSettingsTabId,
 } from "../settingsShared";
 import type { BindSectionBlockRef } from "../sectionViewShared";
-import type { SettingsSectionId } from "../settingsTypes";
+import { renderDependencyHealthList } from "../sectionViewShared";
+import type { DependencyHealthItem, SettingsSectionId } from "../settingsTypes";
 
 type LlmProviderDisplaySource = Pick<LlmProviderConfig, "baseUrl" | "models" | "name">;
 
@@ -56,6 +62,11 @@ export interface PromptsSettingsSectionProps {
 	savingAiTaskConfig: boolean;
 	savingTranslationConfig: boolean;
 	savingQuestionAnswerConfig: boolean;
+	savingOcr: boolean;
+	showLlmOcrFields: boolean;
+	ocrSettings: OcrSettings;
+	eligibleOcrProviders: LlmProviderConfig[];
+	dependencyHealthItems: DependencyHealthItem[];
 	setTranslationPromptExpanded: Dispatch<SetStateAction<boolean>>;
 	setQuestionAnswerPromptExpanded: Dispatch<SetStateAction<boolean>>;
 	setPromptsSettings: Dispatch<SetStateAction<PromptsSettings>>;
@@ -68,6 +79,8 @@ export interface PromptsSettingsSectionProps {
 	onDiscardQuestionAnswerDraft: () => void;
 	onSaveTranslationConfig: () => Promise<void>;
 	onSaveQuestionAnswerConfig: () => Promise<void>;
+	onSaveOcr: () => Promise<void>;
+	setOcrSettings: Dispatch<SetStateAction<OcrSettings>>;
 	summarizeLlmProviderProfile: (provider: LlmProviderConfig) => string;
 	defaultTranslationPrompt: string;
 	defaultQuestionAnswerPrompt: string;
@@ -163,7 +176,7 @@ function AiTaskPromptCard({
 							onClick={() => onSelectSection("llm")}
 							type="button"
 						>
-							前往模型接入
+							前往模型
 						</button>
 					</span>
 				) : null}
@@ -247,6 +260,11 @@ export function PromptsSettingsSection({
 	savingAiTaskConfig,
 	savingTranslationConfig,
 	savingQuestionAnswerConfig,
+	savingOcr,
+	showLlmOcrFields,
+	ocrSettings,
+	eligibleOcrProviders,
+	dependencyHealthItems,
 	setTranslationPromptExpanded,
 	setQuestionAnswerPromptExpanded,
 	setPromptsSettings,
@@ -256,6 +274,8 @@ export function PromptsSettingsSection({
 	onDiscardQuestionAnswerDraft,
 	onSaveTranslationConfig,
 	onSaveQuestionAnswerConfig,
+	onSaveOcr,
+	setOcrSettings,
 	summarizeLlmProviderProfile,
 	defaultTranslationPrompt,
 	defaultQuestionAnswerPrompt,
@@ -268,6 +288,8 @@ export function PromptsSettingsSection({
 			role="tabpanel"
 			tabIndex={0}
 		>
+			{renderDependencyHealthList(dependencyHealthItems)}
+
 			<div className="settings-ai-task-grid">
 				<AiTaskPromptCard
 					bindSectionBlockRef={bindSectionBlockRef}
@@ -312,7 +334,7 @@ export function PromptsSettingsSection({
 				<AiTaskPromptCard
 					bindSectionBlockRef={bindSectionBlockRef}
 					blockId="prompts-rag-answer"
-					description="这里只控制回答阶段。文档检索仍然使用 RAG 页里的 Embedding。"
+					description="这里只控制回答阶段。文档检索仍然使用知识库页里的 Embedding。"
 					eligibleAiTaskProviders={eligibleAiTaskProviders}
 					hasUnsavedChanges={questionAnswerHasUnsavedChanges}
 					onDiscardDraft={onDiscardQuestionAnswerDraft}
@@ -348,6 +370,103 @@ export function PromptsSettingsSection({
 					togglePromptExpanded={() => setQuestionAnswerPromptExpanded((current) => !current)}
 					value={llmSettings.questionAnswerModelId ?? ""}
 				/>
+
+				<article
+					className="settings-editor-card settings-task-card"
+					id="prompts-ocr"
+					ref={bindSectionBlockRef("prompts-ocr")}
+				>
+					<div className="settings-task-card-header">
+						<div className="settings-acp-detail-copy">
+							<div className="settings-task-card-title-row">
+								<h3 className="settings-subsection-title">截图识别</h3>
+								<span className="settings-status-chip">独立保存</span>
+							</div>
+							<span className="settings-help-text settings-help-text-tight">
+								截图识别仍只在 macOS 可用。远程识别会复用已配置的多模态模型。
+							</span>
+						</div>
+					</div>
+
+					<div className="settings-item settings-item-stacked settings-item-wide">
+						<label className="settings-label settings-label-stacked" htmlFor="prompts-ocr-provider">
+							<span>识别方式</span>
+						</label>
+						<select
+							className="settings-select"
+							disabled={savingOcr}
+							id="prompts-ocr-provider"
+							onChange={(event) =>
+								setOcrSettings((current) => ({
+									...current,
+									provider: event.target.value as OcrSettings["provider"],
+									llmModelId:
+										event.target.value === "llm_ocr"
+											? (current.llmModelId ?? eligibleOcrProviders[0]?.models[0]?.id ?? null)
+											: current.llmModelId,
+								}))
+							}
+							value={ocrSettings.provider}
+						>
+							<option value="system">系统 OCR</option>
+							<option value="llm_ocr">大模型 OCR</option>
+							<option value="disabled">禁用</option>
+						</select>
+					</div>
+
+					{showLlmOcrFields ? (
+						<div className="settings-item settings-item-stacked settings-item-wide">
+							<label
+								className="settings-label settings-label-stacked"
+								htmlFor="prompts-ocr-llm-provider"
+							>
+								<span>OCR 模型</span>
+							</label>
+							<select
+								className="settings-select"
+								disabled={savingOcr}
+								id="prompts-ocr-llm-provider"
+								onChange={(event) =>
+									setOcrSettings((current) => ({
+										...current,
+										llmModelId: event.target.value || null,
+									}))
+								}
+								value={ocrSettings.llmModelId ?? ""}
+							>
+								<option value="">选择一个已开启多模态的模型条目</option>
+								{eligibleOcrProviders.map((provider) => (
+									<option
+										key={provider.models[0]?.id ?? provider.id}
+										value={provider.models[0]?.id ?? ""}
+									>
+										{provider.name || provider.models[0]?.model || provider.baseUrl}
+										{` · ${summarizeLlmProviderProfile(provider)}`}
+									</option>
+								))}
+							</select>
+							<span className="settings-help-text">
+								这里只接受普通 LLM 类型、并且显式开启了多模态的模型条目。
+							</span>
+							{eligibleOcrProviders.length === 0 ? (
+								<span className="settings-help-text settings-help-text-tight">
+									当前没有可用的 OCR 模型。先到模型页添加支持多模态的普通 LLM 条目。
+								</span>
+							) : null}
+						</div>
+					) : null}
+
+					<div className="settings-task-card-actions">
+						<button
+							className="settings-button settings-button-compact"
+							disabled={savingOcr}
+							onClick={() => void onSaveOcr()}
+							type="button"
+						>
+							{savingOcr ? "保存中..." : "保存 OCR 设置"}
+						</button>
+					</div>
+				</article>
 			</div>
 		</section>
 	);

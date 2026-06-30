@@ -7,28 +7,17 @@ import {
 	reconcileOcrSettings,
 	reconcileRagSettings,
 } from "./settingsState";
-import type {
-	AcpAgentDraft,
-	AcpInlineNotice,
-	AcpMcpServerDraft,
-	SavedAcpDraftState,
-	SavedMcpDraftState,
-} from "./settingsTypes";
+import type { AcpInlineNotice, AcpMcpServerDraft, SavedMcpDraftState } from "./settingsTypes";
 import {
-	buildAcpDraftSnapshot,
-	buildAgentCommand,
 	buildLlmDraftSnapshot,
 	buildRagDraftSnapshot,
 	buildMcpDraftSnapshot,
-	buildSavedAcpDraftState,
 	buildSavedLlmDraftState,
 	buildSavedMcpDraftState,
 	buildSavedRagDraftState,
 	cloneLlmProviderDraft,
-	cloneSavedAcpDraftState,
 	cloneSavedMcpDraftState,
 	createMcpServerDraftFromConfig,
-	deriveProgramFromCommand,
 	serializeMcpServerDraft,
 } from "./settingsState";
 import type {
@@ -43,18 +32,14 @@ import type {
 	PromptsSettings,
 	RagSettings,
 } from "../../lib/tauri/types";
-import { setAcpAgents, setAcpMcpServers, setAppSettings } from "../../lib/tauri/client";
+import { setAcpMcpServers, setAppSettings } from "../../lib/tauri/client";
 
 interface UseSettingsPersistenceArgs {
-	acpAgents: AcpAgentDraft[];
-	acpValidationIssueCount: number;
-	applyAgentDrafts: (nextAgents: AcpAgentDraft[], nextSelectedAgentId: string | null) => void;
 	applyMcpServerDrafts: (
 		nextServers: AcpMcpServerDraft[],
 		nextSelectedServerId: string | null,
 	) => void;
 	builtinMcpConfig: BuiltinMcpConfig;
-	defaultAgentId: string | null;
 	generalSettings: GeneralSettings;
 	llmSettings: LlmSettings;
 	mcpServers: AcpMcpServerDraft[];
@@ -63,19 +48,14 @@ interface UseSettingsPersistenceArgs {
 	persistedAppSettings: AppSettings;
 	promptsSettings: PromptsSettings;
 	ragSettings: RagSettings;
-	savedAcpSnapshot: string;
-	savedAcpState: SavedAcpDraftState;
 	savedLlmSnapshot: string;
 	savedMcpSnapshot: string;
 	savedMcpState: SavedMcpDraftState;
-	selectedAgentId: string | null;
 	selectedLlmProviderId: string | null;
 	selectedMcpServerId: string | null;
-	setAcpNotice: (notice: AcpInlineNotice | null) => void;
 	setBuiltinMcpConfig: (
 		value: BuiltinMcpConfig | ((current: BuiltinMcpConfig) => BuiltinMcpConfig),
 	) => void;
-	setDefaultAgentId: (value: string | null) => void;
 	setGeneralSettings: (settings: GeneralSettings) => void;
 	setAppearanceSettings: (settings: AppearanceSettings) => void;
 	setLlmModelErrors: (value: Record<string, string>) => void;
@@ -92,8 +72,6 @@ interface UseSettingsPersistenceArgs {
 		value: PromptsSettings | ((current: PromptsSettings) => PromptsSettings),
 	) => void;
 	setRagSettings: (value: RagSettings | ((current: RagSettings) => RagSettings)) => void;
-	setSavedAcpSnapshot: (snapshot: string) => void;
-	setSavedAcpState: (state: SavedAcpDraftState) => void;
 	setSavedLlmSnapshot: (snapshot: string) => void;
 	setSavedLlmState: (state: ReturnType<typeof buildSavedLlmDraftState>) => void;
 	setSavedMcpSnapshot: (snapshot: string) => void;
@@ -105,7 +83,6 @@ interface UseSettingsPersistenceArgs {
 	syncAppearanceState: (appearance: AppearanceSettings) => void;
 	llmValidationIssueCount: number;
 	locateFirstLlmIssue: () => void;
-	locateFirstAcpIssue: () => void;
 	locateFirstMcpIssue: () => void;
 	ragValidationIssueCount: number;
 	locateFirstRagIssue: () => void;
@@ -119,7 +96,6 @@ export function useSettingsPersistence(args: UseSettingsPersistenceArgs) {
 	const [savingLlm, setSavingLlm] = useState(false);
 	const [savingOcr, setSavingOcr] = useState(false);
 	const [savingRag, setSavingRag] = useState(false);
-	const [savingAgent, setSavingAgent] = useState(false);
 	const [savingMcp, setSavingMcp] = useState(false);
 
 	async function persistAppSettings(
@@ -337,7 +313,7 @@ export function useSettingsPersistence(args: UseSettingsPersistenceArgs) {
 				rag: args.persistedAppSettings.rag,
 			},
 			setSavingLlm,
-			"模型接入配置保存失败",
+			"模型配置保存失败",
 			{
 				adoptPromptKeys: [],
 				adoptLlmProviders: true,
@@ -390,7 +366,7 @@ export function useSettingsPersistence(args: UseSettingsPersistenceArgs) {
 				rag: args.ragSettings,
 			},
 			setSavingRag,
-			"RAG 配置保存失败",
+			"知识库配置保存失败",
 			{
 				adoptPromptKeys: [],
 				adoptLlmProviders: false,
@@ -465,19 +441,6 @@ export function useSettingsPersistence(args: UseSettingsPersistenceArgs) {
 		args.setSettingsError(null);
 	}
 
-	function handleDiscardAcpDraft() {
-		const restored = cloneSavedAcpDraftState(args.savedAcpState);
-		args.setAcpNotice(null);
-		args.setDefaultAgentId(restored.defaultAgentId);
-		args.applyAgentDrafts(
-			restored.agents,
-			restored.agents.some((agent) => agent.id === args.selectedAgentId)
-				? args.selectedAgentId
-				: (restored.agents[0]?.id ?? null),
-		);
-		args.setSettingsError(null);
-	}
-
 	function handleDiscardMcpDraft() {
 		const restored = cloneSavedMcpDraftState(args.savedMcpState);
 		args.setMcpNotice(null);
@@ -490,52 +453,6 @@ export function useSettingsPersistence(args: UseSettingsPersistenceArgs) {
 		args.applyMcpServerDrafts(restored.servers, nextSelectedServerId);
 		args.setMcpPanelMode(nextSelectedServerId ? "edit" : "create");
 		args.setSettingsError(null);
-	}
-
-	async function handleSaveAgent() {
-		if (args.acpValidationIssueCount > 0) {
-			args.locateFirstAcpIssue();
-			return;
-		}
-
-		setSavingAgent(true);
-		args.setSettingsError(null);
-		args.setAcpNotice(null);
-		try {
-			const preservedDefaultAgentId =
-				args.defaultAgentId && args.acpAgents.some((agent) => agent.id === args.defaultAgentId)
-					? args.defaultAgentId
-					: null;
-			const normalizedAgents = args.acpAgents.map((agent) => ({
-				id: agent.id,
-				name: agent.name.trim(),
-				program: deriveProgramFromCommand(agent.command),
-				args: [],
-				shellCommand: agent.command.trim() || null,
-				launchMode: agent.launchMode,
-			}));
-			const nextCatalog = await setAcpAgents(normalizedAgents, preservedDefaultAgentId);
-			const nextDraftAgents = nextCatalog.agents.map((agent) => ({
-				id: agent.id,
-				name: agent.name,
-				command: buildAgentCommand(agent),
-				launchMode: agent.launchMode,
-			}));
-			const nextDefaultAgentId = nextCatalog.defaultAgentId ?? nextCatalog.agents[0]?.id ?? null;
-			args.setDefaultAgentId(nextDefaultAgentId);
-			args.applyAgentDrafts(
-				nextDraftAgents,
-				nextDraftAgents.some((agent) => agent.id === args.selectedAgentId)
-					? args.selectedAgentId
-					: (nextDraftAgents[0]?.id ?? null),
-			);
-			args.setSavedAcpSnapshot(buildAcpDraftSnapshot(nextDraftAgents));
-			args.setSavedAcpState(buildSavedAcpDraftState(nextDraftAgents, nextDefaultAgentId));
-		} catch (error: unknown) {
-			args.setSettingsError(getErrorMessage(error, "Pi Agent 配置保存失败"));
-		} finally {
-			setSavingAgent(false);
-		}
 	}
 
 	async function handleSaveMcp() {
@@ -571,13 +488,11 @@ export function useSettingsPersistence(args: UseSettingsPersistenceArgs) {
 	}
 
 	return {
-		handleDiscardAcpDraft,
 		handleDiscardLlmDraft,
 		handleDiscardMcpDraft,
 		handleDiscardQuestionAnswerDraft,
 		handleDiscardRagDraft,
 		handleDiscardTranslationDraft,
-		handleSaveAgent,
 		handleSaveLlm,
 		handleSaveMcp,
 		handleSaveOcr,
@@ -587,7 +502,6 @@ export function useSettingsPersistence(args: UseSettingsPersistenceArgs) {
 		persistAppSettings,
 		saveAppSettings,
 		saveNotificationSettings,
-		savingAgent,
 		savingLlm,
 		savingMcp,
 		savingOcr,

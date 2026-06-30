@@ -1,7 +1,6 @@
 import { defaultAppearanceSettings } from "../../app/appearance";
 import { defaultRagIgnoreGlobs } from "../../lib/tauri/client";
 import type {
-	AcpAgentConfig,
 	AcpMcpServerConfig,
 	AppSettings,
 	BuiltinMcpConfig,
@@ -20,10 +19,6 @@ import type {
 } from "../../lib/tauri/types";
 import { getMcpTransportMeta } from "./settingsShared";
 import type {
-	AcpAgentDraft,
-	AcpDraftValidation,
-	AcpFieldKey,
-	AcpIssueFocusTarget,
 	AcpMcpServerDraft,
 	FieldIssueMap,
 	LlmDraftValidation,
@@ -36,7 +31,6 @@ import type {
 	McpTransport,
 	RagDraftValidation,
 	RagFieldKey,
-	SavedAcpDraftState,
 	SavedLlmDraftState,
 	SavedMcpDraftState,
 	SavedRagDraftState,
@@ -226,75 +220,6 @@ export function createDefaultAppSettings(): AppSettings {
 	};
 }
 
-function formatDirectCommand(program: string, args: string[]) {
-	return [program, ...args]
-		.filter((value) => value.trim().length > 0)
-		.map(quoteDirectCommandArgument)
-		.join(" ");
-}
-
-function quoteDirectCommandArgument(value: string) {
-	if (!value) {
-		return '""';
-	}
-
-	if (isWindowsPlatform()) {
-		return quoteWindowsCommandArgument(value);
-	}
-
-	return /[\s"'\\]/u.test(value) ? `'${value.replace(/'/gu, `'"'"'`)}'` : value;
-}
-
-function quoteWindowsCommandArgument(value: string) {
-	if (!/[\s"]/u.test(value)) {
-		return value;
-	}
-
-	let quoted = '"';
-	let backslashes = 0;
-	for (const char of value) {
-		if (char === "\\") {
-			backslashes += 1;
-			continue;
-		}
-
-		if (char === '"') {
-			quoted += "\\".repeat(backslashes * 2 + 1);
-			quoted += '"';
-			backslashes = 0;
-			continue;
-		}
-
-		quoted += "\\".repeat(backslashes);
-		quoted += char;
-		backslashes = 0;
-	}
-
-	quoted += "\\".repeat(backslashes * 2);
-	quoted += '"';
-	return quoted;
-}
-
-function isWindowsPlatform() {
-	return typeof navigator !== "undefined" && /Windows/iu.test(navigator.userAgent);
-}
-
-export function deriveProgramFromCommand(command: string) {
-	const normalized = command.trim();
-	if (!normalized) {
-		return "";
-	}
-
-	const [program] = normalized.split(/\s+/, 1);
-	return program ?? "";
-}
-
-export function buildAgentCommand(
-	agent: Pick<AcpAgentConfig, "program" | "args" | "shellCommand">,
-) {
-	return agent.shellCommand?.trim() || formatDirectCommand(agent.program, agent.args);
-}
-
 function nextDraftId(prefix: string) {
 	return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -419,19 +344,6 @@ function cloneMcpServerDraft(server: AcpMcpServerDraft): AcpMcpServerDraft {
 	};
 }
 
-function cloneAgentDraft(agent: AcpAgentDraft): AcpAgentDraft {
-	return {
-		...agent,
-	};
-}
-
-export function cloneSavedAcpDraftState(state: SavedAcpDraftState): SavedAcpDraftState {
-	return {
-		defaultAgentId: state.defaultAgentId,
-		agents: state.agents.map(cloneAgentDraft),
-	};
-}
-
 export function cloneSavedMcpDraftState(state: SavedMcpDraftState): SavedMcpDraftState {
 	return {
 		servers: state.servers.map(cloneMcpServerDraft),
@@ -484,19 +396,6 @@ export function serializeMcpServerDraft(server: AcpMcpServerDraft): AcpMcpServer
 		name: server.name.trim(),
 		url: requireValidMcpRemoteUrl(server.url, server.transport),
 		headers: parseKeyValueLines(server.headersText, "MCP headers"),
-	};
-}
-
-export function createAgentDraft(
-	name = "",
-	command = "",
-	launchMode: AcpAgentDraft["launchMode"] = "login_shell",
-): AcpAgentDraft {
-	return {
-		id: nextDraftId("agent"),
-		name,
-		command,
-		launchMode,
 	};
 }
 
@@ -988,16 +887,16 @@ export function getLlmProviderUsageBadges(
 		model: "__resolved__",
 	} as LlmModelConfig);
 	if (profile.kind === "embedding") {
-		return ["RAG 索引", "RAG 检索"];
+		return ["知识库索引", "知识库检索"];
 	}
 
 	if (profile.kind === "llm_chat_completions") {
-		return ["翻译", "RAG 问答", "Chat Completions"];
+		return ["翻译", "文档问答", "Chat Completions"];
 	}
 
 	const badges = profile.supportsMultimodal
-		? ["翻译", "RAG 问答", "OCR", "Responses"]
-		: ["翻译", "RAG 问答", "Responses"];
+		? ["翻译", "文档问答", "OCR", "Responses"]
+		: ["翻译", "文档问答", "Responses"];
 	if (profile.kind === "llm_responses_stateful") {
 		badges.push("Stateful");
 	}
@@ -1016,11 +915,11 @@ export function getLlmProviderUsageDescription(
 		model: "__resolved__",
 	} as LlmModelConfig);
 	if (profile.kind === "embedding") {
-		return "Embedding 条目只会出现在 RAG 的 embedding 列表，不会进入翻译 LLM、问答 LLM 或 OCR。";
+		return "Embedding 条目只会出现在知识库的 embedding 列表，不会进入翻译 LLM、问答 LLM 或 OCR。";
 	}
 
 	if (profile.kind === "llm_chat_completions") {
-		return "这个条目会走 OpenAI 兼容 chat/completions 协议，当前可供翻译和 RAG 问答复用；继续追问时始终回退到显式历史，不支持 response_id 续链，也不会进入 OCR 列表。";
+		return "这个条目会走 OpenAI 兼容 chat/completions 协议，当前可供翻译和文档问答复用；继续追问时始终回退到显式历史，不支持 response_id 续链，也不会进入 OCR 列表。";
 	}
 
 	const statefulText =
@@ -1028,10 +927,10 @@ export function getLlmProviderUsageDescription(
 			? "这是 responses 的 stateful 版本，继续追问时会优先复用上一轮 response_id。"
 			: "这是 responses 的 stateless 版本，继续追问时不会复用上一轮 response_id，而是回退到显式历史。";
 	if (profile.supportsMultimodal) {
-		return `这个条目会走 OpenAI 兼容 responses 协议，当前可供翻译、RAG 问答和 OCR 复用。${statefulText}`;
+		return `这个条目会走 OpenAI 兼容 responses 协议，当前可供翻译、文档问答和 OCR 复用。${statefulText}`;
 	}
 
-	return `这个条目会走 OpenAI 兼容 responses 协议，当前可供翻译和 RAG 问答复用；启用多模态后才会进入 OCR 列表。${statefulText}`;
+	return `这个条目会走 OpenAI 兼容 responses 协议，当前可供翻译和文档问答复用；启用多模态后才会进入 OCR 列表。${statefulText}`;
 }
 
 export function getLlmProviderModelPlaceholder(
@@ -1081,16 +980,6 @@ function requireValidMcpRemoteUrl(url: string, transport: Exclude<McpTransport, 
 	return url.trim();
 }
 
-export function buildSavedAcpDraftState(
-	agents: AcpAgentDraft[],
-	defaultAgentId: string | null,
-): SavedAcpDraftState {
-	return cloneSavedAcpDraftState({
-		agents,
-		defaultAgentId,
-	});
-}
-
 export function buildSavedMcpDraftState(
 	servers: AcpMcpServerDraft[],
 	builtin: BuiltinMcpConfig,
@@ -1112,17 +1001,6 @@ export function buildSavedRagDraftState(settings: RagSettings): SavedRagDraftSta
 		sourceDirectories: settings.sourceDirectories,
 		ignoreGlobs: settings.ignoreGlobs,
 		embeddingModelId: settings.embeddingModelId,
-	});
-}
-
-export function buildAcpDraftSnapshot(agents: AcpAgentDraft[]) {
-	return JSON.stringify({
-		agents: agents.map((agent) => ({
-			id: agent.id,
-			name: agent.name,
-			command: agent.command,
-			launchMode: agent.launchMode,
-		})),
 	});
 }
 
@@ -1205,26 +1083,6 @@ export function buildRagDraftSnapshot(settings: RagSettings) {
 		ignoreGlobs: settings.ignoreGlobs,
 		embeddingModelId: settings.embeddingModelId,
 	});
-}
-
-export function findFirstAcpIssue(agents: AcpAgentDraft[]): AcpIssueFocusTarget | null {
-	for (const agent of agents) {
-		if (!agent.name.trim()) {
-			return {
-				agentId: agent.id,
-				fieldKey: "name",
-			};
-		}
-
-		if (!agent.command.trim()) {
-			return {
-				agentId: agent.id,
-				fieldKey: "command",
-			};
-		}
-	}
-
-	return null;
 }
 
 export function findFirstMcpIssue(servers: AcpMcpServerDraft[]): McpIssueFocusTarget | null {
@@ -1321,37 +1179,6 @@ export function findFirstLlmIssue(
 	}
 
 	return null;
-}
-
-export function validateAcpAgents(agents: AcpAgentDraft[]): AcpDraftValidation {
-	const agentIssues: Record<string, string[]> = {};
-	const agentFieldIssues: Record<string, FieldIssueMap<AcpFieldKey>> = {};
-	let totalIssues = 0;
-
-	agents.forEach((agent, agentIndex) => {
-		const currentAgentIssues: string[] = [];
-		const currentAgentFieldIssues: FieldIssueMap<AcpFieldKey> = {};
-		if (!agent.name.trim()) {
-			currentAgentIssues.push(`第 ${agentIndex + 1} 个 Pi Agent 缺少名称。`);
-			currentAgentFieldIssues.name = "请输入 Agent 名称。";
-		}
-		if (!agent.command.trim()) {
-			currentAgentIssues.push(`第 ${agentIndex + 1} 个 Pi Agent 缺少启动命令。`);
-			currentAgentFieldIssues.command = "请输入启动命令。";
-		}
-
-		if (currentAgentIssues.length > 0) {
-			agentIssues[agent.id] = currentAgentIssues;
-			agentFieldIssues[agent.id] = currentAgentFieldIssues;
-			totalIssues += currentAgentIssues.length;
-		}
-	});
-
-	return {
-		totalIssues,
-		agentIssues,
-		agentFieldIssues,
-	};
 }
 
 export function validateLlmSettings(
@@ -1456,8 +1283,8 @@ export function validateRagSettings(
 			providerCanHandleRagEmbedding(provider, settings.embeddingModelId),
 		)
 	) {
-		issues.push("RAG 选择的 embedding 模型不存在，或者没有启用 embedding 能力。");
-		fieldIssues.embeddingModelId ??= "当前选择的 Embedding 条目不可用于 RAG。";
+		issues.push("知识库选择的 embedding 模型不存在，或者没有启用 embedding 能力。");
+		fieldIssues.embeddingModelId ??= "当前选择的 Embedding 条目不可用于知识库。";
 	}
 
 	return {

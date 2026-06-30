@@ -442,7 +442,7 @@ export function LlmSettingsSection({
 		: "供应商预设只填入口和默认 Base URL，不保存 API Key。";
 	const providerKindSummary = selectedBuiltinLlmTemplateModel
 		? `命中 ${selectedBuiltinLlmTemplate?.displayName ?? "预设"} 元数据，调用方式已自动回填。`
-		: "决定翻译、问答、OCR 和 RAG Embedding 是否能选用这个模型。";
+		: "决定翻译、问答、OCR 和知识库 Embedding 是否能选用这个模型。";
 	const saveStatusLabel = llmHasUnsavedChanges ? "草稿未保存" : "已写入配置";
 	const saveStatusDetail =
 		selectedProviderIssueCount > 0 ? `${selectedProviderIssueCount} 个问题待修复` : "";
@@ -525,7 +525,7 @@ export function LlmSettingsSection({
 				},
 				{
 					key: "rag-embedding",
-					label: "RAG Embedding",
+					label: "知识库 Embedding",
 					tone: getAvailabilityToneForModel(selectedProviderHasModel, !isLlmModel),
 				},
 			]
@@ -560,7 +560,7 @@ export function LlmSettingsSection({
 			},
 			{
 				key: "rag-embedding",
-				label: "RAG",
+				label: "知识库",
 				tone: getAvailabilityToneForModel(hasModelName, !modelIsLlm),
 			},
 		];
@@ -585,7 +585,7 @@ export function LlmSettingsSection({
 							<span className="settings-section-kicker">开始配置</span>
 							<h3 className="settings-subsection-title">还没有 Provider 组</h3>
 							<span className="settings-help-text settings-help-text-tight">
-								先新增一个 Provider 组。翻译、文档问答、OCR 和 RAG 都会引用这里的具体模型。
+								先新增一个 Provider 组。翻译、文档问答、OCR 和知识库都会引用这里的具体模型。
 							</span>
 						</div>
 						<button className="settings-button" onClick={onAddLlmProvider} type="button">
@@ -1018,7 +1018,7 @@ export function LlmSettingsSection({
 													<div className="settings-llm-model-switcher-header">
 														<div className="settings-llm-model-switcher-copy">
 															<span className="settings-agent-meta">
-																组内模型会作为翻译、问答、OCR 或 RAG 的可选条目。
+																组内模型会作为翻译、问答、OCR 或知识库的可选条目。
 															</span>
 														</div>
 														<div className="settings-inline-actions settings-llm-model-actions">
