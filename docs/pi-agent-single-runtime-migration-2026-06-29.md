@@ -9,7 +9,7 @@ Wabity 不再作为通用 ACP client，也不再维护外部 `stdio` ACP agent �
 - 移除 `agent-client-protocol` 依赖。
 - 移除 `codex-acp` / `claude-agent-acp` / `opencode acp` 这类外部 agent 预设和命令启动配置。
 - 保留 launcher 轻量 RAG 问答，但它仍是短问答链路，不升级为 Pi session。
-- 保留全局 MCP 配置和内置 MCP server，用于 RAG / MCP 管理；第一阶段不把 MCP 自动桥接进 Pi SDK session。
+- 后续设计已更新：Wabity 不再暴露内置 MCP server；内置工具模块通过 Pi SDK ToolFactory 注入 Agent session。
 
 ## 2. 目标边界
 
@@ -27,7 +27,7 @@ Wabity 不再作为通用 ACP client，也不再维护外部 `stdio` ACP agent �
 
 1. 不保留 ACP 与 Pi SDK 双运行时 adapter。
 2. 不实现远程 Pi RPC 子进程模式，除非 in-process SDK 被实证证明不可用。
-3. 不在本阶段把全局 MCP server 自动转换成 Pi SDK custom tools。
+3. 全局 MCP server 不再作为 Wabity 对外能力；内置工具模块转为 Pi SDK ToolFactory 注入。
 4. 不把 RAG 问答历史和 Pi Agent session 历史混用。
 5. 不做未授权 UI 重设计，只做 ACP -> Pi Agent 所需的必要删除和重命名。
 
@@ -172,7 +172,7 @@ rust-analyzer diagnostics src-tauri --severity error
 1. `pi_agent_rust` 默认功能可能拉入与 Tauri 无关的 TUI 依赖：必须关闭 default features。
 2. in-process SDK 可能与 Wabity Tokio runtime、全局配置路径或 tracing 初始化有冲突：若实证失败，再评估 `SessionTransport::rpc_subprocess`，但这属于第二选择，不是双运行时。
 3. Pi SDK 的 provider 配置读取规则与 Wabity LLM provider 不同：第一阶段允许使用 Pi 自身配置，后续再决定是否把 Wabity 模型接入映射到 Pi provider。
-4. MCP bridge 不做会导致 Pi Agent session 暂时不能使用 Wabity 全局 MCP 清单：这是明确取舍，不能偷偷做半成品桥接。
+4. 后续调整已移除 Wabity loopback MCP server；Agent 工具必须通过 Pi SDK ToolFactory 显式注入，不能偷偷回退成 HTTP MCP bridge。
 5. 前端类型和文案迁移面大：必须优先保证编译和 IPC 契约一致，再做彻底命名清理。
 
 ## 9. 完成定义

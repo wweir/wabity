@@ -39,7 +39,7 @@
 - 需要显式保存的分组把保存、恢复已保存版本、定位问题动作收敛到主编辑区入口。
 - 分组标题和窗口头部不承载保存语义。
 - 输入密集分组优先使用紧凑状态 / 操作条，避免首屏再叠独立大卡。
-- 功能、知识库和扩展页可以在表单前展示只读依赖健康摘要。
+- 功能、知识库和 Agent 配置页可以在表单前展示只读依赖健康摘要。
 - 依赖健康摘要只说明跨页依赖风险和运行时回退，不承载保存、修复或校验定位动作。
 - MCP 必填字段和 `KEY=VALUE` 文本格式即时校验。
 - 字段级错误必须直接绑定到对应控件，通过 `aria-invalid` / `aria-describedby` 暴露给辅助技术。
@@ -92,15 +92,13 @@
 - “当前配置”摘要卡保持单层容器：当前 Embedding 作为主信息，目录数 / 忽略数 / 校验问题作为扁平事实列表。
 - 支持后缀和索引边界直接展示，不把扫描目录示例写成开发机路径；默认示例收敛为 `~/Documents`。
 
-## Extensions page UI
+## Agent settings page UI
 
-- 扩展页顶部展示 Agent 单运行时说明，下方维护 MCP 配置。
-- Agent 面板以说明为主：解释 session 由 Rust 后端通过 `pi::sdk` 创建，provider/model 优先复用文档问答模型，thinking/tools 等仍由 Pi SDK 自身配置决定。
-- Agent 面板顶部展示文档问答模型复用状态、Pi SDK provider 桥接状态和 MCP 不自动注入说明。
-- Agent 不展示外部 agent 安装卡片、命令模板、“选择 Agent”下拉或旧配置提示。
-- MCP 的已配置服务目录使用顶部两列卡片。
-- MCP 主区只在“当前服务”和“新建服务”两种模式里二选一，避免同时展示两个竞争主任务。
-- 内置 MCP 固定展示独立能力面板，直接管理运行状态、总开关、地址和模块级开关。
+- Agent 配置页顶部以普通 Agent session 说明为主，下方维护 Agent 工具配置。
+- Agent 面板说明配置边界：Wabity 必传 workspace；provider/model/api key 只在文档问答模型能安全映射到底层已知 provider 时传入，否则以 `settings.json` / `models.json` 为真相源。
+- Agent 面板可列出配置位置：`~/.pi/agent/settings.json`、项目 `.pi/settings.json` 和 `~/.pi/agent/models.json`；thinking、重试、压缩和最大工具迭代等运行时策略不由 Wabity 设置页写入。
+- 内置工具模块固定展示独立能力面板，直接管理总开关和模块级开关；禁止再显示本地 MCP endpoint、运行中状态或“暴露模块”文案。
+- 自定义 MCP 服务目录只作为 Agent 配置展示；文案必须说明 Wabity 不再把这些服务注入文档问答链路，也不作为本地代理对外转发。
 - 自定义服务目录是顶部双列选择区，不占常驻侧栏；窄窗口回退成单列。
 - 当前服务编辑区独占整行宽度，保证命令、地址、请求头和环境变量等长字段的可编辑空间。
 - MCP 远程“请求头”是按需填写的高级字段；帮助文案通过 `aria-describedby` 绑定到 textarea，并说明“何时填写”“每行一个 `KEY=VALUE`”和例子 `Authorization=Bearer <token>`。

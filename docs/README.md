@@ -36,7 +36,7 @@
 - [rag-document-ingestion-design-2026-03-26.md](/Users/wweir/Sites/Mine/wabity/docs/rag-document-ingestion-design-2026-03-26.md): 文档摄取、切分和索引边界
 - [rag-metadata-cache.md](/Users/wweir/Sites/Mine/wabity/docs/rag-metadata-cache.md): RAG 元数据缓存与 staged/active 切换语义
 - [rag-retrieval-optimization-2026-04-07.md](/Users/wweir/Sites/Mine/wabity/docs/rag-retrieval-optimization-2026-04-07.md): 启发式 query rewrite 与多查询召回优化
-- [rag-mcp-server.md](/Users/wweir/Sites/Mine/wabity/docs/rag-mcp-server.md): 内置 MCP server 的模块化设计
+- [agent-tools.md](/Users/wweir/Sites/Mine/wabity/docs/agent-tools.md): Agent 内置工具模块与 MCP 配置边界
 - [rag-answer-refactor-2026-03-30.md](/Users/wweir/Sites/Mine/wabity/docs/rag-answer-refactor-2026-03-30.md): 问答后端重构记录
 - [pi-agent-single-runtime-migration-2026-06-29.md](/Users/wweir/Sites/Mine/wabity/docs/pi-agent-single-runtime-migration-2026-06-29.md): 移除 ACP client、收敛到 Pi SDK 单运行时的执行方案
 - [acp-timeline-chronology-rework-2026-04-03.md](/Users/wweir/Sites/Mine/wabity/docs/acp-timeline-chronology-rework-2026-04-03.md): 旧 ACP transcript 按真实时序渲染的历史实现决策；Pi Agent timeline 只继承“真实时序”原则，不继承 ACP transport

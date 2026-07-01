@@ -13,7 +13,7 @@
 
 - 不启动 `stdio` ACP agent 进程
 - 不连接 `agent-client-protocol` crate
-- 不透传全局 MCP server 到 Pi Agent session；RAG 问答仍按自己的 MCP 规则工作
+- 不透传全局 MCP server 到 Pi Agent session；启用的 Wabity 内置工具模块通过 Pi SDK `ToolFactory` 注入新建 session
 - 不把 Pi Agent session 状态持久化进旧 `[acp].saved_sessions`
 - `set_session_mode` 和 `set_session_config_option` 只保留 IPC 兼容错误，Pi Agent 不支持 ACP mode/config option
 

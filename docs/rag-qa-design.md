@@ -9,13 +9,13 @@
 - 普通文本模式下，如果应用搜索没有弹出补全框，主动作默认回退到问答
 - 问答答案走 Markdown 渲染，引用通过独立 `References` 列表展示
 - 点击引用会通过 `open_document_reference(path)` 打开本地文件
-- v2 起，问答不再自动预注入 RAG 命中片段，而是给模型注入内置 `wabity.rag.query` / `wabity.read_file_lines` 和全局 HTTP/SSE MCP server，由模型自己发起工具调用；其中会显式排除 Wabity 自己的内置 loopback MCP，避免和本地 function tools 重复暴露同一批能力；`wabity.read_file_lines` 只允许读取当前 workspace 和显式配置的 RAG source roots
+- v2 起，问答不再自动预注入 RAG 命中片段，而是给模型注入内置 `wabity.rag.query` / `wabity.read_file_lines` ，由模型自己发起工具调用；Agent 配置页的 MCP 服务清单不参与文档问答；`wabity.read_file_lines` 只允许读取当前 workspace 和显式配置的 RAG source roots
 - v2.3 起，问答额外内置注入有副作用工具 `wabity.system.open`，用于显式“打开链接 / 文件 / 目录”的请求；它默认也出现在工具列表里，但运行时只有在当前问题明确要求打开时才允许真正执行，本地路径仍只允许落在当前 workspace 和显式配置的 RAG source roots 内
 - v2.3 起，`wabity.system.open` 的 tool description 会动态拼装当前宿主机的操作系统、版本，以及 PATH 上检测到的包管理器列表，降低模型对运行环境的硬编码假设
 - v2 起，launcher 会把最近几轮问答的 user/assistant 文本显式回传给后端，形成轻量多轮上下文；这仍然不是 ACP session
 - `Esc` 显式隐藏 launcher 时会把这份轻量多轮上下文连同当前输入、内联结果和当前激活 session 选择一起清掉，回到干净的 launcher 初始态；其它隐藏路径只隐藏窗口，继续保留上下文
 - v2 起，问答请求会显式打开 `parallel_tool_calls`，并在模型返回多个本地 function call 时并发执行，再把 tool output 回填给下一轮 `responses`
-- v2.1 起，问答同时支持 `chat/completions`、`responses stateless` 和 `responses stateful`；只有 `responses` 会继续注入 HTTP/SSE MCP server，且只注入当前运行成功的外部 HTTP/SSE server
+- v2.1 起，问答同时支持 `chat/completions`、`responses stateless` 和 `responses stateful`；`responses` 和 `chat/completions` 都只使用本地 function tools，不注入外部 MCP server
 - v2.2 起，问答后端新增独立模块 `question_answer_backend` 作为稳定函数入口；`AppState` 只负责装配依赖，`src-tauri/tests/` 可直接用该模块做集成测试
 
 ## 目标
@@ -23,7 +23,7 @@
 基于现有 RAG 向量索引和 MCP 配置，补一条“从 launcher 直接提问”的问答链路：
 
 - 用户在 launcher 输入问题
-- 系统把读文件、RAG Query、受限 opener 和可直连的 MCP server 作为工具注入给模型
+- 系统把读文件、RAG Query和受限 opener 作为工具注入给模型
 - 模型按需自行检索、读文件、调用外部 MCP 工具
 - 工具结果回填后再生成答案
 - launcher 内联显示答案
@@ -366,11 +366,11 @@ v1 阈值可以先做静态配置，后续再按模型/距离度量调参。
 
 ## 状态
 
-- 2026-03-17：完成 v2 实现。问答已切到 `responses + tools`，默认注入 `wabity.rag.query` / `wabity.read_file_lines` 和全局 HTTP/SSE MCP server；launcher 也会回传最近多轮问答历史
+- 2026-03-17：完成 v2 实现。问答已切到 `responses + tools`，默认注入 `wabity.rag.query` / `wabity.read_file_lines` ；launcher 也会回传最近多轮问答历史
 - 2026-03-17：问答请求显式发送 `stream=false`，并在兼容 provider 仍返回 SSE 事件流时回退解析 `response.completed`，避免状态栏只报 JSON 解析失败
 - 2026-03-17：`stdio` MCP 仍未接入问答链路；当前会跳过这类 server，保留给 ACP session 使用
 - 2026-03-18：收敛默认问答系统提示词，核心只保留“工具结果优先、多轮查证、禁止编造、证据不足直说”，减少和运行时规则的重复
-- 2026-03-18：问答协议扩成 `chat/completions`、`responses stateless` 和 `responses stateful` 三条链路；`chat/completions` 继续支持内置工具，但不再注入 MCP server
+- 2026-03-18：问答协议扩成 `chat/completions`、`responses stateless` 和 `responses stateful` 三条链路；两条链路都只使用内置 function tools，不再注入 MCP server
 - 2026-03-21：`responses stateful` 在首轮续问遇到 provider budget/context 限制时，会自动丢弃旧 `response_id`，回退到显式最近历史重试一次，降低长链续问失败概率
 - 2026-03-25：新增 `question_answer_backend` 公开入口；当前已用本地 mock `chat/completions` server 补上脱离 `AppState` 的问答后端集成测试，验证 builtin `wabity.read_file_lines` 工具回路
 - 2026-03-26：RAG 建索引已先支持 `.docx`；索引侧会把 `docx` 规范化成 Markdown 风格文本后再分块，问答里的 `wabity.read_file_lines` 也同步复用这条抽取逻辑回读规范化文本

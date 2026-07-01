@@ -8,7 +8,7 @@
 - `listBuiltinLlmProviderTemplates`：返回只读内置 LLM 供应商模板目录，供设置页展示注册引导、默认接入点和模型拉取入口说明。
 - `scanRagSources`：用当前草稿立即触发一次知识库全量扫描，返回 LanceDB 路径和统计结果。
 - `getShortcut` / `setShortcut`：读取和更新快捷键。
-- `getMcpServers` / `setMcpServers`：读取和更新全局 MCP server 清单。
+- `getMcpServers` / `setMcpServers`：读取和更新 Agent 工具配置里的 MCP 服务清单与内置工具模块开关。
 
 设置页不解释配置文件路径或格式；持久化细节由 Rust `ConfigStore` 负责。
 
@@ -89,12 +89,14 @@
 - 翻译 LLM 和问答 LLM 直接服务 launcher 的翻译 / 文档问答链路。
 - Agent session 会优先复用功能页的文档问答模型。
 - 只有当该模型所属 provider 能安全映射到 Pi SDK 已知 provider（OpenAI / OpenRouter / DeepSeek / Ollama / SiliconFlow）时才自动传入 SDK。
-- 其它 provider 或缺失问答模型时，Agent 回退到 Pi SDK 自身配置。
+- 其它 provider 或缺失问答模型时，Agent 回退到 Pi 自身配置：全局 `~/.pi/agent/settings.json`、项目 `.pi/settings.json` 以及自定义模型 `~/.pi/agent/models.json`。
+- Wabity 当前只传入 workspace，并在可桥接时传入 provider / model / api key；`defaultThinkingLevel`、重试、压缩、transport 和最大工具迭代等 Pi 运行时策略不由 Wabity 设置页写入。
 - Agent 面板只展示运行时说明，不提供独立保存动作。
 - Wabity 不再维护多个外部 agent 命令目录、启动模式或安装预设。
-- 全局 MCP 清单当前不自动注入 Agent session；后续若要注入 Pi session，必须通过 Pi SDK `ToolFactory` 明确建模。
+- 内置工具模块会通过 Pi SDK `ToolFactory` 注入新建 Agent session；Wabity 不再启动本地 MCP endpoint，也不向外提供 MCP server。
+- 自定义 MCP 服务清单只作为 Agent 配置保存；launcher 文档问答链路不读取该清单。
 - MCP 服务支持 `stdio`、`http`、`sse`。
 - `stdio` 使用“每行一个参数 / KEY=VALUE env”。
 - `http` / `sse` 使用“服务地址 + 每行一个 KEY=VALUE header”。
 - 远程 URL 必须是完整的 `http://` / `https://` 地址。
-- 内置 MCP 不伪装成普通服务草稿；保存时同时写回自定义服务清单和内置 MCP 模块配置。
+- 内置工具模块不伪装成普通服务草稿；保存时同时写回自定义服务清单和内置工具模块配置。

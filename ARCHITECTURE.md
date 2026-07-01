@@ -30,7 +30,7 @@
 4. 创建并管理内嵌 Agent session
 5. 翻译当前选中文本；无选中时回退到截图 OCR 后再翻译
 6. 维护少量文本剪贴板历史，并支持回贴到外部应用
-7. 在设置页维护快捷键、外观、通知、功能绑定、模型资源、知识库、扩展（Agent 运行时说明和 MCP）配置
+7. 在设置页维护快捷键、外观、通知、功能绑定、模型资源、知识库、Agent 配置（会话与工具能力）
 
 明确非目标：
 
@@ -188,14 +188,14 @@
 1. launcher 触发 `rag_answer`
 2. 后端组装问答上下文、RAG 工具、受限文件读取与 opener 能力
 3. 兼容 `responses` / `chat/completions` 调用路径
-4. 按需执行本地 function tools 与外部 HTTP/SSE MCP server
+4. 按需执行本地 function tools
 5. 返回结构化答案、引用和进度事件
 
 约束：
 
 - 这是轻量多轮问答，不是第二套长期 agent session
 - 本地读文件和 opener 都受 workspace / source roots 白名单约束
-- 问答运行时可以使用 MCP，但不会把 Agent session 模型强塞进 launcher
+- 问答运行时不读取 Agent 配置页的 MCP 服务清单，也不启动 Wabity loopback MCP server
 
 ### 6.3 Agent Session
 
@@ -210,8 +210,8 @@ Agent 链路是独立运行时：
 
 - Agent session 与轻量问答的状态、模型和输出面完全分开
 - transcript 顺序由运行时事件决定，前端不重排成摘要模板
-- session 级 provider / model 优先来自 Wabity 的文档问答 LLM 配置；后端只在 provider 能安全映射到 Pi SDK 已知 provider 时桥接，否则回退到 Pi SDK 自身配置。thinking、tools 和最大工具迭代次数仍由 Pi SDK 配置决定
-- 全局 MCP 清单第一阶段不自动桥接进 Agent session；RAG 问答仍可按自身规则使用 MCP
+- session 级 provider / model 优先来自 Wabity 的文档问答 LLM 配置；后端只在 provider 能安全映射到 Pi SDK 已知 provider 时桥接，否则回退到 Pi 自身配置（全局 `~/.pi/agent/settings.json`、项目 `.pi/settings.json`、自定义模型 `~/.pi/agent/models.json`）。thinking、重试、压缩、transport 和最大工具迭代次数仍由 Pi SDK / Pi 配置决定，Wabity 设置页当前不写入这些策略
+- 内置工具模块通过 Pi Rust SDK `ToolFactory` 注入新建 Agent session；Wabity 不再启动本地 loopback MCP server，也不再把全局 MCP 清单注入 launcher 轻量问答链路
 
 ### 6.4 截图 OCR 与 Review
 
@@ -255,7 +255,7 @@ Agent 链路是独立运行时：
 - 快捷键重注册
 - macOS Dock 展示策略更新
 - 自启动状态与系统登录项对账
-- OCR / LLM / 知识库 / MCP 运行时配置更新；扩展页 Agent 面板展示内嵌运行时说明，并明确 Agent 会优先复用文档问答模型、无法映射时回退到底层 SDK 配置
+- OCR / LLM / 知识库 / Agent 工具配置更新；Agent 配置页展示内嵌 session 说明，并明确 Agent 会优先复用文档问答模型、无法映射时回退到底层 SDK 配置
 - 截图 backend 与 Screen Recording 权限状态变化后的运行时反馈
 
 其中 LLM 配置明确拆成两层：
@@ -330,7 +330,7 @@ RAG 建索引固定分两层：
 4. 平台能力统一下沉到 `infrastructure`，业务语义统一收敛到 `services`
 5. RAG 使用 USearch + SQLite 组合：SQLite 作为真相源，USearch 只负责 ANN 检索
 6. 配置条目先表达“接入点和能力”，运行时用途资格由后端统一投影，不让前端各自猜
-7. 内置 MCP server 是统一 loopback endpoint + 模块注册，不伪装成多条普通外部 server
+7. 内置工具模块通过 Pi SDK `ToolFactory` 注入 Agent session；不再对外暴露 Wabity loopback MCP server
 8. 常驻索引和缓存默认优先收紧内存占用，再考虑额外吞吐；预热轮询、重复字符串和大批次中间态都不是默认选项
 9. PDF 摄取优先保留可验证的可读文本，再决定是否索引；“抽到了非空字符串”不等于“可用于 embedding 的文本”
 10. 截图 OCR 主路径是 ScreenCaptureKit region capture 并由本地编码层落盘 + 用户确认边界；截图落盘由本地 ImageIO 完成，高级 OCR、vision prompt 或屏幕解析仍必须作为后续显式入口处理；没有 review UI 的自动推断不是可接受的主路径

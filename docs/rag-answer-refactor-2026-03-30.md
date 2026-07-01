@@ -34,11 +34,11 @@
 3. `src-tauri/src/services/rag_answer/parsing.rs`
    承接命令载荷提取、open intent 判断、JSON 参数解析与展示辅助。
 4. `src-tauri/src/services/rag_answer/tool_catalog.rs`
-   承接内置 tool schema、MCP tool 注入、host context 探测与兼容目录裁剪。
+   承接内置 function tool schema、host context 探测与兼容目录裁剪。
 5. `src-tauri/src/services/rag_answer/tool_execute.rs`
    承接内置工具执行、路径白名单、citation 构造。
 6. `src-tauri/src/services/rag_answer/protocol_responses.rs`
-   承接 `responses` 请求构造、响应解析、MCP trace 提取、兼容性缓存。
+   承接 `responses` 请求构造、响应解析、function tool 兼容性缓存。
 7. `src-tauri/src/services/rag_answer/protocol_chat.rs`
    承接 `chat/completions` 请求构造、消息构建与 tool call 解析。
 8. 收缩 `src-tauri/src/services/rag_answer.rs`
@@ -61,7 +61,7 @@
   - `conversation_state` 承接续链状态与 scope 计算
   - `result` 承接 payload 与 citation 编号
   - `parsing` 承接命令载荷、open intent 与展示辅助
-  - `tool_catalog` 承接 tool schema、MCP 注入与 host context
+  - `tool_catalog` 承接 tool schema 与 host context
   - `tool_execute` 承接内置工具执行与路径白名单
   - `protocol_responses` / `protocol_chat` 承接各自协议请求与解析
 

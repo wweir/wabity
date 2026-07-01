@@ -5,21 +5,21 @@
 设置页一级导航固定为：
 
 ```text
-通用 / 功能 / 模型 / 知识库 / 扩展 / 关于
+通用 / 功能 / 模型 / 知识库 / Agent 配置 / 关于
 ```
 
-技术词如 RAG、MCP、Agent、protocol、embedding 可以保留在副标题、帮助文本、校验消息和设计文档里；不要作为日常设置的一层主导航标签。
+技术词如 RAG、MCP、Agent、protocol、embedding 可以保留在副标题、帮助文本、校验消息和设计文档里；Agent 配置是唯一允许在一级导航保留 Agent 术语的分组，因为它直接控制内嵌 Agent session 和工具能力。
 
 ## 分组职责
 
-| Section | Responsibility                                                                                |
-| ------- | --------------------------------------------------------------------------------------------- |
-| 通用    | Appearance、快捷键、通知、开机启动、Dock / 窗口行为。                                         |
-| 功能    | Feature bindings：翻译、文档问答、OCR provider/model、提示词。                                |
-| 模型    | Provider resources：Base URL、API key、protocol、模型目录、模型类型、多模态 / stateful 能力。 |
-| 知识库  | Local document knowledge base：Embedding、扫描目录、忽略规则、索引重建和扫描状态。            |
-| 扩展    | Runtime extensions：内嵌 Agent runtime 说明、内置 MCP、自定义全局 MCP 服务。                  |
-| 关于    | 版本、项目信息、依赖和更新信息。                                                              |
+| Section    | Responsibility                                                                                |
+| ---------- | --------------------------------------------------------------------------------------------- |
+| 通用       | Appearance、快捷键、通知、开机启动、Dock / 窗口行为。                                         |
+| 功能       | Feature bindings：翻译、文档问答、OCR provider/model、提示词。                                |
+| 模型       | Provider resources：Base URL、API key、protocol、模型目录、模型类型、多模态 / stateful 能力。 |
+| 知识库     | Local document knowledge base：Embedding、扫描目录、忽略规则、索引重建和扫描状态。            |
+| Agent 配置 | Embedded Agent：内嵌 Agent session 说明、模型桥接边界、内置工具模块和自定义 MCP 服务配置。    |
+| 关于       | 版本、项目信息、依赖和更新信息。                                                              |
 
 ## 依赖模型
 
@@ -32,22 +32,23 @@
   -> Agent: embedded session may reuse the document QA model when safely bridgeable
 ```
 
-MCP 是运行时扩展路径，不是模型配置路径：
+Agent 工具是运行时工具路径，不是模型配置路径：
 
 ```text
-扩展 / MCP
-  -> serves global MCP management
-  -> may be bridged into Agent sessions later through an explicit Pi SDK ToolFactory design
-  -> is not automatically injected into Agent sessions in the current phase
+Agent 配置 / MCP
+  -> configures Agent-scoped tool modules and saved MCP service entries
+  -> injects Wabity built-in tool modules into new Agent sessions through Pi SDK ToolFactory
+  -> is not consumed by launcher document QA
+  -> does not expose a Wabity loopback MCP endpoint
 ```
 
 ## 当前实现约束
 
-- 用户可见 `扩展` 仍由内部 `mcp` section id 承载；旧前端 `acp` settings section id 已从导航类型移除。
+- 用户可见 `Agent 配置` 仍由内部 `mcp` section id 承载；旧前端 `acp` settings section id 已从导航类型移除。
 - 后端 ACP 兼容命名不由本次信息架构调整改变。
 - OCR 属于 `功能` 页，不属于 `通用` 页。
-- Agent runtime 是只读说明面板，不是和功能 / 模型 / 知识库等价的可编辑配置页。
-- 全局 MCP 清单当前不自动注入 Agent session。
+- Agent session 说明面板不提供保存动作；内置工具模块和自定义 MCP 服务是该页的可编辑配置。
+- 自定义 MCP 服务清单当前不被 launcher 文档问答读取；Wabity 也不再对外暴露本地 MCP endpoint。
 
 ## 页面结构模式
 
@@ -102,9 +103,9 @@ MCP 是运行时扩展路径，不是模型配置路径：
 - 顶部展示 Embedding 依赖健康摘要和索引重建提示。
 - 有扫描目录时必须选择可用 Embedding 条目。
 
-### 扩展
+### Agent 配置
 
-- 顶部展示 Agent 单运行时说明。
-- 下方维护内置 MCP 和自定义全局 MCP 服务。
-- Agent 面板不提供保存动作。
-- MCP 保存动作在 MCP 主编辑区内，校验错误定位到第一个非法字段。
+- 顶部展示 Agent session 说明。
+- 下方维护内置工具模块和自定义 MCP 服务配置。
+- Agent 说明面板不提供保存动作。
+- MCP / 工具保存动作在主编辑区内，校验错误定位到第一个非法字段。

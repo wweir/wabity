@@ -20,7 +20,7 @@
 - `clipboard` 只负责系统剪贴板读写、平台粘贴快捷键和 `clipboard-history.toml` 落盘，不负责 pin 规则、最近项裁剪或监听轮询策略；这些业务语义仍在服务层
 - 单实例约束在 Tauri 入口层完成；`window` 只提供“把已有 launcher 幂等拉到前台”的 reveal 能力，不负责自己做进程互斥
 - macOS 下 Dock 展示与否是应用级策略，不是 `window` 模块的显隐职责；launcher 启动时和设置保存后都必须按 `general.showInDock` 同步应用激活策略与 Dock 图标可见性，避免窗口已经是工具面板但应用仍作为普通前台程序挂在 Dock，或用户明明要求显示 Dock 却始终不生效
-- `config` 统一将用户配置写入用户配置目录下的 `wabity/config.toml`，其中包含翻译提示词、ACP agent 与全局 MCP 清单；workspace 最近目录历史写入 `wabity/workspace-history.toml`
+- `config` 统一将用户配置写入用户配置目录下的 `wabity/config.toml`，其中包含翻译提示词、ACP agent 兼容字段与 Agent MCP 服务清单；workspace 最近目录历史写入 `wabity/workspace-history.toml`
 - `config` 里的快捷键字段当前只保留 `toggle_launcher` / `ocr_translate` 两个稳定键名；运行时访问统一经 `ShortcutKey + ShortcutConfig::{get,set}`，不要在其他模块重复手写字符串分发
 - 快捷键配置值和快捷键运行时注册状态是两回事；启动阶段和设置保存后都必须把当前注册结果投影回前端，供设置页总览和入口故障提示消费，不能让前端只看 `config.toml` 猜是否可用
 - `config` 负责 TOML 序列化、原子 `safe_write`、磁盘读写和内存缓存；启动时由 `AppState::new` 先读取，再把配置投影到运行时状态
