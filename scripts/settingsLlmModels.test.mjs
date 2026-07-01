@@ -120,14 +120,8 @@ test("hydrateAppSettings backfills provider modelConfig from the first model whe
 test("llm settings section computes capability state from the selected model id instead of provider default order", async () => {
 	const source = await readSource(llmSectionPath);
 
-	assert.match(
-		source,
-		/providerCanHandleOcr\(selectedLlmProvider,\s*selectedProviderModelId\)/,
-	);
-	assert.match(
-		source,
-		/providerIsLlmModel\(selectedLlmProvider,\s*selectedProviderModelId\)/,
-	);
+	assert.match(source, /providerCanHandleOcr\(selectedLlmProvider,\s*selectedProviderModelId\)/);
+	assert.match(source, /providerIsLlmModel\(selectedLlmProvider,\s*selectedProviderModelId\)/);
 	assert.match(
 		source,
 		/providerHasResponsesModel\(\s*selectedLlmProvider,\s*selectedProviderModelId/s,

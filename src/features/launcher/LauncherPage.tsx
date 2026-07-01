@@ -1497,7 +1497,6 @@ export function LauncherPage({
 		onDismiss: () => setWorkspacePickerOpen(false),
 	});
 
-
 	useDismissOnPointerDownOutside({
 		open: sessionPanelOpen,
 		triggerRef: sessionPanelTriggerRef,
@@ -2961,7 +2960,6 @@ export function LauncherPage({
 		},
 		[handleWorkspaceCrumbClick],
 	);
-
 
 	const handleCreateSessionClick = useCallback(() => {
 		void handleCreateSession();

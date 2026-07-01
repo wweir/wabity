@@ -1,6 +1,11 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 
-import type { AcpSessionDetail, AcpSessionMessage, RagRuntimeStatus, WorkspaceState } from "../../lib/tauri/types";
+import type {
+	AcpSessionDetail,
+	AcpSessionMessage,
+	RagRuntimeStatus,
+	WorkspaceState,
+} from "../../lib/tauri/types";
 import { ragAnswerActionDescriptor } from "./actionCatalog";
 import { parseSlashActionInput, type SuggestionMode } from "./query";
 import { formatWorkspacePath } from "./workspace";

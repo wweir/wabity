@@ -245,13 +245,11 @@ export function isRagAnswerStructuredPayload(
 	) {
 		return false;
 	}
-	if (
-		!(
-			candidate.reasoning === undefined ||
-			candidate.reasoning === null ||
-			typeof candidate.reasoning === "string"
-		)
-	) {
+	if (!(
+		candidate.reasoning === undefined ||
+		candidate.reasoning === null ||
+		typeof candidate.reasoning === "string"
+	)) {
 		return false;
 	}
 	if (!Array.isArray(candidate.citations) || !candidate.citations.every(isRagCitation)) {

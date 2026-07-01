@@ -4,14 +4,7 @@ import { MarkdownRenderer } from "./MarkdownRenderer";
 import { ThoughtDisclosure } from "./ThoughtDisclosure";
 
 type ActionKind =
-	| "tool-call"
-	| "tool-update"
-	| "plan"
-	| "mode"
-	| "config"
-	| "commands"
-	| "info"
-	| "error";
+	"tool-call" | "tool-update" | "plan" | "mode" | "config" | "commands" | "info" | "error";
 
 function isStepMarkerAction(action: AcpActionEvent) {
 	return action.kind === "info" && /^第\s*\d+\s*步$/u.test(action.title.trim());

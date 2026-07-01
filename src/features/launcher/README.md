@@ -152,6 +152,6 @@
 - 轻量问答的结构化 payload 除了 `conversationState`、citation、action 和 tool 摘要外，还允许带一段可选 `reasoning`；只有在 provider 同时给出明确正文和 reasoning 时，前端才把这段 reasoning 接成次级 thought 折叠块，绝不能再把 reasoning 当主答案兜底展示；`chat/completions` 兼容层若把 thinking 作为 `content` 数组项或 `<think>...</think>` 片段返回，后端也必须先拆成 `primary_text + reasoning`
 - 翻译结果卡同样允许带一段次级 `reasoning`，并且必须复用和时间线一致的 thought disclosure 展示；它只能附着在明确译文之后，不能独立占据结果卡，也不能在没有 `primary_text` 时兜底展示成“译文”
 - 问答成功后，反馈区优先切到轻量对话历史，而不是只显示最后一张结果卡；assistant 内容仍走 Markdown 渲染，便于继续追问
-- 问答请求会显式携带工具列表：无论 `responses` 还是 `chat/completions`，都会注入内置 `wabity.read_file_lines`、`wabity.read_document_excerpt`、`wabity.rag.query` 和 `wabity.system.open`；只有 `responses` 额外注入全局 MCP 里的 HTTP/SSE server。模型可以在单轮里并发调用多个工具，页面不再只显示压缩摘要，而是直接复用 `SessionTimeline` 的 action bar 渲染“第 N 步”、tool call 输入和 tool result 输出
+- 问答请求会显式携带工具列表：无论 `responses` 还是 `chat/completions`，都只注入内置 function tools：`wabity.read_file_lines`、`wabity.read_document_excerpt`、`wabity.rag.query` 和 `wabity.system.open`。模型可以在单轮里并发调用多个工具，页面不再只显示压缩摘要，而是直接复用 `SessionTimeline` 的 action bar 渲染“第 N 步”、tool call 输入和 tool result 输出
 - `wabity.system.open` 属于有副作用工具：只有当前问题明确要求“打开”时后端才会放行执行，本地路径仍只允许当前 workspace 和显式配置的 RAG source roots；该工具说明还会动态带上宿主机 OS / version / package managers，避免模型误判平台环境
 - 本地文件引用点击打开需要单独命令；不要把桌面 opener 逻辑混进 `MarkdownRenderer`
