@@ -62,7 +62,7 @@ export {
 	getAcpAgents,
 	getAcpMcpServers,
 	getAppSettings,
-	getBuiltinMcpServerStatus,
+	getBuiltinAgentToolStatus,
 	getShortcut,
 	getShortcutRuntimeStatus,
 	listBuiltinLlmProviderTemplates,

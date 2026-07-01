@@ -3,7 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
 	browserAppSettings,
 	browserBuiltinLlmProviderTemplates,
-	browserBuiltinMcpServerStatus,
+	browserBuiltinAgentToolStatus,
 	defaultRagIgnoreGlobs,
 } from "./defaults";
 import { hydrateAppSettings } from "./settingsNormalization";
@@ -20,7 +20,7 @@ import type {
 	AcpMcpServerConfig,
 	AppSettings,
 	BuiltinLlmProviderTemplate,
-	BuiltinMcpServerStatus,
+	BuiltinAgentToolStatus,
 	LlmProviderConfig,
 	LlmProviderModelEntry,
 	LlmSettings,
@@ -83,8 +83,8 @@ export async function setAppSettings(settings: AppSettings): Promise<AppSettings
 	return hydrateAppSettings(await invokeOrDefault("set_app_settings", settings, { settings }));
 }
 
-export async function getBuiltinMcpServerStatus(): Promise<BuiltinMcpServerStatus> {
-	return invokeOrDefault("get_builtin_mcp_server_status", browserBuiltinMcpServerStatus);
+export async function getBuiltinAgentToolStatus(): Promise<BuiltinAgentToolStatus> {
+	return invokeOrDefault("get_builtin_agent_tool_status", browserBuiltinAgentToolStatus);
 }
 
 export async function listLlmProviderModels(

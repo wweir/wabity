@@ -14,7 +14,7 @@ export const settingsSections: ReadonlyArray<{
 	{ id: "prompts", label: "功能" },
 	{ id: "llm", label: "模型" },
 	{ id: "rag", label: "知识库" },
-	{ id: "mcp", label: "扩展" },
+	{ id: "mcp", label: "Agent 配置" },
 	{ id: "about", label: "关于" },
 ] as const;
 
@@ -29,9 +29,9 @@ export const settingsQuickLinks: Readonly<Record<SettingsSectionId, readonly Set
 		llm: [],
 		rag: [],
 		mcp: [
-			{ id: "extensions-agent", label: "Agent", hint: "运行时" },
-			{ id: "mcp-builtin", label: "内置 MCP", hint: "本机服务" },
-			{ id: "mcp-catalog", label: "全局 MCP", hint: "服务清单" },
+			{ id: "extensions-agent", label: "Agent", hint: "会话配置" },
+			{ id: "mcp-builtin", label: "内置工具", hint: "供 Agent 使用" },
+			{ id: "mcp-catalog", label: "MCP 服务", hint: "Agent 连接" },
 		],
 		about: [{ id: "about-overview", label: "关于 Wabity", hint: "版本与项目" }],
 	} as const;
@@ -248,8 +248,7 @@ const mcpTransportOptionsInternal = [
 		transport: "stdio",
 		label: "本地进程",
 		description: "通过命令启动 MCP 服务",
-		summary:
-			"适合本机已有命令行 MCP 服务的场景。Wabity 会把命令、参数和环境变量作为全局 MCP 条目保存。",
+		summary: "适合本机已有命令行 MCP 服务的场景。Wabity 只保存连接参数，供 Agent 配置使用。",
 		fieldsHint: "需要填写命令；可选填写参数和环境变量。",
 		example: "npx -y @modelcontextprotocol/server-filesystem ~/Desktop",
 	},
@@ -257,7 +256,7 @@ const mcpTransportOptionsInternal = [
 		transport: "http",
 		label: "HTTP",
 		description: "通过服务地址连接远程 MCP 服务",
-		summary: "适合已经部署好的远程 MCP 服务。保存后作为全局 MCP 服务条目，供支持 MCP 的链路读取。",
+		summary: "适合已经部署好的远程 MCP 服务。Wabity 不再把它注入文档问答链路。",
 		fieldsHint: "需要填写服务地址；可选填写请求头。",
 		example: "https://example.com/mcp",
 	},
@@ -265,7 +264,7 @@ const mcpTransportOptionsInternal = [
 		transport: "sse",
 		label: "SSE",
 		description: "通过 SSE 流连接远程 MCP 服务",
-		summary: "适合使用服务端事件流暴露能力的远程 MCP 服务，字段和 HTTP 类似，但连接方式是 SSE。",
+		summary: "适合使用服务端事件流暴露能力的远程 MCP 服务，字段和 HTTP 类似。",
 		fieldsHint: "需要填写服务地址；可选填写请求头。",
 		example: "https://example.com/sse",
 	},

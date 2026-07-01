@@ -1,5 +1,5 @@
 import type { Dispatch, KeyboardEvent as ReactKeyboardEvent, SetStateAction } from "react";
-import type { BuiltinMcpConfig, BuiltinMcpServerStatus } from "../../../lib/tauri/types";
+import type { BuiltinMcpConfig, BuiltinAgentToolStatus } from "../../../lib/tauri/types";
 import { AgentRuntimePanel } from "./AcpSettingsSection";
 import {
 	DISCARD_DRAFT_BUTTON_LABEL,
@@ -45,9 +45,7 @@ export interface McpSettingsSectionProps {
 	selectedMcpTransport: McpTransport;
 	setSelectedMcpTransport: Dispatch<SetStateAction<McpTransport>>;
 	builtinMcpConfig: BuiltinMcpConfig;
-	builtinMcpTransportMeta: ReturnType<typeof getMcpTransportMeta>;
-	builtinMcpServerStatus: BuiltinMcpServerStatus | null;
-	builtinMcpToggleDisabled: boolean;
+	builtinAgentToolStatus: BuiltinAgentToolStatus;
 	bindMcpFieldRef: BindMcpFieldRef;
 	bindMcpListOptionRef: (serverId: string) => (node: HTMLButtonElement | null) => void;
 	onSelectMcpServer: (serverId: string) => void;
@@ -85,9 +83,7 @@ export function McpSettingsSection({
 	selectedMcpTransport,
 	setSelectedMcpTransport,
 	builtinMcpConfig,
-	builtinMcpTransportMeta,
-	builtinMcpServerStatus,
-	builtinMcpToggleDisabled,
+	builtinAgentToolStatus,
 	bindMcpFieldRef,
 	bindMcpListOptionRef,
 	onSelectMcpServer,
@@ -110,11 +106,6 @@ export function McpSettingsSection({
 			: mcpHasUnsavedChanges
 				? "当前 MCP 草稿尚未写回配置。"
 				: "MCP 配置已与本地 config.toml 同步。";
-	const builtinStatusLabel = builtinMcpServerStatus?.running ? "运行中" : "未运行";
-	const builtinEndpoint =
-		builtinMcpServerStatus?.server.transport === "http"
-			? builtinMcpServerStatus.server.url
-			: "http://127.0.0.1:43189/internal/mcp";
 
 	return (
 		<section
@@ -140,21 +131,21 @@ export function McpSettingsSection({
 				>
 					<div className="settings-editor-card-header">
 						<div className="settings-acp-sidebar-copy">
-							<span className="settings-section-kicker">内置能力</span>
-							<h3 className="settings-subsection-title">Wabity 内置 MCP</h3>
+							<span className="settings-section-kicker">Agent 工具</span>
+							<h3 className="settings-subsection-title">内置工具模块</h3>
 						</div>
 					</div>
 					<label className="settings-mcp-builtin-toggle-row">
 						<span className="settings-mcp-builtin-toggle-copy">
-							<strong className="settings-agent-name">启用内置 MCP 工具</strong>
+							<strong className="settings-agent-name">启用内置工具</strong>
 							<span className="settings-help-text settings-help-text-tight">
-								启用后，下面勾选的模块会通过同一个本地 MCP 服务暴露给支持 MCP 的链路。
+								启用后，勾选的模块会作为 Agent session 内的工具注册；Wabity 不再暴露本地 MCP
+								endpoint。
 							</span>
 						</span>
 						<input
 							checked={builtinMcpConfig.enabled}
 							className="settings-toggle"
-							disabled={builtinMcpToggleDisabled}
 							onChange={(event) => onToggleBuiltinMcp(event.target.checked)}
 							type="checkbox"
 						/>
@@ -162,43 +153,25 @@ export function McpSettingsSection({
 					<div className="settings-mcp-builtin-meta">
 						<div className="settings-mcp-list-item-badges">
 							<span className="settings-status-chip">内置</span>
-							<span className="settings-mcp-badge">{builtinMcpTransportMeta.label}</span>
-							<span
-								className={`settings-status-chip ${
-									builtinMcpServerStatus?.running
-										? "settings-status-chip-success"
-										: "settings-status-chip-warn"
-								}`}
-							>
-								{builtinStatusLabel}
-							</span>
 							<span className="settings-agent-meta">
 								{builtinMcpConfig.enabledModules.length} 个模块已启用
 							</span>
 						</div>
-						<div className="settings-mcp-endpoint-block">
-							<span className="settings-mcp-endpoint-label">本地服务地址</span>
-							<code className="settings-install-guide-command settings-mcp-endpoint-code">
-								{builtinEndpoint}
-							</code>
-						</div>
 						<span className="settings-help-text settings-help-text-tight">
 							{builtinMcpConfig.enabled
-								? "保存后会更新本机内置 MCP 服务的模块清单。"
-								: builtinMcpServerStatus?.running
-									? "服务已经就绪；开启后会把下面勾选的模块挂到这个本地地址。"
-									: builtinMcpServerStatus?.lastError || "桌面端启动后会自动暴露这个本地地址。"}
+								? "保存后，新建 Agent session 会加载当前模块清单。"
+								: "关闭后，新建 Agent session 不会加载 Wabity 内置工具。"}
 						</span>
 					</div>
 					<div className="settings-mcp-builtin-modules-wrap">
 						<div className="settings-mcp-builtin-modules-header">
-							<strong className="settings-agent-mcp-title">可暴露模块</strong>
+							<strong className="settings-agent-mcp-title">可用模块</strong>
 							<span className="settings-agent-meta">
-								按模块选择，不再把内置能力伪装成普通服务条目。
+								按模块选择，工具只在 Agent session 内可见。
 							</span>
 						</div>
 						<div className="settings-mcp-builtin-modules">
-							{builtinMcpServerStatus?.availableModules.map((module) => (
+							{builtinAgentToolStatus.availableModules.map((module) => (
 								<label className="settings-mcp-builtin-module" key={module.key}>
 									<input
 										checked={builtinMcpConfig.enabledModules.includes(module.key)}
@@ -225,18 +198,18 @@ export function McpSettingsSection({
 				>
 					<div className="settings-editor-card-header">
 						<div className="settings-acp-sidebar-copy">
-							<span className="settings-section-kicker">已配置</span>
-							<h3 className="settings-subsection-title">自定义服务目录</h3>
+							<span className="settings-section-kicker">Agent MCP</span>
+							<h3 className="settings-subsection-title">自定义 MCP 服务</h3>
 						</div>
 					</div>
 					<p className="settings-help-text settings-help-text-tight">
-						先在这里选当前要编辑的服务，下面的详情区会独占整行宽度，避免长字段被挤窄。
+						这些服务只作为 Agent 配置保存，不再被文档问答链路读取，也不会由 Wabity 对外转发。
 					</p>
 					{regularMcpServers.length === 0 ? (
 						<div className="settings-empty-panel settings-empty-panel-subtle">
 							<strong className="settings-empty-title">还没有自定义服务</strong>
 							<span className="settings-help-text settings-help-text-tight">
-								只有接入第三方 MCP 服务时才需要新建；内置 MCP 在上面单独管理。
+								只有需要让 Agent 连接第三方 MCP 服务时才需要新建；内置工具在上面单独管理。
 							</span>
 						</div>
 					) : (

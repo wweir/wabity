@@ -113,10 +113,7 @@ export interface PromptsSettings {
 
 export type LlmProviderProtocol = "responses" | "chat_completions";
 export type BuiltinLlmTemplateModelType =
-	| "llm"
-	| "embedding"
-	| "image_generation"
-	| "video_generation";
+	"llm" | "embedding" | "image_generation" | "video_generation";
 export type BuiltinLlmTemplateModelProtocol = "responses" | "chat_completions" | "unsupported";
 export type BuiltinLlmTemplateUseCase = "translation" | "rag_answer" | "ocr" | "embedding";
 
@@ -235,10 +232,7 @@ export interface BuiltinMcpModuleStatus {
 	toolCount: number;
 }
 
-export interface BuiltinMcpServerStatus {
-	server: AcpMcpServerConfig;
-	running: boolean;
-	lastError: string | null;
+export interface BuiltinAgentToolStatus {
 	availableModules: BuiltinMcpModuleStatus[];
 }
 
@@ -287,9 +281,7 @@ export interface AcpMcpServerSseConfig {
 }
 
 export type AcpMcpServerConfig =
-	| AcpMcpServerStdioConfig
-	| AcpMcpServerHttpConfig
-	| AcpMcpServerSseConfig;
+	AcpMcpServerStdioConfig | AcpMcpServerHttpConfig | AcpMcpServerSseConfig;
 
 export type AcpAgentLaunchMode = "direct" | "login_shell" | "interactive_shell";
 

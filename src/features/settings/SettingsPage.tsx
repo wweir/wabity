@@ -7,7 +7,6 @@ import {
 	chooseDirectory,
 	getAppSettings,
 	getAcpMcpServers,
-	getBuiltinMcpServerStatus,
 	getShortcut,
 	getWorkspace,
 	hideLauncherWindow,
@@ -18,11 +17,11 @@ import {
 	setShortcut,
 	defaultRagIgnoreGlobs,
 } from "../../lib/tauri/client";
+import { browserBuiltinAgentToolStatus } from "../../lib/tauri/client/defaults";
 import type {
 	AppSettings,
 	AppearanceSettings,
 	BuiltinMcpConfig,
-	BuiltinMcpServerStatus,
 	BuiltinLlmProviderTemplate,
 	GeneralSettings,
 	LlmModelConfig,
@@ -143,29 +142,8 @@ interface SettingsPageProps {
 	onLauncherPinnedChange?: (pinned: boolean) => void | Promise<void>;
 }
 
-const bridgeableAgentProviderMatchers = [
-	"openai",
-	"openrouter",
-	"deepseek",
-	"ollama",
-	"siliconflow",
-	"silicon-flow",
-];
-
 function getBoundProviderLabel(provider: LlmProviderConfig | null) {
 	return provider?.name || provider?.models[0]?.model || provider?.baseUrl || "未配置";
-}
-
-function providerCanBridgeToAgent(provider: LlmProviderConfig | null) {
-	if (!provider) {
-		return false;
-	}
-
-	const bridgeSource = [provider.builtinPresetId, provider.name, provider.baseUrl]
-		.filter(Boolean)
-		.join(" ")
-		.toLowerCase();
-	return bridgeableAgentProviderMatchers.some((matcher) => bridgeSource.includes(matcher));
 }
 
 function buildModelDependencyHealthItem(
@@ -257,8 +235,7 @@ export function SettingsPage({
 		enabled: false,
 		enabledModules: [],
 	});
-	const [builtinMcpServerStatus, setBuiltinMcpServerStatus] =
-		useState<BuiltinMcpServerStatus | null>(null);
+	const builtinAgentToolStatus = browserBuiltinAgentToolStatus;
 	const [workspaceContext, setWorkspaceContext] = useState<WorkspaceState>(
 		createDefaultWorkspaceState,
 	);
@@ -730,23 +707,6 @@ export function SettingsPage({
 			setSavedMcpSnapshot(buildMcpDraftSnapshot(draftServers, catalog.builtin));
 			setSavedMcpState(buildSavedMcpDraftState(draftServers, catalog.builtin));
 		});
-		void getBuiltinMcpServerStatus()
-			.then((status) => {
-				setBuiltinMcpServerStatus(status);
-			})
-			.catch((error: unknown) => {
-				setBuiltinMcpServerStatus({
-					server: {
-						transport: "http",
-						name: "Wabity Built-in MCP",
-						url: "http://127.0.0.1:43189/internal/mcp",
-						headers: [],
-					},
-					running: false,
-					lastError: getErrorMessage(error, "内置 MCP server 状态读取失败"),
-					availableModules: [],
-				});
-			});
 		void getWorkspace()
 			.then((workspace) => {
 				setWorkspaceContext(workspace);
@@ -1188,26 +1148,27 @@ export function SettingsPage({
 				: "当前草稿不会改变有效索引输入；需要时可手动重建。",
 		},
 	];
-	const agentProviderBridgeable = providerCanBridgeToAgent(selectedQuestionAnswerProvider);
 	const agentDependencyHealthItems: DependencyHealthItem[] = [
 		selectedQuestionAnswerProvider
 			? {
-					status: agentProviderBridgeable ? "ok" : "info",
+					status: "info",
 					label: "Agent 模型",
-					detail: agentProviderBridgeable
-						? `会尝试把文档问答模型 ${getBoundProviderLabel(selectedQuestionAnswerProvider)} 桥接给 Pi SDK。`
-						: `文档问答模型 ${getBoundProviderLabel(selectedQuestionAnswerProvider)} 不能安全映射到 Pi SDK 已知 provider，Agent 会回退 SDK 自身配置。`,
+					detail: `会尝试把文档问答模型 ${getBoundProviderLabel(selectedQuestionAnswerProvider)} 用作 Agent 默认模型；无法安全映射时读取底层 settings.json / models.json，thinking 和工具策略仍由底层配置决定。`,
 				}
 			: {
 					status: "warning",
 					label: "Agent 模型",
-					detail: "功能页未配置文档问答模型；Agent session 会回退到底层 Pi SDK 配置。",
+					detail:
+						"功能页未配置文档问答模型；Agent session 会读取底层 settings.json / models.json。",
 				},
 		{
-			status: "info",
-			label: "MCP 注入",
+			status:
+				builtinMcpConfig.enabled && builtinMcpConfig.enabledModules.length > 0 ? "ok" : "info",
+			label: "Agent 工具",
 			detail:
-				"全局 MCP 清单当前不会自动注入 Agent session；后续需要单独通过 Pi SDK ToolFactory 建模。",
+				builtinMcpConfig.enabled && builtinMcpConfig.enabledModules.length > 0
+					? `已启用 ${builtinMcpConfig.enabledModules.length} 个内置工具模块；只注入 Agent session，不再暴露本地 MCP endpoint。`
+					: "内置工具未启用；Wabity 不再对外暴露本地 MCP endpoint。",
 		},
 	];
 	const ragSummaryItems: Array<{ label: string; value: string }> = [
@@ -1237,7 +1198,7 @@ export function SettingsPage({
 		rag: ragHasUnsavedChanges ? "有草稿" : `目录 ${ragSourceDirectoryCount}`,
 		mcp: mcpHasUnsavedChanges
 			? "有草稿"
-			: `${mcpServers.length} 个服务 / ${builtinMcpConfig.enabledModules.length} 个内置模块`,
+			: `${mcpServers.length} 个服务 / ${builtinMcpConfig.enabledModules.length} 个工具模块`,
 		about: "只读",
 	};
 	const sectionDescriptionText: Record<SettingsSectionId, string> = {
@@ -1245,7 +1206,7 @@ export function SettingsPage({
 		prompts: "翻译、文档问答、OCR 和提示词绑定。",
 		llm: "维护可复用的模型资源。",
 		rag: "本地文档知识库与索引。",
-		mcp: "Agent runtime 与全局 MCP 扩展。",
+		mcp: "Agent 会话、模型默认值与工具能力。",
 		about: "版本与项目信息。",
 	};
 	const activeSectionLabel =
@@ -1254,13 +1215,6 @@ export function SettingsPage({
 		? (mcpValidation.serverIssues[selectedMcpServer.id]?.length ?? 0)
 		: 0;
 	const regularMcpServers = mcpServers;
-	const builtinMcpTransportMeta =
-		builtinMcpServerStatus !== null
-			? getMcpTransportMeta(builtinMcpServerStatus.server.transport)
-			: getMcpTransportMeta("http");
-	const builtinMcpToggleDisabled =
-		!builtinMcpConfig.enabled &&
-		(!builtinMcpServerStatus?.running || builtinMcpServerStatus.server.transport !== "http");
 	const selectedLlmFieldIssues = selectedLlmProvider
 		? (llmValidation.providerFieldIssues[selectedLlmProvider.id] ?? {})
 		: {};
@@ -1694,14 +1648,6 @@ export function SettingsPage({
 
 	function handleToggleBuiltinMcp(enabled: boolean) {
 		setMcpNotice(null);
-		if (enabled && !builtinMcpServerStatus?.running) {
-			setMcpNotice({
-				tone: "warn",
-				text: builtinMcpServerStatus?.lastError || "内置 MCP server 还没运行成功，先修复运行状态。",
-			});
-			return;
-		}
-
 		setBuiltinMcpConfig((current) => ({
 			...current,
 			enabled,
@@ -1977,9 +1923,7 @@ export function SettingsPage({
 									bindMcpListOptionRef={bindMcpListOptionRef}
 									bindSectionBlockRef={bindSectionBlockRef}
 									builtinMcpConfig={builtinMcpConfig}
-									builtinMcpServerStatus={builtinMcpServerStatus}
-									builtinMcpToggleDisabled={builtinMcpToggleDisabled}
-									builtinMcpTransportMeta={builtinMcpTransportMeta}
+									builtinAgentToolStatus={builtinAgentToolStatus}
 									isMcpCreateMode={isMcpCreateMode}
 									isMcpEditMode={isMcpEditMode}
 									mcpHasUnsavedChanges={mcpHasUnsavedChanges}
