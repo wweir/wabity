@@ -99,30 +99,6 @@ pub(super) fn tool_definitions() -> Vec<BuiltinMcpToolDefinition> {
                 },
                 "required": ["path", "line_start", "line_count"]
             }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "absolutePath": { "type": "string" },
-                    "path": { "type": "string" },
-                    "lineStart": { "type": "integer" },
-                    "lineEnd": { "type": "integer" },
-                    "lineCount": { "type": "integer" },
-                    "lines": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "number": { "type": "integer" },
-                                "text": { "type": "string" }
-                            },
-                            "required": ["number", "text"],
-                            "additionalProperties": false
-                        }
-                    }
-                },
-                "required": ["absolutePath", "path", "lineStart", "lineEnd", "lineCount", "lines"],
-                "additionalProperties": false
-            }),
         },
         BuiltinMcpToolDefinition {
             name: READ_DOCUMENT_EXCERPT_TOOL_NAME,
@@ -144,41 +120,6 @@ pub(super) fn tool_definitions() -> Vec<BuiltinMcpToolDefinition> {
                     }
                 },
                 "required": ["path", "chunk_index"]
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "absolutePath": { "type": "string" },
-                    "path": { "type": "string" },
-                    "documentKind": { "type": "string" },
-                    "chunkIndex": { "type": "integer" },
-                    "lineStart": { "type": ["integer", "null"] },
-                    "lineEnd": { "type": ["integer", "null"] },
-                    "paragraphLineStart": { "type": ["integer", "null"] },
-                    "pageStart": { "type": ["integer", "null"] },
-                    "pageEnd": { "type": ["integer", "null"] },
-                    "headingPath": {
-                        "type": "array",
-                        "items": { "type": "string" }
-                    },
-                    "anchorLabel": { "type": ["string", "null"] },
-                    "text": { "type": "string" }
-                },
-                "required": [
-                    "absolutePath",
-                    "path",
-                    "documentKind",
-                    "chunkIndex",
-                    "lineStart",
-                    "lineEnd",
-                    "paragraphLineStart",
-                    "pageStart",
-                    "pageEnd",
-                    "headingPath",
-                    "anchorLabel",
-                    "text"
-                ],
-                "additionalProperties": false
             }),
         },
     ]

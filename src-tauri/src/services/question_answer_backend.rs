@@ -2,7 +2,6 @@ use anyhow::Result;
 
 use crate::{
     domain::{
-        acp::AcpMcpServerConfig,
         execution::{
             ExecutionConversationState, ExecutionConversationTurn, ExecutionProgressEvent,
             ExecutionResult,
@@ -21,7 +20,6 @@ pub struct QuestionAnswerBackendRequest<'a> {
     pub prompts_settings: &'a PromptsSettings,
     pub rag_settings: &'a RagSettings,
     pub llm_settings: &'a LlmSettings,
-    pub mcp_servers: &'a [AcpMcpServerConfig],
     pub progress_event_tx: Option<std::sync::Arc<dyn Fn(ExecutionProgressEvent) + Send + Sync>>,
 }
 
@@ -35,7 +33,6 @@ pub async fn answer_question(request: QuestionAnswerBackendRequest<'_>) -> Resul
         prompts_settings: request.prompts_settings,
         rag_settings: request.rag_settings,
         llm_settings: request.llm_settings,
-        mcp_servers: request.mcp_servers,
         progress_event_tx: request.progress_event_tx,
     })
     .await

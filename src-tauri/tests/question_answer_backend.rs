@@ -541,7 +541,6 @@ async fn question_answer_backend_supports_standalone_integration_test() {
         prompts_settings: &prompts_settings,
         rag_settings: &rag_settings,
         llm_settings: &llm_settings,
-        mcp_servers: &[],
         progress_event_tx: None,
     })
     .await
@@ -630,7 +629,6 @@ async fn question_answer_backend_falls_back_to_non_streaming_chat_provider() {
         prompts_settings: &Default::default(),
         rag_settings: &RagSettings::default(),
         llm_settings: &llm_settings,
-        mcp_servers: &[],
         progress_event_tx: Some(progress_event_tx),
     })
     .await
@@ -671,7 +669,6 @@ async fn question_answer_backend_falls_back_to_non_streaming_responses_provider(
         prompts_settings: &Default::default(),
         rag_settings: &RagSettings::default(),
         llm_settings: &llm_settings,
-        mcp_servers: &[],
         progress_event_tx: Some(progress_event_tx),
     })
     .await
@@ -713,7 +710,6 @@ async fn question_answer_backend_supports_direct_answer_without_tool_calls() {
         prompts_settings: &prompts_settings,
         rag_settings: &rag_settings,
         llm_settings: &llm_settings,
-        mcp_servers: &[],
         progress_event_tx: None,
     })
     .await
@@ -763,7 +759,6 @@ async fn question_answer_backend_preserves_chat_reasoning_separately_from_final_
         prompts_settings: &prompts_settings,
         rag_settings: &rag_settings,
         llm_settings: &llm_settings,
-        mcp_servers: &[],
         progress_event_tx: None,
     })
     .await
@@ -805,7 +800,6 @@ async fn question_answer_backend_extracts_thinking_embedded_in_chat_content() {
         prompts_settings: &prompts_settings,
         rag_settings: &rag_settings,
         llm_settings: &llm_settings,
-        mcp_servers: &[],
         progress_event_tx: None,
     })
     .await
@@ -857,7 +851,6 @@ async fn question_answer_backend_passes_multi_turn_history_to_model() {
         prompts_settings: &prompts_settings,
         rag_settings: &rag_settings,
         llm_settings: &llm_settings,
-        mcp_servers: &[],
         progress_event_tx: None,
     })
     .await
@@ -905,7 +898,6 @@ async fn question_answer_backend_reports_builtin_tool_error_for_outside_workspac
         prompts_settings: &prompts_settings,
         rag_settings: &rag_settings,
         llm_settings: &llm_settings,
-        mcp_servers: &[],
         progress_event_tx: None,
     })
     .await
@@ -979,7 +971,6 @@ async fn question_answer_backend_supports_responses_stateless_tool_loop() {
         prompts_settings: &prompts_settings,
         rag_settings: &rag_settings,
         llm_settings: &llm_settings,
-        mcp_servers: &[],
         progress_event_tx: None,
     })
     .await
@@ -1035,7 +1026,6 @@ async fn question_answer_backend_responses_stateless_follow_up_uses_explicit_his
         prompts_settings: &prompts_settings,
         rag_settings: &rag_settings,
         llm_settings: &llm_settings,
-        mcp_servers: &[],
         progress_event_tx: None,
     })
     .await
@@ -1068,7 +1058,6 @@ async fn question_answer_backend_responses_stateless_follow_up_uses_explicit_his
         prompts_settings: &prompts_settings,
         rag_settings: &rag_settings,
         llm_settings: &llm_settings,
-        mcp_servers: &[],
         progress_event_tx: None,
     })
     .await
@@ -1113,7 +1102,6 @@ async fn question_answer_backend_responses_stateful_follow_up_uses_previous_resp
         prompts_settings: &prompts_settings,
         rag_settings: &rag_settings,
         llm_settings: &llm_settings,
-        mcp_servers: &[],
         progress_event_tx: None,
     })
     .await
@@ -1146,7 +1134,6 @@ async fn question_answer_backend_responses_stateful_follow_up_uses_previous_resp
         prompts_settings: &prompts_settings,
         rag_settings: &rag_settings,
         llm_settings: &llm_settings,
-        mcp_servers: &[],
         progress_event_tx: None,
     })
     .await

@@ -57,7 +57,7 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
         | "set_acp_agents"
         | "get_acp_mcp_servers"
         | "set_acp_mcp_servers"
-        | "get_builtin_mcp_server_status"
+        | "get_builtin_agent_tool_status"
         | "list_acp_sessions"
         | "take_acp_restore_notices"
         | "get_acp_session_detail"

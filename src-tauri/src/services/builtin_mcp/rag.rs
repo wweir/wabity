@@ -66,60 +66,6 @@ pub(super) fn tool_definitions() -> Vec<BuiltinMcpToolDefinition> {
             "required": ["query"],
             "additionalProperties": false
         }),
-        output_schema: json!({
-            "type": "object",
-            "properties": {
-                "query": { "type": "string" },
-                "hitCount": { "type": "integer" },
-                "pendingIndexing": { "type": "boolean" },
-                "hits": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "sourceRoot": { "type": "string" },
-                            "absolutePath": { "type": "string" },
-                            "path": { "type": "string" },
-                            "documentKind": { "type": "string" },
-                            "chunkIndex": { "type": "integer" },
-                            "lineStart": { "type": ["integer", "null"] },
-                            "lineEnd": { "type": ["integer", "null"] },
-                            "paragraphLineStart": { "type": ["integer", "null"] },
-                            "pageStart": { "type": ["integer", "null"] },
-                            "pageEnd": { "type": ["integer", "null"] },
-                            "headingPath": {
-                                "type": "array",
-                                "items": { "type": "string" }
-                            },
-                            "anchorLabel": { "type": ["string", "null"] },
-                            "text": { "type": "string" },
-                            "distance": { "type": "number" },
-                            "score": { "type": "number" }
-                        },
-                        "required": [
-                            "sourceRoot",
-                            "absolutePath",
-                            "path",
-                            "documentKind",
-                            "chunkIndex",
-                            "lineStart",
-                            "lineEnd",
-                            "paragraphLineStart",
-                            "pageStart",
-                            "pageEnd",
-                            "headingPath",
-                            "anchorLabel",
-                            "text",
-                            "distance",
-                            "score"
-                        ],
-                        "additionalProperties": false
-                    }
-                }
-            },
-            "required": ["query", "hitCount", "pendingIndexing", "hits"],
-            "additionalProperties": false
-        }),
     }]
 }
 

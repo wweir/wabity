@@ -17,8 +17,8 @@ mod session_snapshot;
 mod settings;
 
 use self::acp_catalog::{
-    effective_mcp_servers, normalize_acp_agent_catalog, normalize_acp_mcp_server_catalog,
-    reconcile_saved_session_builtin_mcp,
+    normalize_acp_agent_catalog, normalize_acp_mcp_server_catalog,
+    remove_legacy_builtin_mcp_server_from_snapshot,
 };
 use self::session_snapshot::merge_restored_session_snapshots;
 use self::settings::{
@@ -26,9 +26,9 @@ use self::settings::{
     validate_rag_settings,
 };
 use crate::services::{
-    acp::{AcpService, AgentSessionRuntimeConfig},
+    acp::{AcpService, AgentModelBridge},
     application::ApplicationService,
-    builtin_mcp::BuiltinMcpServerService,
+    builtin_mcp::{BuiltinMcpServerService, BuiltinMcpToolFactory},
     clipboard::ClipboardService,
     executor::ExecutorService,
     file_search::FileSearchService,
@@ -44,8 +44,8 @@ use crate::services::{
 use crate::{
     domain::{
         acp::{
-            AcpAgentCatalog, AcpAgentConfig, AcpMcpServerCatalog, AcpMcpServerConfig,
-            AcpRestoreNotice, AcpSessionDetail, AcpSessionSummary, BuiltinMcpServerStatus,
+            AcpAgentCatalog, AcpAgentConfig, AcpMcpServerCatalog, AcpRestoreNotice,
+            AcpSessionDetail, AcpSessionSummary, BuiltinAgentToolStatus,
         },
         execution::{ExecutionProgressEvent, ExecutionRequest, ExecutionResult},
         rag::{RagRuntimeStatus, RagScanResult},
@@ -123,14 +123,7 @@ impl AppState {
             .apply_settings(config.rag.clone(), config.llm.clone())
             .await;
         let clipboard = ClipboardService::new(app_handle.clone()).await?;
-        let builtin_mcp = BuiltinMcpServerService::new(
-            ConfigStore::data_dir()?,
-            normalize_workspace_root(&root_path)?,
-            config.rag.clone(),
-            config.llm.clone(),
-            config.acp.builtin_mcp.clone(),
-        );
-        builtin_mcp.start().await;
+        let builtin_mcp = BuiltinMcpServerService::new();
         clipboard.start();
         let notification =
             NotificationService::new(app_handle, shortcut_state, config_store.clone());
@@ -203,7 +196,6 @@ impl AppState {
                 let data_dir = ConfigStore::data_dir()?;
                 let workspace = self.workspace().await?;
                 let workspace_root = normalize_workspace_root(&workspace.root_path)?;
-                let mcp_servers = self.effective_acp_mcp_servers().await?;
                 let result = question_answer_backend::answer_question(
                     question_answer_backend::QuestionAnswerBackendRequest {
                         data_dir: &data_dir,
@@ -214,7 +206,6 @@ impl AppState {
                         prompts_settings: &settings.prompts,
                         rag_settings: &settings.rag,
                         llm_settings: &settings.llm,
-                        mcp_servers: &mcp_servers,
                         progress_event_tx,
                     },
                 )
@@ -294,12 +285,6 @@ impl AppState {
         })
     }
 
-    pub async fn effective_acp_mcp_servers(&self) -> Result<Vec<AcpMcpServerConfig>> {
-        let catalog = self.acp_mcp_servers().await?;
-        let builtin_running = self.builtin_mcp.status().await.running;
-        Ok(effective_mcp_servers(&catalog, builtin_running))
-    }
-
     pub async fn app_settings(&self) -> Result<AppSettings> {
         let config = self.app_config().await?;
         Ok(AppSettings {
@@ -363,16 +348,6 @@ impl AppState {
         }
 
         *self.workspace_state.write().await = next_workspace.clone();
-        let settings = self.app_settings().await?;
-        let builtin_config = self.acp_mcp_servers().await?.builtin;
-        self.builtin_mcp
-            .apply_runtime_config(
-                normalize_workspace_root(&next_workspace.root_path)?,
-                settings.rag,
-                settings.llm,
-                builtin_config,
-            )
-            .await;
 
         Ok(next_workspace)
     }
@@ -397,15 +372,6 @@ impl AppState {
         config.acp.mcp_servers = normalized_catalog.servers.clone();
         config.acp.builtin_mcp = normalized_catalog.builtin.clone();
         store.save(&config).await?;
-        let workspace = self.workspace().await?;
-        self.builtin_mcp
-            .apply_runtime_config(
-                normalize_workspace_root(&workspace.root_path)?,
-                config.rag.clone(),
-                config.llm.clone(),
-                config.acp.builtin_mcp.clone(),
-            )
-            .await;
         Ok(normalized_catalog)
     }
 
@@ -418,15 +384,6 @@ impl AppState {
             build_ocr_provider(&config.ocr, &config.llm);
         self.rag_index
             .apply_settings(config.rag.clone(), config.llm.clone())
-            .await;
-        let workspace = self.workspace().await?;
-        self.builtin_mcp
-            .apply_runtime_config(
-                normalize_workspace_root(&workspace.root_path)?,
-                config.rag.clone(),
-                config.llm.clone(),
-                config.acp.builtin_mcp.clone(),
-            )
             .await;
         Ok(AppSettings {
             general: config.general,
@@ -454,7 +411,7 @@ impl AppState {
         self.rag_index.runtime_status().await
     }
 
-    pub async fn builtin_mcp_server_status(&self) -> BuiltinMcpServerStatus {
+    pub async fn builtin_agent_tool_status(&self) -> BuiltinAgentToolStatus {
         self.builtin_mcp.status().await
     }
 
@@ -462,9 +419,27 @@ impl AppState {
         let workspace = self.workspace().await?;
         let workspace_root = normalize_workspace_root(&workspace.root_path)?;
         let config = self.app_config().await?;
-        let runtime_config = resolve_agent_session_runtime_config(&config);
+        let model_bridge = resolve_agent_model_bridge(&config);
+        let tool_factory = if config.acp.builtin_mcp.enabled
+            && !config.acp.builtin_mcp.enabled_modules.is_empty()
+        {
+            Some(Arc::new(BuiltinMcpToolFactory::new(
+                ConfigStore::data_dir()?,
+                workspace_root.clone(),
+                config.rag.clone(),
+                config.llm.clone(),
+                config.acp.builtin_mcp.clone(),
+            )) as Arc<dyn pi::sdk::ToolFactory>)
+        } else {
+            None
+        };
         self.acp
-            .create_session(workspace_root, pi_agent_config(), runtime_config)
+            .create_session(
+                workspace_root,
+                pi_agent_config(),
+                model_bridge,
+                tool_factory,
+            )
             .await
     }
 
@@ -540,14 +515,11 @@ impl AppState {
             .iter()
             .map(|snapshot| snapshot.session_id.clone())
             .collect::<HashSet<_>>();
-        let builtin_catalog = self.acp_mcp_servers().await?;
-        let builtin_running = self.builtin_mcp.status().await.running;
         let mut restored = Vec::new();
         let mut retained = Vec::new();
 
         for snapshot in snapshots {
-            let snapshot =
-                reconcile_saved_session_builtin_mcp(snapshot, &builtin_catalog, builtin_running);
+            let snapshot = remove_legacy_builtin_mcp_server_from_snapshot(snapshot);
             let result = self.acp.restore_session(snapshot.clone()).await;
             if result.keep_snapshot {
                 retained.push(snapshot.clone());
@@ -605,43 +577,22 @@ fn pi_agent_config() -> AcpAgentConfig {
     }
 }
 
-fn resolve_agent_session_runtime_config(config: &AppConfig) -> AgentSessionRuntimeConfig {
-    let Some(binding) = resolve_agent_model_binding(&config.llm) else {
-        return AgentSessionRuntimeConfig::default();
-    };
-    let Some(provider) = resolve_pi_provider_id(binding.provider()) else {
-        return AgentSessionRuntimeConfig::default();
-    };
-    let Some(model) = binding.model_name().map(str::to_string) else {
-        return AgentSessionRuntimeConfig::default();
-    };
+fn resolve_agent_model_bridge(config: &AppConfig) -> Option<AgentModelBridge> {
+    let binding = resolve_agent_model_binding(&config.llm)?;
+    let provider = resolve_pi_provider_id(binding.provider())?;
+    let model = binding.model_name()?.to_string();
 
-    AgentSessionRuntimeConfig {
-        provider: Some(provider),
-        model: Some(model),
+    Some(AgentModelBridge {
+        provider,
+        model,
         api_key: non_empty_string(&binding.provider().api_key),
-        ..AgentSessionRuntimeConfig::default()
-    }
+    })
 }
 
 fn resolve_agent_model_binding(llm_settings: &LlmSettings) -> Option<ResolvedLlmModelBinding<'_>> {
     llm_settings
-        .question_answer_model_id
-        .as_deref()
-        .and_then(|model_id| llm_settings.find_model_binding(model_id))
+        .question_answer_model_binding()
         .filter(|binding| binding.can_handle_ai_task())
-        .or_else(|| {
-            llm_settings
-                .translation_model_id
-                .as_deref()
-                .and_then(|model_id| llm_settings.find_model_binding(model_id))
-                .filter(|binding| binding.can_handle_ai_task())
-        })
-        .or_else(|| {
-            llm_settings
-                .iter_model_bindings()
-                .find(|binding| binding.can_handle_ai_task())
-        })
 }
 
 fn resolve_pi_provider_id(provider: &LlmProviderConfig) -> Option<String> {
@@ -1225,12 +1176,12 @@ mod tests {
 
     use super::{
         acp_catalog::{
-            effective_mcp_servers, normalize_acp_agent_catalog, normalize_mcp_remote_url,
-            reconcile_saved_session_builtin_mcp,
+            normalize_acp_agent_catalog, normalize_mcp_remote_url,
+            remove_legacy_builtin_mcp_server_from_snapshot,
         },
         apply_app_settings_to_config, merge_restored_session_snapshots, normalize_optional_id,
-        normalize_required_id, normalized_existing_session_id,
-        resolve_agent_session_runtime_config, resolve_pi_provider_id_from_base_url,
+        normalize_required_id, normalized_existing_session_id, resolve_agent_model_bridge,
+        resolve_pi_provider_id_from_base_url,
         session_snapshot::{apply_session_snapshot, SnapshotWriteMode},
         settings::{validate_llm_provider_config, validate_rag_settings},
         LauncherWindowSize, LauncherWindowViewMode, ShortcutAction, ShortcutRuntimeState,
@@ -1238,9 +1189,8 @@ mod tests {
     };
     use crate::domain::{
         acp::{
-            AcpAgentCatalog, AcpAgentConfig, AcpAgentLaunchMode, AcpMcpServerCatalog,
-            AcpMcpServerConfig, AcpMcpServerHttpConfig, AcpSessionStatus, AcpSessionSummary,
-            BuiltinMcpConfig, BuiltinMcpModuleKey,
+            AcpAgentCatalog, AcpAgentConfig, AcpAgentLaunchMode, AcpMcpServerConfig,
+            AcpMcpServerHttpConfig, AcpSessionStatus, AcpSessionSummary,
         },
         settings::{
             AppSettings, LlmModelConfig, LlmModelType, LlmProviderConfig, LlmProviderModelEntry,
@@ -1274,7 +1224,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_runtime_config_reuses_question_answer_model_when_provider_maps_to_pi() {
+    fn agent_model_bridge_uses_question_answer_model_when_provider_maps_to_pi() {
         let provider = test_agent_provider("qa", Some("openrouter"));
         let model_id = provider.models[0].id.clone();
         let config = AppConfig {
@@ -1286,15 +1236,15 @@ mod tests {
             ..AppConfig::default()
         };
 
-        let runtime = resolve_agent_session_runtime_config(&config);
+        let bridge = resolve_agent_model_bridge(&config).expect("bridgeable QA model");
 
-        assert_eq!(runtime.provider.as_deref(), Some("openrouter"));
-        assert_eq!(runtime.model.as_deref(), Some("test-model"));
-        assert_eq!(runtime.api_key.as_deref(), Some("sk-test"));
+        assert_eq!(bridge.provider, "openrouter");
+        assert_eq!(bridge.model, "test-model");
+        assert_eq!(bridge.api_key.as_deref(), Some("sk-test"));
     }
 
     #[test]
-    fn agent_runtime_config_falls_back_for_unmapped_provider() {
+    fn agent_model_bridge_is_empty_for_unmapped_provider() {
         let provider = test_agent_provider("custom", None);
         let model_id = provider.models[0].id.clone();
         let config = AppConfig {
@@ -1306,11 +1256,27 @@ mod tests {
             ..AppConfig::default()
         };
 
-        let runtime = resolve_agent_session_runtime_config(&config);
+        let bridge = resolve_agent_model_bridge(&config);
 
-        assert!(runtime.provider.is_none());
-        assert!(runtime.model.is_none());
-        assert!(runtime.api_key.is_none());
+        assert!(bridge.is_none());
+    }
+
+    #[test]
+    fn agent_model_bridge_is_empty_when_question_answer_model_is_unset() {
+        let provider = test_agent_provider("translation", Some("openai"));
+        let model_id = provider.models[0].id.clone();
+        let config = AppConfig {
+            llm: LlmSettings {
+                providers: vec![provider],
+                translation_model_id: Some(model_id),
+                question_answer_model_id: None,
+            },
+            ..AppConfig::default()
+        };
+
+        let bridge = resolve_agent_model_bridge(&config);
+
+        assert!(bridge.is_none());
     }
 
     #[test]
@@ -2000,29 +1966,7 @@ mod tests {
     }
 
     #[test]
-    fn effective_mcp_servers_requires_running_builtin_server() {
-        let catalog = AcpMcpServerCatalog {
-            servers: vec![AcpMcpServerConfig::Http(AcpMcpServerHttpConfig {
-                name: "WebMCP".to_string(),
-                url: "https://example.com/mcp".to_string(),
-                headers: Vec::new(),
-            })],
-            builtin: BuiltinMcpConfig {
-                enabled: true,
-                enabled_modules: vec![BuiltinMcpModuleKey::Document],
-            },
-        };
-
-        let without_builtin = effective_mcp_servers(&catalog, false);
-        let with_builtin = effective_mcp_servers(&catalog, true);
-
-        assert_eq!(without_builtin.len(), 1);
-        assert_eq!(with_builtin.len(), 2);
-        assert!(with_builtin.iter().any(builtin_mcp::is_builtin_server));
-    }
-
-    #[test]
-    fn reconcile_saved_session_builtin_mcp_uses_current_runtime_availability() {
+    fn remove_legacy_builtin_mcp_server_from_snapshot_removes_loopback_server() {
         let snapshot = SavedAcpSession {
             session_id: "session-1".to_string(),
             workspace_root: "/tmp/workspace".to_string(),
@@ -2043,36 +1987,13 @@ mod tests {
             ],
             last_updated_at_ms: 0,
         };
-        let catalog = AcpMcpServerCatalog {
-            servers: vec![AcpMcpServerConfig::Http(AcpMcpServerHttpConfig {
-                name: "WebMCP".to_string(),
-                url: "https://example.com/mcp".to_string(),
-                headers: Vec::new(),
-            })],
-            builtin: BuiltinMcpConfig {
-                enabled: true,
-                enabled_modules: vec![BuiltinMcpModuleKey::Rag],
-            },
-        };
+        let reconciled = remove_legacy_builtin_mcp_server_from_snapshot(snapshot);
 
-        let without_builtin =
-            reconcile_saved_session_builtin_mcp(snapshot.clone(), &catalog, false);
-        let with_builtin = reconcile_saved_session_builtin_mcp(snapshot, &catalog, true);
-
-        assert_eq!(without_builtin.mcp_servers.len(), 1);
-        assert!(!without_builtin
+        assert_eq!(reconciled.mcp_servers.len(), 1);
+        assert!(!reconciled
             .mcp_servers
             .iter()
             .any(builtin_mcp::is_builtin_server));
-        assert_eq!(with_builtin.mcp_servers.len(), 2);
-        assert_eq!(
-            with_builtin
-                .mcp_servers
-                .iter()
-                .filter(|server| builtin_mcp::is_builtin_server(server))
-                .count(),
-            1
-        );
     }
 
     #[test]

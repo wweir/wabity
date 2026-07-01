@@ -5,7 +5,6 @@ use std::{
     collections::HashSet,
     future::Future,
     path::{Path, PathBuf},
-    time::Duration,
 };
 use tokio::fs;
 
@@ -23,6 +22,7 @@ use crate::{
         open_target::{OpenTargetService, OpenedTarget},
         rag,
         rag_query::{self, RagSearchHit},
+        tool_timeout::execute_with_timeout,
     },
 };
 
@@ -105,24 +105,6 @@ pub(super) async fn execute_local_tool_call(
                 summary: error.to_string(),
             },
         }),
-    }
-}
-
-pub(super) async fn execute_with_timeout<T, F>(
-    tool_name: &str,
-    timeout_duration: Duration,
-    future: F,
-) -> Result<T>
-where
-    F: Future<Output = Result<T>>,
-{
-    match tokio::time::timeout(timeout_duration, future).await {
-        Ok(result) => result,
-        Err(_) => bail!(
-            "内置工具 {} 执行超时（>{} ms）",
-            tool_name,
-            timeout_duration.as_millis()
-        ),
     }
 }
 

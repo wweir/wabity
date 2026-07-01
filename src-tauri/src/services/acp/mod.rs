@@ -6,8 +6,9 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use pi::model::ThinkingLevel;
-use pi::sdk::{create_agent_session, AbortHandle, AgentEvent, AgentSessionHandle, SessionOptions};
+use pi::sdk::{
+    create_agent_session, AbortHandle, AgentEvent, AgentSessionHandle, SessionOptions, ToolFactory,
+};
 use tauri::ipc::Channel;
 use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
 
@@ -45,14 +46,11 @@ pub struct RestoreAttemptResult {
     pub keep_snapshot: bool,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct AgentSessionRuntimeConfig {
-    pub provider: Option<String>,
-    pub model: Option<String>,
+#[derive(Debug, Clone)]
+pub struct AgentModelBridge {
+    pub provider: String,
+    pub model: String,
     pub api_key: Option<String>,
-    pub thinking: Option<ThinkingLevel>,
-    pub enabled_tools: Option<Vec<String>>,
-    pub max_tool_iterations: Option<usize>,
 }
 
 enum RuntimeEvent {
@@ -159,7 +157,8 @@ impl AcpService {
         &self,
         workspace_root: PathBuf,
         agent: AcpAgentConfig,
-        runtime_config: AgentSessionRuntimeConfig,
+        model_bridge: Option<AgentModelBridge>,
+        tool_factory: Option<Arc<dyn ToolFactory>>,
     ) -> Result<AcpSessionDetail> {
         let session_id = format!("pi-agent-{}", now_ms());
         let title = workspace_root
@@ -168,19 +167,19 @@ impl AcpService {
             .filter(|name| !name.trim().is_empty())
             .unwrap_or("Pi Agent")
             .to_string();
-        let mut session_options = SessionOptions {
-            provider: runtime_config.provider,
-            model: runtime_config.model,
-            api_key: runtime_config.api_key,
-            thinking: runtime_config.thinking,
-            enabled_tools: runtime_config.enabled_tools,
+        let (provider, model, api_key) = match model_bridge {
+            Some(bridge) => (Some(bridge.provider), Some(bridge.model), bridge.api_key),
+            None => (None, None, None),
+        };
+        let session_options = SessionOptions {
+            provider,
+            model,
+            api_key,
+            tool_factory,
             working_directory: Some(workspace_root.clone()),
             no_session: false,
             ..SessionOptions::default()
         };
-        if let Some(max_tool_iterations) = runtime_config.max_tool_iterations {
-            session_options.max_tool_iterations = max_tool_iterations;
-        }
         let handle = create_agent_session(session_options)
             .await
             .context("failed to create Pi Agent session")?;

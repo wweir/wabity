@@ -71,7 +71,7 @@ pub(super) fn normalize_acp_mcp_server_catalog(
     catalog: AcpMcpServerCatalog,
 ) -> Result<AcpMcpServerCatalog> {
     Ok(AcpMcpServerCatalog {
-        servers: normalize_mcp_servers(catalog.servers, "全局 MCP server")?,
+        servers: normalize_mcp_servers(catalog.servers, "Agent MCP 服务")?,
         builtin: normalize_builtin_mcp_config(catalog.builtin),
     })
 }
@@ -87,35 +87,13 @@ pub(super) fn normalize_builtin_mcp_config(config: BuiltinMcpConfig) -> BuiltinM
     }
 }
 
-pub(super) fn effective_mcp_servers(
-    catalog: &AcpMcpServerCatalog,
-    builtin_running: bool,
-) -> Vec<AcpMcpServerConfig> {
-    let mut servers = catalog.servers.clone();
-    if builtin_mcp_should_be_available(catalog, builtin_running) {
-        servers.push(builtin_mcp::builtin_server_config());
-    }
-    servers
-}
-
-pub(super) fn reconcile_saved_session_builtin_mcp(
+pub(super) fn remove_legacy_builtin_mcp_server_from_snapshot(
     mut snapshot: SavedAcpSession,
-    catalog: &AcpMcpServerCatalog,
-    builtin_running: bool,
 ) -> SavedAcpSession {
     snapshot
         .mcp_servers
         .retain(|server| !builtin_mcp::is_builtin_server(server));
-    if builtin_mcp_should_be_available(catalog, builtin_running) {
-        snapshot
-            .mcp_servers
-            .push(builtin_mcp::builtin_server_config());
-    }
     snapshot
-}
-
-fn builtin_mcp_should_be_available(catalog: &AcpMcpServerCatalog, builtin_running: bool) -> bool {
-    builtin_running && catalog.builtin.enabled && !catalog.builtin.enabled_modules.is_empty()
 }
 
 fn normalize_mcp_servers(

@@ -6,7 +6,7 @@ use tauri::{
 use crate::{
     domain::acp::{
         AcpAgentCatalog, AcpMcpServerCatalog, AcpMcpServerConfig, AcpRestoreNotice,
-        AcpSessionDetail, AcpSessionSummary, BuiltinMcpServerStatus,
+        AcpSessionDetail, AcpSessionSummary, BuiltinAgentToolStatus,
     },
     state::AppState,
 };
@@ -49,10 +49,10 @@ pub async fn set_acp_mcp_servers(
         .map_err(|error| error.to_string())
 }
 
-pub async fn get_builtin_mcp_server_status(
+pub async fn get_builtin_agent_tool_status(
     state: State<'_, AppState>,
-) -> Result<BuiltinMcpServerStatus, String> {
-    Ok(state.builtin_mcp_server_status().await)
+) -> Result<BuiltinAgentToolStatus, String> {
+    Ok(state.builtin_agent_tool_status().await)
 }
 
 pub async fn list_acp_sessions(
@@ -210,10 +210,10 @@ pub(crate) fn handle_invoke(invoke: Invoke<Wry>) -> bool {
                 .await
                 .map_err(InvokeError::from)
         }),
-        "get_builtin_mcp_server_status" => {
+        "get_builtin_agent_tool_status" => {
             super::respond_async(invoke.resolver.clone(), async move {
-                let state = super::parse_arg(&invoke, "get_builtin_mcp_server_status", "state")?;
-                get_builtin_mcp_server_status(state)
+                let state = super::parse_arg(&invoke, "get_builtin_agent_tool_status", "state")?;
+                get_builtin_agent_tool_status(state)
                     .await
                     .map_err(InvokeError::from)
             })

@@ -38,22 +38,21 @@ use self::{
         request_chat_completions_turn,
     },
     protocol_responses::{
-        extract_local_tool_calls, extract_mcp_tool_calls, has_mcp_approval_request,
-        request_responses_turn, should_retry_without_all_tools, should_retry_without_mcp_tools,
+        extract_local_tool_calls, request_responses_turn, should_retry_without_all_tools,
         should_retry_without_response_chain,
     },
     result::{build_execution_result, deduplicate_and_number_citations},
     tool_catalog::{
         build_tool_catalog, load_cached_responses_tool_compatibility,
         responses_tool_compatibility_cache_key, store_cached_responses_tool_compatibility,
-        tool_catalog_without_all_tools, tool_catalog_without_mcp_tools,
+        tool_catalog_without_all_tools,
     },
     tool_execute::execute_local_tool_call,
 };
 
 use crate::{
     domain::{
-        acp::{AcpActionEvent, AcpMcpServerConfig},
+        acp::AcpActionEvent,
         execution::{
             ExecutionCitation, ExecutionConversationRole, ExecutionConversationState,
             ExecutionConversationTurn, ExecutionProgressEvent, ExecutionResult, ExecutionToolCall,
@@ -102,14 +101,6 @@ struct ExecutedToolCall {
     trace: ExecutionToolCall,
 }
 
-#[derive(Debug, Clone)]
-struct McpToolCallTrace {
-    call_id: Option<String>,
-    trace: ExecutionToolCall,
-    input_detail: Option<String>,
-    output_detail: Option<String>,
-}
-
 #[derive(Clone)]
 struct QuestionToolRuntime<'a> {
     data_dir: &'a Path,
@@ -144,7 +135,6 @@ enum QuestionAnswerProtocol {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum ResponsesToolCompatibilityMode {
     Full,
-    NoMcp,
     NoTools,
 }
 
@@ -163,7 +153,6 @@ pub struct QuestionAnswerRequest<'a> {
     pub prompts_settings: &'a PromptsSettings,
     pub rag_settings: &'a RagSettings,
     pub llm_settings: &'a LlmSettings,
-    pub mcp_servers: &'a [AcpMcpServerConfig],
     pub progress_event_tx: Option<Arc<dyn Fn(ExecutionProgressEvent) + Send + Sync>>,
 }
 
@@ -215,7 +204,6 @@ pub async fn answer_question(request: QuestionAnswerRequest<'_>) -> Result<Execu
         question,
         conversation: prepared_conversation_state.conversation,
         conversation_state: &prepared_conversation_state.state,
-        mcp_servers: request.mcp_servers,
     };
     let initial_protocol = answer_protocol(binding);
     let (answer, protocol, tool_catalog) = request_answer(initial_protocol, &execution).await?;
@@ -251,14 +239,13 @@ struct QuestionAnswerExecutionContext<'a> {
     question: &'a str,
     conversation: &'a [ExecutionConversationTurn],
     conversation_state: &'a ExecutionConversationState,
-    mcp_servers: &'a [AcpMcpServerConfig],
 }
 
 async fn request_answer(
     protocol: QuestionAnswerProtocol,
     context: &QuestionAnswerExecutionContext<'_>,
 ) -> Result<(AnswerOutcome, QuestionAnswerProtocol, ToolCatalog)> {
-    let tool_catalog = build_tool_catalog(context.mcp_servers, protocol);
+    let tool_catalog = build_tool_catalog(protocol);
     emit_question_progress(
         context.runtime.progress_event_tx.as_ref(),
         match protocol {
@@ -359,7 +346,6 @@ async fn answer_with_responses(
         previous_response_id_for_follow_up(request.conversation_state, request.supports_stateful);
     let continue_previous_response = initial_previous_response_id.is_some();
     let mut previous_response_id = initial_previous_response_id;
-    let mcp_free_tool_catalog = tool_catalog_without_mcp_tools(request.tool_catalog);
     let tool_free_tool_catalog = tool_catalog_without_all_tools(request.tool_catalog);
     let compatibility_cache_key = responses_tool_compatibility_cache_key(
         request.base_url,
@@ -367,10 +353,6 @@ async fn answer_with_responses(
         request.tool_catalog,
     );
     let mut compatibility_mode = load_cached_responses_tool_compatibility(&compatibility_cache_key);
-    let mut disabled_mcp_tools_for_compat = matches!(
-        compatibility_mode,
-        ResponsesToolCompatibilityMode::NoMcp | ResponsesToolCompatibilityMode::NoTools
-    );
     let mut disabled_all_tools_for_compat =
         matches!(compatibility_mode, ResponsesToolCompatibilityMode::NoTools);
     let mut pending_input = json!(build_initial_responses_input(
@@ -405,8 +387,6 @@ async fn answer_with_responses(
         );
         let active_tool_catalog = if disabled_all_tools_for_compat {
             &tool_free_tool_catalog
-        } else if disabled_mcp_tools_for_compat {
-            &mcp_free_tool_catalog
         } else {
             request.tool_catalog
         };
@@ -477,33 +457,6 @@ async fn answer_with_responses(
                 continue;
             }
             Err(error)
-                if should_retry_without_mcp_tools(
-                    disabled_all_tools_for_compat,
-                    disabled_mcp_tools_for_compat,
-                    active_tool_catalog,
-                    &error,
-                ) =>
-            {
-                disabled_mcp_tools_for_compat = true;
-                compatibility_mode = ResponsesToolCompatibilityMode::NoMcp;
-                store_cached_responses_tool_compatibility(
-                    &compatibility_cache_key,
-                    compatibility_mode,
-                );
-                emit_question_progress(
-                    request.runtime.progress_event_tx.as_ref(),
-                    "文档问答 · 当前 provider 不兼容 MCP tools，已回退到内置工具重试",
-                );
-                reset_responses_retry_chain_state(
-                    request.conversation,
-                    request.question,
-                    &mut previous_response_id,
-                    &mut pending_input,
-                );
-                round = round.saturating_sub(1);
-                continue;
-            }
-            Err(error)
                 if should_retry_without_all_tools(
                     disabled_all_tools_for_compat,
                     active_tool_catalog,
@@ -511,7 +464,6 @@ async fn answer_with_responses(
                 ) =>
             {
                 disabled_all_tools_for_compat = true;
-                disabled_mcp_tools_for_compat = true;
                 compatibility_mode = ResponsesToolCompatibilityMode::NoTools;
                 store_cached_responses_tool_compatibility(
                     &compatibility_cache_key,
@@ -539,58 +491,19 @@ async fn answer_with_responses(
                 .map(ToOwned::to_owned)
                 .context("responses API 未返回 response id")?,
         );
-
-        if has_mcp_approval_request(&response) {
-            bail!("问答请求触发了 MCP approval，但当前实现要求所有注入工具都可直接执行");
-        }
-
-        let mcp_calls = extract_mcp_tool_calls(&response);
         let local_calls = extract_local_tool_calls(&response)?;
-        if !mcp_calls.is_empty() || !local_calls.is_empty() {
+        if !local_calls.is_empty() {
             clear_question_partial_answer(
                 request.runtime.progress_event_tx.as_ref(),
                 "文档问答 · 正在调用工具",
             );
-            actions.push(build_round_action(
-                round,
-                mcp_calls.len() + local_calls.len(),
-            ));
+            actions.push(build_round_action(round, local_calls.len()));
         } else if round > 1 {
             actions.push(AcpActionEvent {
                 kind: "info".to_string(),
                 title: format!("第 {round} 步"),
                 correlation_id: None,
                 detail: Some("工具结果已收敛，开始生成最终回答".to_string()),
-            });
-        }
-
-        if !mcp_calls.is_empty() {
-            emit_question_progress(
-                request.runtime.progress_event_tx.as_ref(),
-                "文档问答 · 模型正在调用外部工具",
-            );
-        }
-
-        for (index, call) in mcp_calls.iter().enumerate() {
-            tool_calls.push(call.trace.clone());
-            let correlation_id = call
-                .call_id
-                .clone()
-                .unwrap_or_else(|| format!("mcp-round-{round}-{index}"));
-            actions.push(AcpActionEvent {
-                kind: "tool-call".to_string(),
-                title: call.trace.name.clone(),
-                correlation_id: Some(correlation_id.clone()),
-                detail: call.input_detail.clone(),
-            });
-            actions.push(AcpActionEvent {
-                kind: "tool-update".to_string(),
-                title: call.trace.name.clone(),
-                correlation_id: Some(correlation_id),
-                detail: call
-                    .output_detail
-                    .clone()
-                    .or_else(|| Some(call.trace.summary.clone())),
             });
         }
 
@@ -642,8 +555,6 @@ async fn answer_with_responses(
 
     let effective_tool_catalog = if disabled_all_tools_for_compat {
         tool_free_tool_catalog
-    } else if disabled_mcp_tools_for_compat {
-        mcp_free_tool_catalog
     } else {
         request.tool_catalog.clone()
     };
@@ -966,7 +877,7 @@ fn resolve_answer_model_binding(llm_settings: &LlmSettings) -> Result<ResolvedLl
         .as_deref()
         .context("没有配置问答 LLM，请先在 AI 功能页选择一个条目")?;
     let binding = llm_settings
-        .find_model_binding(model_id)
+        .question_answer_model_binding()
         .with_context(|| format!("问答 LLM 模型不存在: {model_id}"))?;
     validate_answer_provider(binding)?;
     Ok(binding)
@@ -1002,7 +913,7 @@ mod tests {
         summarize_local_tool_progress, HostSystemContext, LocalToolCall, QuestionAnswerProtocol,
         QuestionToolRuntime, ResponsesToolCompatibilityMode, MAX_TOOL_ROUNDS,
         OPEN_TARGET_TOOL_NAME, RAG_ANSWER_COMMAND_ALIASES, RAG_QUERY_TOOL_NAME,
-        READ_DOCUMENT_EXCERPT_TOOL_NAME, READ_FILE_TOOL_NAME,
+        READ_FILE_TOOL_NAME,
     };
     use super::{
         conversation_state::{
@@ -1012,8 +923,8 @@ mod tests {
         },
         parsing::{question_explicitly_requests_open, question_payload},
         protocol_responses::{
-            extract_mcp_tool_calls, is_budget_exceeded_error, should_retry_without_all_tools,
-            should_retry_without_mcp_tools, should_retry_without_response_chain,
+            is_budget_exceeded_error, should_retry_without_all_tools,
+            should_retry_without_response_chain,
         },
         result::deduplicate_and_number_citations,
         tool_catalog::{
@@ -1022,15 +933,14 @@ mod tests {
             mark_cached_responses_tool_compatibility_ready_for_reprobe,
             open_target_tool_description, responses_tool_compatibility_cache_key,
             store_cached_responses_tool_compatibility, tool_catalog_without_all_tools,
-            tool_catalog_without_mcp_tools,
         },
         tool_execute::{
-            execute_open_target_tool, execute_read_file_tool, execute_with_timeout,
-            rag_query_trace_status, resolve_readable_file_path,
+            execute_open_target_tool, execute_read_file_tool, rag_query_trace_status,
+            resolve_readable_file_path,
         },
     };
     use crate::domain::{
-        acp::{AcpActionEvent, AcpMcpServerConfig, AcpMcpServerHttpConfig, AcpNameValuePair},
+        acp::AcpActionEvent,
         execution::{
             ExecutionCitation, ExecutionConversationRole, ExecutionConversationState,
             ExecutionConversationTurn, ExecutionToolCall,
@@ -1039,8 +949,7 @@ mod tests {
         settings::{LlmSettings, RagSettings},
     };
     use crate::infrastructure::openai_compatible::{body_preview, parse_json_or_sse_payload};
-    use crate::services::builtin_mcp;
-    use crate::services::rag_query::RagSearchResult;
+    use crate::services::{rag_query::RagSearchResult, tool_timeout::execute_with_timeout};
     use serde_json::json;
     use zip::{write::SimpleFileOptions, ZipWriter};
 
@@ -1440,84 +1349,16 @@ mod tests {
     }
 
     #[test]
-    fn tool_catalog_without_mcp_tools_keeps_builtin_tools_only() {
-        let tool_catalog = build_tool_catalog(
-            &[AcpMcpServerConfig::Http(AcpMcpServerHttpConfig {
-                name: "WebMCP".to_string(),
-                url: "https://example.com/mcp".to_string(),
-                headers: vec![AcpNameValuePair {
-                    name: "Authorization".to_string(),
-                    value: "Bearer token".to_string(),
-                }],
-            })],
-            QuestionAnswerProtocol::Responses,
-        );
-
-        let filtered = tool_catalog_without_mcp_tools(&tool_catalog);
-
-        assert_eq!(filtered.request_tools.len(), 4);
-        assert_eq!(
-            filtered.available_names,
-            vec![
-                READ_FILE_TOOL_NAME.to_string(),
-                READ_DOCUMENT_EXCERPT_TOOL_NAME.to_string(),
-                RAG_QUERY_TOOL_NAME.to_string(),
-                OPEN_TARGET_TOOL_NAME.to_string(),
-            ]
-        );
-        assert_eq!(filtered.skipped_mcp_servers, vec!["WebMCP".to_string()]);
-    }
-
-    #[test]
-    fn tool_catalog_without_all_tools_strips_function_tools_too() {
-        let tool_catalog = build_tool_catalog(
-            &[AcpMcpServerConfig::Http(AcpMcpServerHttpConfig {
-                name: "WebMCP".to_string(),
-                url: "https://example.com/mcp".to_string(),
-                headers: Vec::new(),
-            })],
-            QuestionAnswerProtocol::Responses,
-        );
-
-        let filtered = tool_catalog_without_all_tools(&tool_catalog);
-
-        assert!(filtered.request_tools.is_empty());
-        assert!(filtered.available_names.is_empty());
-        assert_eq!(filtered.skipped_mcp_servers, vec!["WebMCP".to_string()]);
-        assert_eq!(filtered.compatibility_fingerprint, "builtin=;mcp=");
-    }
-
-    #[test]
-    fn build_tool_catalog_skips_builtin_mcp_server_for_responses() {
-        let tool_catalog = build_tool_catalog(
-            &[builtin_mcp::builtin_server_config()],
-            QuestionAnswerProtocol::Responses,
-        );
-
-        assert_eq!(tool_catalog.request_tools.len(), 4);
-        assert_eq!(
-            tool_catalog.available_names,
-            vec![
-                READ_FILE_TOOL_NAME.to_string(),
-                READ_DOCUMENT_EXCERPT_TOOL_NAME.to_string(),
-                RAG_QUERY_TOOL_NAME.to_string(),
-                OPEN_TARGET_TOOL_NAME.to_string(),
-            ]
-        );
-        assert!(tool_catalog.skipped_mcp_servers.is_empty());
-    }
-
-    #[test]
     fn responses_tool_compatibility_cache_accepts_recovered_full_mode() {
         let cache_key = responses_tool_compatibility_cache_key(
             "https://example.com/v1",
             &format!("gpt-test-{}", std::process::id()),
-            &build_tool_catalog(&[], QuestionAnswerProtocol::Responses),
+            &build_tool_catalog(QuestionAnswerProtocol::Responses),
         );
 
         store_cached_responses_tool_compatibility(
             &cache_key,
-            ResponsesToolCompatibilityMode::NoMcp,
+            ResponsesToolCompatibilityMode::NoTools,
         );
         store_cached_responses_tool_compatibility(&cache_key, ResponsesToolCompatibilityMode::Full);
         assert_eq!(
@@ -1549,7 +1390,7 @@ mod tests {
 
     #[test]
     fn responses_tool_compatibility_cache_expires_stale_entries() {
-        let tool_catalog = build_tool_catalog(&[], QuestionAnswerProtocol::Responses);
+        let tool_catalog = build_tool_catalog(QuestionAnswerProtocol::Responses);
         let cache_key = responses_tool_compatibility_cache_key(
             "https://example.com/v1",
             &format!("gpt-expire-{}", std::process::id()),
@@ -1557,7 +1398,7 @@ mod tests {
         );
         store_cached_responses_tool_compatibility(
             &cache_key,
-            ResponsesToolCompatibilityMode::NoMcp,
+            ResponsesToolCompatibilityMode::NoTools,
         );
         expire_cached_responses_tool_compatibility(&cache_key);
 
@@ -1569,7 +1410,7 @@ mod tests {
 
     #[test]
     fn responses_tool_compatibility_cache_reprobes_degraded_entries() {
-        let tool_catalog = build_tool_catalog(&[], QuestionAnswerProtocol::Responses);
+        let tool_catalog = build_tool_catalog(QuestionAnswerProtocol::Responses);
         let cache_key = responses_tool_compatibility_cache_key(
             "https://example.com/v1",
             &format!("gpt-reprobe-{}", std::process::id()),
@@ -1577,7 +1418,7 @@ mod tests {
         );
         store_cached_responses_tool_compatibility(
             &cache_key,
-            ResponsesToolCompatibilityMode::NoMcp,
+            ResponsesToolCompatibilityMode::NoTools,
         );
         mark_cached_responses_tool_compatibility_ready_for_reprobe(&cache_key);
 
@@ -1588,31 +1429,8 @@ mod tests {
     }
 
     #[test]
-    fn responses_tool_compatibility_cache_key_tracks_tool_catalog_fingerprint() {
-        let builtin_only = build_tool_catalog(&[], QuestionAnswerProtocol::Responses);
-        let with_mcp = build_tool_catalog(
-            &[AcpMcpServerConfig::Http(AcpMcpServerHttpConfig {
-                name: "WebMCP".to_string(),
-                url: "https://example.com/mcp".to_string(),
-                headers: Vec::new(),
-            })],
-            QuestionAnswerProtocol::Responses,
-        );
-
-        let builtin_key = responses_tool_compatibility_cache_key(
-            "https://example.com/v1",
-            "gpt-test",
-            &builtin_only,
-        );
-        let with_mcp_key =
-            responses_tool_compatibility_cache_key("https://example.com/v1", "gpt-test", &with_mcp);
-
-        assert_ne!(builtin_key, with_mcp_key);
-    }
-
-    #[test]
     fn responses_tool_compatibility_cache_key_changes_when_all_tools_are_removed() {
-        let full_catalog = build_tool_catalog(&[], QuestionAnswerProtocol::Responses);
+        let full_catalog = build_tool_catalog(QuestionAnswerProtocol::Responses);
         let tool_free_catalog = tool_catalog_without_all_tools(&full_catalog);
 
         let full_key = responses_tool_compatibility_cache_key(
@@ -1630,75 +1448,8 @@ mod tests {
     }
 
     #[test]
-    fn retry_without_mcp_tools_only_triggers_for_provider_5xx_with_mcp_tools() {
-        let tool_catalog = build_tool_catalog(
-            &[AcpMcpServerConfig::Http(AcpMcpServerHttpConfig {
-                name: "WebMCP".to_string(),
-                url: "https://example.com/mcp".to_string(),
-                headers: Vec::new(),
-            })],
-            QuestionAnswerProtocol::Responses,
-        );
-        let provider_error = anyhow::anyhow!(
-            "LLM provider responses 请求失败 (500 Internal Server Error): internal error"
-        );
-        let client_error =
-            anyhow::anyhow!("LLM provider responses 请求失败 (400 Bad Request): invalid input");
-        let cancelled_error = anyhow::anyhow!(
-            "failed to request question answering from responses API: send request: context canceled"
-        );
-
-        assert!(should_retry_without_mcp_tools(
-            false,
-            false,
-            &tool_catalog,
-            &provider_error
-        ));
-        assert!(should_retry_without_mcp_tools(
-            false,
-            false,
-            &tool_catalog,
-            &cancelled_error
-        ));
-        assert!(!should_retry_without_mcp_tools(
-            false,
-            true,
-            &tool_catalog,
-            &provider_error
-        ));
-        assert!(!should_retry_without_mcp_tools(
-            false,
-            false,
-            &tool_catalog,
-            &client_error
-        ));
-    }
-
-    #[test]
-    fn retry_without_mcp_tools_triggers_for_provider_400_tool_compatibility_errors() {
-        let tool_catalog = build_tool_catalog(
-            &[AcpMcpServerConfig::Http(AcpMcpServerHttpConfig {
-                name: "WebMCP".to_string(),
-                url: "https://example.com/mcp".to_string(),
-                headers: Vec::new(),
-            })],
-            QuestionAnswerProtocol::Responses,
-        );
-        let provider_error = anyhow::anyhow!(
-            "LLM provider responses 请求失败 (400 Bad Request): unsupported field parallel_tool_calls for mcp tools"
-        );
-
-        assert!(should_retry_without_mcp_tools(
-            false,
-            false,
-            &tool_catalog,
-            &provider_error
-        ));
-    }
-
-    #[test]
     fn retry_without_all_tools_triggers_for_provider_5xx_with_function_tools() {
-        let tool_catalog = build_tool_catalog(&[], QuestionAnswerProtocol::Responses);
+        let tool_catalog = build_tool_catalog(QuestionAnswerProtocol::Responses);
         let provider_error = anyhow::anyhow!(
             "LLM provider responses 请求失败 (500 Internal Server Error): internal error"
         );
@@ -1724,7 +1475,7 @@ mod tests {
 
     #[test]
     fn retry_without_all_tools_triggers_for_provider_400_tool_compatibility_errors() {
-        let tool_catalog = build_tool_catalog(&[], QuestionAnswerProtocol::Responses);
+        let tool_catalog = build_tool_catalog(QuestionAnswerProtocol::Responses);
         let provider_error = anyhow::anyhow!(
             "LLM provider responses 请求失败 (400 Bad Request): model does not support tools or function calling"
         );
@@ -2010,40 +1761,6 @@ mod tests {
         assert_eq!(action.kind, "info");
         assert_eq!(action.title, "第 2 步");
         assert_eq!(action.detail.as_deref(), Some("模型发起了 3 个工具调用"));
-    }
-
-    #[test]
-    fn extract_mcp_tool_calls_preserves_input_and_output_details() {
-        let payload = serde_json::json!({
-            "output": [
-                {
-                    "type": "mcp_call",
-                    "id": "mcp_1",
-                    "server_label": "docs",
-                    "name": "search",
-                    "arguments": {
-                        "query": "rag"
-                    },
-                    "output": {
-                        "hits": 2
-                    }
-                }
-            ]
-        });
-
-        let calls = extract_mcp_tool_calls(&payload);
-
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].call_id.as_deref(), Some("mcp_1"));
-        assert_eq!(calls[0].trace.name, "docs::search");
-        assert_eq!(
-            calls[0].input_detail.as_deref(),
-            Some("{\n  \"query\": \"rag\"\n}")
-        );
-        assert_eq!(
-            calls[0].output_detail.as_deref(),
-            Some("{\n  \"hits\": 2\n}")
-        );
     }
 
     #[test]

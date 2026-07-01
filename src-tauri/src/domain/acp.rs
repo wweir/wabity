@@ -69,10 +69,7 @@ pub struct BuiltinMcpModuleStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BuiltinMcpServerStatus {
-    pub server: AcpMcpServerConfig,
-    pub running: bool,
-    pub last_error: Option<String>,
+pub struct BuiltinAgentToolStatus {
     pub available_modules: Vec<BuiltinMcpModuleStatus>,
 }
 

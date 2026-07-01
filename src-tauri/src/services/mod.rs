@@ -17,4 +17,5 @@ pub mod rag_answer;
 pub mod rag_query;
 pub mod screenshot_review;
 pub mod selection;
+pub mod tool_timeout;
 pub mod translate;

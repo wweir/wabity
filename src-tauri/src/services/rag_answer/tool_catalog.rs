@@ -15,103 +15,23 @@ use super::{
     READ_DOCUMENT_EXCERPT_TOOL_NAME, READ_FILE_TOOL_NAME, RESPONSES_TOOL_COMPATIBILITY_CACHE,
     RESPONSES_TOOL_COMPATIBILITY_CACHE_TTL, RESPONSES_TOOL_COMPATIBILITY_REPROBE_AFTER,
 };
-use crate::{
-    domain::acp::{AcpMcpServerConfig, AcpNameValuePair},
-    services::builtin_mcp,
-};
-
 static HOST_SYSTEM_CONTEXT: OnceLock<HostSystemContext> = OnceLock::new();
 
-pub(super) fn build_tool_catalog(
-    mcp_servers: &[AcpMcpServerConfig],
-    protocol: QuestionAnswerProtocol,
-) -> ToolCatalog {
-    let mut request_tools = vec![
+pub(super) fn build_tool_catalog(protocol: QuestionAnswerProtocol) -> ToolCatalog {
+    let request_tools = vec![
         build_read_file_tool(protocol),
         build_read_document_excerpt_tool(protocol),
         build_rag_query_tool(protocol),
         build_open_target_tool(protocol),
     ];
-    let mut available_names = vec![
+    let available_names = vec![
         READ_FILE_TOOL_NAME.to_string(),
         READ_DOCUMENT_EXCERPT_TOOL_NAME.to_string(),
         RAG_QUERY_TOOL_NAME.to_string(),
         OPEN_TARGET_TOOL_NAME.to_string(),
     ];
-    let mut skipped_mcp_servers = Vec::new();
+    let skipped_mcp_servers = Vec::new();
 
-    for server in mcp_servers {
-        if builtin_mcp::is_builtin_server(server) {
-            continue;
-        }
-
-        if protocol == QuestionAnswerProtocol::ChatCompletions {
-            skipped_mcp_servers.push(mcp_server_name(server).to_string());
-            continue;
-        }
-
-        match server {
-            AcpMcpServerConfig::Http(server) => {
-                let server_name = server.name.clone();
-                available_names.push(format!("mcp:{server_name}"));
-                request_tools.push(build_remote_mcp_tool_definition(
-                    &server_name,
-                    &server.url,
-                    &server.headers,
-                ));
-            }
-            AcpMcpServerConfig::Sse(server) => {
-                let server_name = server.name.clone();
-                available_names.push(format!("mcp:{server_name}"));
-                request_tools.push(build_remote_mcp_tool_definition(
-                    &server_name,
-                    &server.url,
-                    &server.headers,
-                ));
-            }
-            AcpMcpServerConfig::Stdio(server) => {
-                skipped_mcp_servers.push(server.name.clone());
-            }
-        }
-    }
-
-    let compatibility_fingerprint =
-        build_tool_catalog_compatibility_fingerprint(&request_tools, &available_names);
-
-    ToolCatalog {
-        request_tools,
-        available_names,
-        skipped_mcp_servers,
-        compatibility_fingerprint,
-    }
-}
-
-pub(super) fn tool_catalog_without_mcp_tools(tool_catalog: &ToolCatalog) -> ToolCatalog {
-    let mut skipped_mcp_servers = tool_catalog.skipped_mcp_servers.clone();
-    skipped_mcp_servers.extend(
-        tool_catalog
-            .request_tools
-            .iter()
-            .filter(|tool| is_mcp_tool_definition(tool))
-            .filter_map(|tool| {
-                tool.get("server_label")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned)
-            }),
-    );
-
-    let request_tools = tool_catalog
-        .request_tools
-        .iter()
-        .filter(|tool| !is_mcp_tool_definition(tool))
-        .cloned()
-        .collect::<Vec<_>>();
-    let available_names = tool_catalog
-        .available_names
-        .iter()
-        .filter(|name| !name.starts_with("mcp:"))
-        .cloned()
-        .collect::<Vec<_>>();
     let compatibility_fingerprint =
         build_tool_catalog_compatibility_fingerprint(&request_tools, &available_names);
 
@@ -124,14 +44,18 @@ pub(super) fn tool_catalog_without_mcp_tools(tool_catalog: &ToolCatalog) -> Tool
 }
 
 pub(super) fn tool_catalog_without_all_tools(tool_catalog: &ToolCatalog) -> ToolCatalog {
-    let mut stripped = tool_catalog_without_mcp_tools(tool_catalog);
-    stripped.request_tools.clear();
-    stripped.available_names.clear();
-    stripped.compatibility_fingerprint = build_tool_catalog_compatibility_fingerprint(
-        &stripped.request_tools,
-        &stripped.available_names,
-    );
-    stripped
+    let skipped_mcp_servers = tool_catalog.skipped_mcp_servers.clone();
+    let request_tools = Vec::new();
+    let available_names = Vec::new();
+    let compatibility_fingerprint =
+        build_tool_catalog_compatibility_fingerprint(&request_tools, &available_names);
+
+    ToolCatalog {
+        request_tools,
+        available_names,
+        skipped_mcp_servers,
+        compatibility_fingerprint,
+    }
 }
 
 pub(super) fn responses_tool_compatibility_cache_key(
@@ -202,32 +126,6 @@ fn responses_tool_compatibility_cache_guard(
     }
 }
 
-pub(super) fn is_mcp_tool_definition(tool: &Value) -> bool {
-    tool.get("type").and_then(Value::as_str) == Some("mcp")
-}
-
-fn mcp_server_name(server: &AcpMcpServerConfig) -> &str {
-    match server {
-        AcpMcpServerConfig::Http(server) => &server.name,
-        AcpMcpServerConfig::Sse(server) => &server.name,
-        AcpMcpServerConfig::Stdio(server) => &server.name,
-    }
-}
-
-fn build_remote_mcp_tool_definition(
-    server_name: &str,
-    server_url: &str,
-    headers: &[AcpNameValuePair],
-) -> Value {
-    json!({
-        "type": "mcp",
-        "server_label": server_name,
-        "server_url": server_url,
-        "headers": name_value_pairs_to_json_object(headers),
-        "require_approval": "never",
-    })
-}
-
 #[cfg(test)]
 pub(super) fn expire_cached_responses_tool_compatibility(compatibility_cache_key: &str) {
     age_cached_responses_tool_compatibility(
@@ -261,38 +159,13 @@ fn age_cached_responses_tool_compatibility(
 }
 
 fn build_tool_catalog_compatibility_fingerprint(
-    request_tools: &[Value],
+    _request_tools: &[Value],
     available_names: &[String],
 ) -> String {
-    let mut builtin_names = available_names
-        .iter()
-        .filter(|name| !name.starts_with("mcp:"))
-        .cloned()
-        .collect::<Vec<_>>();
+    let mut builtin_names = available_names.to_vec();
     builtin_names.sort();
 
-    let mut mcp_servers = request_tools
-        .iter()
-        .filter(|tool| is_mcp_tool_definition(tool))
-        .map(|tool| {
-            let server_label = tool
-                .get("server_label")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            let server_url = tool
-                .get("server_url")
-                .and_then(Value::as_str)
-                .unwrap_or("unknown");
-            format!("{server_label}@{server_url}")
-        })
-        .collect::<Vec<_>>();
-    mcp_servers.sort();
-
-    format!(
-        "builtin={};mcp={}",
-        builtin_names.join(","),
-        mcp_servers.join(",")
-    )
+    format!("builtin={}", builtin_names.join(","))
 }
 
 fn build_read_file_tool(protocol: QuestionAnswerProtocol) -> Value {
@@ -565,12 +438,4 @@ fn build_function_tool(
             },
         }),
     }
-}
-
-fn name_value_pairs_to_json_object(pairs: &[AcpNameValuePair]) -> Value {
-    let mut object = serde_json::Map::new();
-    for pair in pairs {
-        object.insert(pair.name.clone(), Value::String(pair.value.clone()));
-    }
-    Value::Object(object)
 }
